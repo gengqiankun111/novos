@@ -18,6 +18,52 @@
 | M8 | 容器运行时 + 网关 | 30–32 MB | M5+M6+M7 |
 | M9 | 长期稳定版：压测/收敛/回填 | ≤32 MB | M8 |
 
+**full 模式（Linux 兼容扩展，`--features full`）**
+
+| # | 里程碑 | 内核预算（估） | 前置依赖 |
+|---|---|---|---|
+| M10 | Block I/O + ext4 + Page Cache | 34–36 MB | M9 |
+| M11 | 动态链接 + futex + TLS | 36–38 MB | M10 |
+| M12 | 设备框架 + Capabilities + Seccomp | 37–39 MB | M9（可与 M10/M11 并行） |
+| M13 | 完整 /proc + 信号扩展 + 事件 fd | 38–39 MB | M11 |
+| M14 | Docker 兼容 + apt install + JVM/Python | ≤40 MB | M10+M11+M12+M13 |
+
+### 里程碑依赖关系图
+
+```
+M0 ──────┬──▶ M1 ──────┬──▶ M2 ──────┬──▶ M3 ──┬──▶ M4 ──────┬──▶ M5 ──────┐
+最小启动  │  物理内存   │  虚拟内存   │ syscall │  VFS       │  网络栈    │
+          │            │  +调度      │ +init   │  +ramfs    │  +epoll   │
+          │            │            │ +shell  │            │           │
+          │            │            │        │            │           │
+          │            │            ├──▶ M6 ──┼────────────┼──▶ M7 ────┤
+          │            │            │  Namespace│           │ OverlayFS │
+          │            │            │  +Cgroup │           │           │
+          │            │            │  (可并行) │           │           │
+          │            │            │        │            │           │
+          │            │            │        │            │           ▼
+          │            │            │        │            │     M8 ◀───┘
+          │            │            │        │            │  容器+网关
+          │            │            │        │            │      │
+          │            │            │        │            │      ▼
+          │            │            │        │            │     M9 ◀──── minimal 1.0
+          └────────────┴────────────┴────────┴────────────┘
+                                                         │
+                 ┌───────────────────────────────────────▼────────┐
+                 │           full 模式扩展（--features full）        │
+                 │                                                │
+                 │  M10 ──────▶ M11 ──────────▶ M13 ──────────▶ M14 │
+                 │  ext4+ BIO   动态链接+      完整/proc+       Docker+  │
+                 │  +PageCache  futex+TLS     信号扩展        apt+JVM   │
+                 │                    ▲                              │
+                 │                    │                              │
+                 │  M12 ──────────────┘  (可与 M10/M11 并行)          │
+                 │  设备+Cap+Seccomp                              ≤40MB │
+                 └────────────────────────────────────────────────────┘
+```
+
+**并行策略**：M6（Namespace + Cgroup）只依赖 M3，可以与 M4（VFS）、M5（网络栈）并行推进，缩短总工期。M7（OverlayFS）依赖 M4 + M6，是 M8 的前置。full 模式中 M12（设备+安全）只依赖 M9，可与 M10/M11 并行。
+
 ---
 
 ## M0：最小可启动内核 + 串口输出
@@ -209,6 +255,125 @@ rustup target add x86_64-unknown-none
 
 ---
 
+# 扩展里程碑（full 模式：Linux 兼容容器宿主）
+
+> 以下 M10–M14 在 minimal 版（M0–M9）稳定后推进，通过 Cargo `--features full` 编译。
+> 目标：支持 ext4、Docker 完整生态、`apt install`、JVM/Python。
+> 内存预算调整为 **≤ 40MB**（见 DESIGN.md §13.14）。
+
+| # | 里程碑 | 内核预算（估） | 前置依赖 |
+|---|---|---|---|
+| M10 | Block I/O + ext4 + Page Cache | 34–36 MB | M9 |
+| M11 | 动态链接 + futex + TLS | 36–38 MB | M10 |
+| M12 | 设备框架 + Capabilities + Seccomp | 37–39 MB | M9（可与 M10/M11 并行） |
+| M13 | 完整 /proc + 信号扩展 + getrandom | 38–39 MB | M11（动态链接侧路径） |
+| M14 | Docker 兼容 + apt install + JVM/Python | ≤40 MB | M10+M11+M12+M13 |
+
+---
+
+## M10：Block I/O + ext4 + Page Cache
+
+**目标**：支持磁盘文件系统，为 apt 持久化打底。
+
+**任务**
+- [ ] `BlockDevice` trait + virtio-blk 驱动（§13.3）；
+- [ ] BIO 层（简单队列 + 同步 I/O + 异步回调）；
+- [ ] Page Cache（`AddressSpace`：文件偏移 → 物理页，可 shrink）；
+- [ ] ext4 驱动（`FileSystemDriver` trait 实现）：超级块/inode/dir/extent/日志（最小化）；
+- [ ] `mount -t ext4 /dev/vda /mnt`；
+- [ ] `mmap MAP_SHARED` 文件映射（多进程共享物理页）；
+- [ ] Page cache shrink：脏页回写 + 释放。
+
+**验收**
+- ext4 上创建/读写/删除文件，重启后持久化；
+- 两个进程 mmap 同一 .so 文件 → 共享同一物理页（/proc/self/maps 验证）；
+- **内存基线**：≤36MB。
+
+---
+
+## M11：动态链接 + futex + TLS
+
+**目标**：能跑动态链接的 ELF + pthread 线程。
+
+**任务**
+- [ ] ELF 加载器扩展：识别 `PT_INTERP` + `PT_DYNAMIC` + 设置辅助向量（AT_BASE/AT_PHDR/AT_RANDOM）（§13.6）；
+- [ ] 加载 `ld-musl-x86_64.so.1` 动态链接器到地址空间；
+- [ ] `mmap MAP_SHARED` 文件页映射（依赖 M10 Page Cache）；
+- [ ] futex 系统调用（WAIT/WAKE/REQUEUE，按物理页索引等待队列）（§13.7）；
+- [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR + 上下文切换恢复（§13.8）；
+- [ ] clone 扩展：`CLONE_SETTLS` + `CLONE_CHILD_CLEARTID`；
+- [ ] 移植 musl 动态链接版用户态二进制。
+
+**验收**
+- 运行动态链接的 hello world（`gcc -o hello hello.c` 不加 `-static`）；
+- `pthread_create` 创建线程 + futex 互斥锁正常工作；
+- **内存基线**：≤38MB。
+
+---
+
+## M12：设备框架 + Capabilities + Seccomp
+
+**目标**：Docker 安全模型 + 完整设备文件。
+
+**任务**
+- [ ] `CharDevice` trait + devtmpfs（§13.4）；
+- [ ] 标准设备：`/dev/null`、`/dev/zero`、`/dev/urandom`、`/dev/random`；
+- [ ] devpts：`/dev/ptmx` + `/dev/pts/N`（PTY 对 + 环形缓冲）；
+- [ ] Capabilities：`TaskCreds`（permitted/effective/inheritable/bounding）+ 权限检查（§13.5）；
+- [ ] Seccomp BPF：最小解释器（syscall number 过滤，<500 行）；
+- [ ] `getrandom` 系统调用 + `/dev/urandom`（RDRAND）（§13.9）。
+
+**验收**
+- `echo hello > /dev/null` + `dd if=/dev/zero bs=4096 count=1`；
+- `docker exec` 通过 PTY 进入容器交互；
+- seccomp profile 禁止 `reboot` syscall → 容器内调 reboot 返回 EPERM；
+- **内存基线**：≤39MB。
+
+---
+
+## M13：完整 /proc + 信号扩展 + 事件 fd
+
+**目标**：JVM/Python 可观测性 + 完整信号。
+
+**任务**
+- [ ] /proc 扩展：`/proc/self/maps`、`/proc/self/status`、`/proc/self/exe`、`/proc/self/fd/`（§13.12）；
+- [ ] `/proc/cpuinfo`、`/proc/mounts`、`/proc/filesystems`；
+- [ ] 信号扩展：`sigaction`（SA_SIGINFO + SA_ONSTACK + SA_RESTART）、`sigprocmask`、`sigaltstack`（§13.10）；
+- [ ] 信号到 64 个（实时信号）；
+- [ ] timerfd：`timerfd_create` + `timerfd_settime` + epoll 可监听（§13.11）；
+- [ ] signalfd（可选，事件循环库用）。
+
+**验收**
+- JVM 启动后 `/proc/self/maps` 输出正确的地址空间布局；
+- JVM 捕获 SIGSEGV 做 null 检查正常工作（`sigaltstack` + SA_SIGINFO）；
+- timerfd 到期后 epoll_wait 正确唤醒；
+- **内存基线**：≤39MB。
+
+---
+
+## M14：Docker 兼容 + apt install + JVM/Python
+
+**目标**：full 模式正式达标，跑起 Docker + apt + JVM/Python。
+
+**任务**
+- [ ] veth pair + bridge 虚拟网络设备（Docker CNI 默认网络）（§13.11）；
+- [ ] 完整 DNAT 端口映射规则（`docker -p 8080:80`）；
+- [ ] OCI runtime spec 兼容（config.json 解析 + seccomp/capability 应用）；
+- [ ] containerd-like 守护进程（容器生命周期管理 + image pull）；
+- [ ] 移植 apt + dpkg（动态链接 musl 版）；
+- [ ] FHS 目录结构：`/usr`、`/var/lib/dpkg`、`/etc/apt`；
+- [ ] 移植 OpenJDK（动态链接 + libjvm.so）；
+- [ ] 移植 CPython（动态链接 + libpython3.x.so）；
+- [ ] HTTPS 下载支持（用户态 TLS，内核 TCP 通道）。
+
+**验收**
+- `docker run busybox echo hello` 完整跑通（veth + bridge + overlay + seccomp）；
+- `apt install <package>` 成功安装包到 ext4 文件系统；
+- `java -version` + `python3 --version` 在容器内正常运行；
+- **内存基线**：≤40MB（full 模式最终断言）。
+
+---
+
 ## 开发节奏建议
 
 - 每个里程碑独立可运行，**先跑通再优化**（YAGNI）；
@@ -221,3 +386,168 @@ rustup target add x86_64-unknown-none
 - 单元测试：buddy/slab/rbtree/路径解析/TCP 状态机（`cargo test` 在 host 跑，逻辑与硬件解耦）；
 - 集成测试：QEMU 启动断言（串口日志 + 内存统计）；
 - 回归测试：CI 中 M9 内存断言。
+
+### 各里程碑测试细化
+
+| 里程碑 | 单元测试 | 集成测试 | 内存基线 |
+|---|---|---|---|
+| M0 | 无（无逻辑可测） | QEMU 串口输出 `boot ok` + panic 快照 | 仅记录 .text 大小 |
+| M1 | buddy 分配/释放/合并；slab 复用/回收 | QEMU 内 `Vec::push` 不 panic | 记录 free/used 页数 |
+| M2 | rbtree 插入/最左；上下文切换不丢寄存器 | 多内核线程轮转 + fork COW 验证 | — |
+| M3 | syscall 参数解析；ELF 段加载 | shell 跑 `ls`/`echo`/`cat` | **首次基线**：≤18MB |
+| M4 | 路径解析；dcache 命中/miss | tmpfs 读写 + 删除后内存回落 | dcache shrink 断言 |
+| M5 | TCP 状态机转换；epoll 就绪队列 | QEMU 内 HTTP + 100 连并发 | sk_buff 上限断言 |
+| M6 | pid ns 层级；cgroup 记账 | clone 隔离 + `memory.max=64MB` OOM kill | cgroup 管理对象计数 |
+| M7 | overlay lookup；copy-up 流程 | 写后下层不变 + whiteout 持久 | overlay cache 占用 |
+| M8 | 容器创建全流程（§4.6）；NAT 规则匹配 | `novos run busybox echo hello` + 外网 | **3 容器 ≤32MB** |
+| M9 | 全回归 | 7 天长跑 + 1000 连接 burst | **≤32MB 最终断言** |
+| M10 | BIO 队列；ext4 inode 操作 | ext4 读写 + 重启持久化 | ≤36MB |
+| M11 | futex wait/wake；ELF 动态段解析 | 动态 hello world + pthread | ≤38MB |
+| M12 | seccomp BPF eval；cap 检查 | docker exec PTY + seccomp 拦截 | ≤39MB |
+| M13 | /proc/self/maps 格式；sigaltstack | JVM /proc + SIGSEGV 捕获 | ≤39MB |
+| M14 | Docker 全流程；apt 依赖链 | `docker run` + `apt install` + `java -version` | **≤40MB full 最终断言** |
+
+---
+
+## 风险评估与缓解
+
+| 风险 | 概率 | 影响 | 缓解策略 |
+|---|---|---|---|
+| **TCP 栈复杂度超预期** | 高 | M5 延期，吃掉后续预算 | 先实现 NewReno（代码更小），Cubic 留到 M9；TCP 状态机用单元测试先行验证 |
+| **32MB 预算超标** | 中 | M9 无法达标 | 从 M3 起每阶段测量基线，超标即排查（不靠编译选项糊弄）；shrink 路径优先实现 |
+| **Rust `no_std` crate 缺失** | 低 | 某些子系统需自实现 | 网络栈/TCP 等核心模块自实现（不依赖外部 crate），基础工具 crate（spin/bitflags）已成熟 |
+| **OverlayFS copy-up 正确性** | 中 | 容器写数据丢失 | 大量边界测试：并发写、大文件分块、白名单覆盖、原子 rename 中断恢复 |
+| **Cgroup OOM 误杀** | 低 | 容器进程被错误 kill | 记账路径用原子计数 + 单元测试验证 `charge`/`uncharge` 配对 |
+| **中断处理性能瓶颈** | 中 | 网络吞吐低 | softirq 下半部延迟处理 + sk_buff 批量投递 |
+| **单核调度饥饿** | 低 | 低优先级进程不运行 | vruntime clamp 防饿死 + 定期测试验证公平性 |
+
+---
+
+## CI/CD 流水线
+
+### 流水线阶段
+
+```
+PR 提交
+  │
+  ▼
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  Stage 1     │───▶│  Stage 2     │───▶│  Stage 3     │───▶│  Stage 4     │
+│  格式检查     │    │  单元测试     │    │  QEMU 集成   │    │  内存回归    │
+│              │    │              │    │              │    │              │
+│ · cargo fmt  │    │ · cargo test │    │ · 启动断言    │    │ · kernel_used│
+│ · clippy     │    │ · 全模块      │    │ · shell 命令  │    │   ≤32MB     │
+│ · 编译无警告  │    │              │    │ · 内存统计    │    │ · shrink 断言│
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+                                                                  │
+                                                                  ▼
+                                                          ┌──────────────┐
+                                                          │  Stage 5     │
+                                                          │  文档检查     │
+                                                          │              │
+                                                          │ · bench 回填  │
+                                                          │ · DESIGN 同步 │
+                                                          └──────────────┘
+```
+
+### GitHub Actions 配置（参考）
+
+```yaml
+name: CI
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none
+          components: rust-src, clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy -- -D warnings
+      - name: unit tests
+        run: cargo test --workspace
+      - name: install qemu
+        run: sudo apt install -y qemu-system-x86
+      - name: build kernel
+        run: make build
+      - name: qemu integration
+        run: make test-integration
+      - name: memory regression
+        run: make test-memory
+```
+
+### 跳过策略
+
+- 纯文档变更（`docs/` 目录）→ 跳过 QEMU 集成和内存回归（标记 `[ci skip-build]`）；
+- 单模块改动 → 只跑相关模块的单元测试（路径过滤）。
+
+---
+
+## 代码审查清单
+
+PR 合并前，审查者逐项确认：
+
+### 通用项
+- [ ] `cargo fmt` + `cargo clippy -D warnings` 通过
+- [ ] 公开 API 有 `///` 文档注释
+- [ ] `unsafe` 块有 `// SAFETY:` 不变量说明
+- [ ] 无 `unwrap()`/`expect()` 在非初始化路径（用 `?` 传播错误）
+- [ ] 无 `todo!()`/`unimplemented!()` 残留
+
+### 内存相关
+- [ ] 新增 `Arc`/`Box`/`Vec` 的分配路径不引入循环引用（`Weak` 破环）
+- [ ] 缓存类结构（dcache/icache/sk_buff）有 shrink 路径或水位上限
+- [ ] 页分配路径有 `charge`/`uncharge` 配对（Cgroup 记账）
+- [ ] 无 `unsafe` 直接操作物理页帧绕过 buddy
+
+### 并发相关
+- [ ] 中断上下文（`#[interrupt]`）只用 `Spinlock`，不用 `Mutex`
+- [ ] 锁获取顺序一致（避免死锁：mm → fs → net → sched）
+- [ ] 无 `while !lock.try_lock() {}` 自旋（用 `lock()` 或 `WaitQueue`）
+
+### 安全相关
+- [ ] syscall 入口校验用户态指针（`copy_from_user`/`copy_to_user`）
+- [ ] 无内核地址直接暴露到用户态（无 `/proc/kallsyms` 等价物）
+- [ ] 容器隔离路径（clone/pivot_root/cgroup）按 §4.6 流程，无捷径
+
+---
+
+## 发布策略
+
+### 版本号
+
+遵循 SemVer：`MAJOR.MINOR.PATCH`
+
+- **MAJOR**：ABI 破坏性变更（syscall 编号/参数语义变更）
+- **MINOR**：新里程碑完成（M0–M9 对应 0.1–0.9）
+- **PATCH**：bug 修复、性能优化（不影响 ABI）
+
+| 里程碑 | 版本 | 阶段 |
+|---|---|---|
+| M0–M2 | 0.1–0.2 | alpha（内核自测） |
+| M3–M5 | 0.3–0.5 | beta（用户态可用） |
+| M6–M7 | 0.6–0.7 | rc（容器隔离可用） |
+| M8 | 0.8 | rc（容器+网关跑通） |
+| M9 | 1.0 | **正式发布（minimal）**（32MB 达标 + 稳定） |
+| M10–M11 | 1.1–1.2 | full alpha（ext4 + 动态链接） |
+| M12–M13 | 1.3–1.4 | full beta（Docker 安全模型 + 完整信号） |
+| M14 | 2.0 | **正式发布（full）**（40MB 达标 + Docker/apt/JVM/Python 可用） |
+
+### 发布物
+
+每个版本产出：
+1. `novos-kernel-x86_64.bin`——内核镜像（release + strip）；
+2. `novos-initramfs.cpio`——initramfs（init + shell + container runtime）；
+3. `docs/bench/<version>/`——实测内存数据回填；
+4. `CHANGELOG.md`——变更记录。
+
+### 回滚策略
+
+- 每个 PR 必须独立可 revert（不依赖其他未合并 PR）；
+- 内存回归失败 → 自动 block PR，不允许合并；
+- 版本发布后发现严重 bug → 回退到上个 PATCH 版本，不就地 hotfix（保持线性历史）。
