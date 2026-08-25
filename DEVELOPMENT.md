@@ -94,7 +94,7 @@
 - [ ] ELF 加载器（静态链接 musl 二进制）。
 - [ ] `init`（PID 1）+ 简易 `shell`（`fork`+`exec`+管道）。
 - [ ] **PID 1 崩溃自愈**：内核检测到 PID 1 退出时，尝试执行 `rescue_init`（.rodata 内嵌），带**60 秒反跳计时器**（3 次崩溃后强制 Watchdog 复位）。
-- [ ] 文件描述符表、`/dev/uart` 设备文件。
+- [ ] 文件描述符表（**`Vec<Option<Arc<File>>>` + 低 64 位空闲位图**，评审定案：fd 稠密整数数组 O(1)，非 BTreeMap）、`/dev/uart` 设备文件。
 
 **验收标准**：
 - `make run` 后进入 shell，能执行 `ls`/`cat`/`echo` 等命令。
@@ -106,7 +106,7 @@
 **目标**：完整文件系统抽象。
 
 - [ ] VFS 层：`SuperBlock/Inode/Dentry/File`（§3.6）。
-- [ ] dcache：hash 查找 + LRU 可回收 + shrink_target。
+- [ ] dcache：hash 查找 + LRU 可回收 + shrink_target（哈希键用 **FNV-1a**——热路径哈希表禁 SipHash，见 DESIGN §3.6）。
 - [ ] ramfs（initramfs 挂载） + tmpfs（页缓存文件）。
 - [ ] 系统调用：`open/read/write/close/stat/mkdir/rmdir/unlink/readdir/mount`。
 - [ ] 路径解析（§4.3）+ 挂载点遍历。
@@ -126,7 +126,7 @@
 - [ ] **Skb 内存池（评估）**：DMA 池 + Arc 引用计数零拷贝接收路径（池上限 256KB）。
 - [ ] **TCP 已确认段批量回收**：ACK 后 `snd_una` 前移，批量释放 retrans_queue 已确认 Skb（Arc 归零自动还池，DESIGN §4.5 新增）。
 - [ ] `socket/bind/listen/accept/connect/send/recv`。
-- [ ] `epoll_create/epoll_ctl/epoll_wait`（LT+ET）。
+- [ ] `epoll_create/epoll_ctl/epoll_wait`（LT+ET；`HashMap<fd, EpollItem>` + `VecDeque` 就绪队列，**单实例 fd > 1024 且高频增删才升红黑树**，见 DESIGN §3.8）。
 - [ ] **SNTP 客户端**（UDP 123，工业时钟校准）。
 
 **验收标准**：

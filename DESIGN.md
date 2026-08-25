@@ -316,6 +316,18 @@ pub struct Pte(u64); // P | RW | US | PWT | PCD | A | D | PAT | G | …PFN…
 - **COW**：`fork` 后父子共享只读页，写时复制；页表项 `P+!RW` + 引用计数。
 - 第一版不实现 swap（预算内不放磁盘交换），缺页来源 = 匿名页 + 文件 mmap。
 
+**VMA 管理决策（红黑树 vs Maple Tree，2026-08 评审定案）**：
+- **第一版：BTreeMap（红黑树）按起始地址索引 VMA**，理由：
+  - 容器进程（非大型数据库）的 VMA 数通常 20~100 个，`O(log n) ≈ 7` 次指针跳转，
+    缺页异常路径上的开销可忽略；
+  - mmap/munmap 是低频系统调用（远低于 read/write），红黑树 `O(log n)` 维护不是瓶颈；
+  - 实现约 300 行，简单可靠。
+- **远期扩展口（`--features advanced-vma`）**：单进程 VMA 数 > 512 或并发缺页成为瓶颈时，
+  评估迁移 **Maple Tree**（RCU 安全的区间 B-Tree，Linux 6.1+）。第一版单核（UP）无 RCU 需求，
+  引入将带来 3000~4000 行代码、2~3 倍节点内存开销和复杂的分裂/合并逻辑——得不偿失。
+  - 预留 `VmaTree` trait 接口（`find_vma` / `insert` / `remove` / `find_prev`），
+    实现细节（BTreeMap vs Maple Tree）通过 feature flag 切换，见 [EXTENSIONS.md](EXTENSIONS.md)。
+
 ### 3.3 任务 / 进程
 
 ```rust
@@ -345,7 +357,10 @@ pub struct FsContext {
 }
 
 pub struct FileTable {
-    pub fds: BTreeMap<u32, Arc<File>>, // fd -> File
+    // fd 是稠密整数：数组索引 O(1) 且缓存友好。BTreeMap 是"杀鸡用牛刀"，
+    // 评审定案改为 Vec<Option<Arc<File>>> + 空闲位图（见下方决策）。
+    pub fds: Vec<Option<Arc<File>>>,
+    pub free_bitmap: u64,          // 低 64 位空闲位图（fd 0-63）
     pub next_fd: u32,
     pub lock: Spinlock,
 }
@@ -362,6 +377,15 @@ pub struct File {
 - `Arc<Mm>/Arc<FsContext>/Arc<FileTable>` → **clone 即 fork 语义**；写时复制由 COW 页表完成。
 - 线程 = 共享 `mm/files` 的 Task；进程 = 独占 `mm` 的 Task，用 `tgid` 区分。
 - 内核栈固定大小，栈溢出用 guard page 检测（预算内）。
+
+**fd 表决策（BTreeMap → Vec + 空闲位图，2026-08 评审定案）**：
+- fd 是稠密整数（0,1,2,…），**数组索引 O(1) 且缓存友好**；`BTreeMap<u32, Arc<File>>` 每次
+  open/close 有 log n 开销与指针跳转，对边缘设备（几十到几百 fd）是"杀鸡用牛刀"。
+- 改为 `Vec<Option<Arc<File>>>` + 低 64 位空闲位图：
+  - 分配 = 位图取反找首个 0 位（`trailing_ones`），无空位则 `Vec::push(None)` 扩容；
+  - 释放 = `fds[fd] = None` + 位置 1，O(1)；
+  - 超出 64 的 fd 退化为线性扫 `Vec` 找 `None`（fd > 64 场景罕见，可接受）。
+- 与 `Arc<File>` 组合，dup/dup2 只是复制 `Arc`，无深度拷贝。
 
 ### 3.4 Namespace
 
@@ -498,6 +522,13 @@ pub struct DCache {
 - 挂载通过 `Dentry.mount` 跳转：路径解析到挂载点时换 `SuperBlock`。
 - `Arc<Inode>` + `Weak<Dentry>` 关系，防止 inode 因 dentry 环泄漏。
 
+**哈希函数决策（2026-08 评审定案）**：
+- **热路径哈希表（dcache、epoll items、conntrack、ARP 等）禁用 Rust 默认 SipHash**——
+  SipHash 防 DoS 但慢（内核环境可信，无用户可控哈希冲突攻击面，安全开销不可接受）。
+- 统一使用 **FNV-1a**（字符串键，如 dcache 的 `parent_ino+name`）与 **xxHash**（整数键，
+  如 fd/端口/五元组）；均为无状态、无分配，内联可读。
+- 全局哈希策略见 [EXTENSIONS.md](EXTENSIONS.md)（远期：可扩展哈希 rhashtable 增量 resize）。
+
 ### 3.7 OverlayFS
 
 ```rust
@@ -592,7 +623,9 @@ pub struct Tcb {
     pub retrans_queue: VecDeque<Skb>,
 }
 
-/// epoll：epoll 实例 = 关注 fd 集合 + 就绪队列
+/// epoll：epoll 实例 = 关注 fd 集合 + 就绪队列。
+/// 数据结构决策：边缘设备 fd 数几十~几百，HashMap<u32, EpollItem> + VecDeque 足够。
+/// 设阈值：当单实例 fd > EPOLL_USE_RBTREE_THRESHOLD(=1024) 且高频增删时才升级红黑树。
 pub struct Epoll {
     pub items: HashMap<u32, EpollItem>,   // fd -> 关注事件 + 回调
     pub ready: VecDeque<EpollEvent>,      // 就绪队列（LT/ET）
@@ -611,6 +644,25 @@ pub struct EpollItem {
 - **socket 与协议分离**：`Socket` 面向 fd 层，`Tcb` 是 TCP 专用状态，UDP 只有 `Socket`。
 - **epoll 用就绪队列 + 等待队列**实现 O(1) 就绪获取；`Skb.allocated` 让网络缓冲可记账、可回收（预算控制点）。
 - **conntrack** 为网关 NAT 服务，条目带老化定时器（§5.7）。
+
+**网络/内核表数据结构选型（2026-08 评审定案，写入各实现章节）**：
+
+| 表 | 第一版结构 | 说明 |
+|---|---|---|
+| conntrack | 哈希表 + LRU 老化 | 哈希键 = 五元组；条目老化定时器（§4.7） |
+| ARP | 哈希表 + 超时 | IP → MAC，表项超时回收 |
+| 路由 | 线性表（数百条以内） | 留 PATRICIA trie 接口（远期，见 EXTENSIONS.md） |
+| Page Cache | HashMap（`ino+offset`） | 留基数树接口（远期，见 EXTENSIONS.md） |
+| TCP 乱序段 | `BTreeMap<seq, Skb>` | 按序列号有序，滑动窗口前移时删最左 |
+| 等待队列 | 侵入式链表 | 无锁读 + 唤醒遍历（§3.9） |
+| Buddy | per-CPU 空闲链表 | SMP 预留：`cpu_rq` 同款 per_cpu 化（§11.1） |
+| epoll items | `HashMap<u32, EpollItem>` | fd > 1024 且高频增删才升红黑树（见上） |
+| 调度 runqueue | 侵入式红黑树 | CFS 刚需：任意删除 O(log n)（§4.2） |
+| 文件描述符表 | `Vec<Option<Arc<File>>>` + 空闲位图 | 稠密整数 O(1) 索引（§3.3） |
+| VMA | `BTreeMap<VirtAddr, Vma>` | 容器场景 <100 个，Maple Tree 留远期（§3.2） |
+
+- **哈希碰撞处理（远期）**：不用桶内红黑树，改用**可扩展哈希（rhashtable）增量 resize**——
+  内核哈希表的核心设计哲学；第一版用固定桶数 + FNV/xxHash 即够，见 [EXTENSIONS.md](EXTENSIONS.md)。
 
 ### 3.9 同步原语
 
@@ -667,6 +719,10 @@ pub struct Arc<T>;  pub struct Weak<T>;   // 引用计数共享所有权
 - 周期 tick 触发调度点 + 抢占检查；
 - 第一版**单核**，SMP 留到稳定版（避免 per‑CPU 复杂度吃掉内存预算）；
 - **RT 预留（§19.1）**：调度器从第一天按"RT 类（优先级 + 抢占）+ 普通类（CFS/vruntime）"双队列分层设计；第一版只实现普通类，但 `SchedEntity` 与运行队列结构须能容纳 RT 类，避免后期重构。
+- **runqueue 结构定案（2026-08 评审）**：**保留红黑树，不加备选**。二叉堆无法高效处理
+  "睡眠唤醒任意任务"（唤醒需从堆中删除任意节点，heap-delete 退化为 O(n) 扫描）；
+  CFS 的抢占/唤醒/超时删除全是"任意节点删除"，红黑树 O(log n) 是刚需。
+  定时器不在此列——定时器是"到期即最顶"语义，用最小堆（M9 改分层时间轮），见 §6.2⑥。
 
 #### 优先级反转（PIP）—— 2026-08 评审补充
 
@@ -2126,6 +2182,18 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | 15 | 启动链路用 rust-osdev **bootloader + x86_64 + acpi** 的类型建模（IdtEntry/Gdt/PageTable/VirtAddr） | blog_os / rust-osdev | §1.3/1.4 |
 | 16 | 内存预算可测：子系统 **cell 化 + used/limit 台账**（借鉴 Theseus cell 边界、Hubris 确定性内存） | Theseus / Hubris | §5.3、§10.3 |
 | 17 | unsafe 占比目标 <5%：RustyHermit 实测 ≈3.3% 佐证可行性 | RustyHermit（PLOS'19） | §6.3⑥ |
+
+**架构级预留（远期优化，feature-gated，2026-08 评审定案）**：
+
+| 远期项 | 触发条件 | 内容 | 现状 |
+|---|---|---|---|
+| **可扩展哈希（rhashtable）** | 任一哈希表（conntrack/ARP/dcache）单表条目 > 1K 且 resize 成为瓶颈 | 桶内不再用红黑树；哈希表**增量 resize**（新桶渐进迁移，无全表拷贝停顿）；第一版固定桶数 + FNV/xxHash 已够 | 第一版哈希表按固定桶数实现；`HashTable` trait 预留 resize 接口 |
+| **Maple Tree（VMA）** | 单进程 VMA > 512 或并发缺页瓶颈 | RCU 安全区间 B-Tree，替代 VMA 红黑树；`--features advanced-vma` | 第一版 BTreeMap，`VmaTree` trait 预留（§3.2） |
+| **PATRICIA trie（路由）** | 路由表 > 数百条 | 最长前缀匹配；第一版线性表 | `RouteTable` trait 预留（§13.3） |
+| **基数树（Page Cache）** | Page Cache 命中率优化到极致 | `ino+offset` → 基数树按文件组织；第一版 HashMap | `PageCache` trait 预留（§13.3） |
+
+> 原则：**第一版一律最简结构**（规模小、开销可忽略），以上全部通过 trait / feature flag 留扩展口，
+> 详见 [EXTENSIONS.md](EXTENSIONS.md)。
 
 ### 14.2 各子系统借鉴落地明细
 
