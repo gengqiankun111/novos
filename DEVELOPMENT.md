@@ -119,9 +119,9 @@ rustup target add x86_64-unknown-none
 **任务**
 - [ ] 解析 bootloader 提供的物理内存映射（E820/memory map），构建 `PageFrame` 数组；
 - [ ] Buddy 分配器（order 0–10）：分配、分裂、释放、合并；
-- [ ] 内核堆：Slab 分配器（固定 size 阶梯 64B–4K）；
+- [ ] 内核堆：Slab 分配器（固定 size 阶梯 64B–4K，**侵入式空闲链表**，勘误 §9）；
 - [ ] `GlobalAlloc` 接入：`Box`/`Vec`/`Arc` 直接可用；
-- [ ] 页帧引用计数 + 统计（`used/free` 计数）。
+- [ ] 页帧引用计数 + 统计（`used/free` 计数）+ **可移动页标记（MIGRATE_MOVABLE）**（勘误 §10）；
 
 **验收**
 - 单元测试：buddy 分配/释放无泄漏、无重叠；slab 对象复用正确；
@@ -139,6 +139,8 @@ rustup target add x86_64-unknown-none
 - [ ] CFS 简化调度器（§4.2）：vruntime 红黑树、tick 抢占（**结构预留 RT 类双队列**，§19.1）；
 - [ ] `fork`（克隆 Task + 复制页表，COW）、`exit`、`waitpid`；
 - [ ] 同步原语：`Spinlock`/`Mutex`/`WaitQueue`（**内置优先级继承 PIP**，§4.2 评审补充）；
+- [ ] **RT 任务强制 Spinlock（关抢占）+ CFS Mutex 关内核抢占**（勘误 §11，防优先级反转死锁闭环）；
+- [ ] **per-CPU 占位**：`per_cpu!` 宏 + `cpu_rq(cpu_id)` 访问器（勘误 §7，SMP 预热）；
 - [ ] 定时器最小堆 + 时钟中断 + **时钟源抽象/monotonic/RTC 预留**（§19.1）。
 
 **验收**
@@ -157,6 +159,7 @@ rustup target add x86_64-unknown-none
 - [ ] ELF 加载器（静态链接 musl 二进制）；
 - [ ] 第一版 libc 子集（或直接移植 musl 静态编译目标）；
 - [ ] `init`（PID 1）+ 简易 `shell`（`fork`+`exec`+管道）；
+- [ ] **PID 1 崩溃自愈**：`rescue_init`（.rodata 内嵌最小 Shell）+ `panic → rescue → watchdog reset` 三级兜底（勘误 §3）；
 - [ ] 文件描述符表、`/dev/uart` 设备文件。
 
 **验收**
@@ -175,7 +178,8 @@ rustup target add x86_64-unknown-none
 - [ ] ramfs（initramfs 挂载）；
 - [ ] tmpfs（页缓存文件，匿名页支持）；
 - [ ] 系统调用：`open/read/write/close/stat/mkdir/rmdir/unlink/readdir/mount`；
-- [ ] 路径解析（§4.3）+ 挂载点遍历。
+- [ ] 路径解析（§4.3）+ 挂载点遍历；
+- [ ] **futex 逻辑键 + COW 迁移**（勘误 §2，VFS inode 就位后实现：键 = (Inode, 偏移)/(虚拟区, 虚拟地址)）。
 
 **验收**
 - 在 tmpfs 上完整读写/建目录/枚举目录；
@@ -192,6 +196,7 @@ rustup target add x86_64-unknown-none
 - [ ] IPv4：收发、分片最小化、ICMP echo；
 - [ ] UDP socket；
 - [ ] TCP：三次握手、滑动窗口、重传、Cubic（或 NewReno）、TIME_WAIT（§4.5）；
+- [ ] **Skb 内存池（评估）**：DMA 池 + Arc 引用计数零拷贝接收路径（勘误 §4，池上限 256KB）；
 - [ ] `socket/bind/listen/accept/connect/send/recv` 系统调用；
 - [ ] `epoll_create/epoll_ctl/epoll_wait`（LT+ET，§3.8）；
 - [ ] **SNTP 客户端**（UDP 123，最小实现）——工业时钟校准（§19.2 评审补充）；
@@ -246,6 +251,7 @@ rustup target add x86_64-unknown-none
 **任务**
 - [ ] 类 runC 命令：`novos run <image> <cmd>`（§4.6 完整流程）；
 - [ ] 容器 rootfs 用 OverlayFS 组装；`pivot_root`；
+- [ ] **OverlayFS 稀疏 copy-up**（extent-based，只复制被修改块）+ **容器日志目录默认 tmpfs**（勘误 §1，防写放大 OOM）；
 - [ ] 容器内挂 `/proc`（pid ns 视图）、设 cgroup；
 - [ ] 网关：IP 转发 + conntrack + MASQUERADE + 端口映射（§4.7）；
 - [ ] 基础防火墙（线性规则表）；
@@ -271,6 +277,7 @@ rustup target add x86_64-unknown-none
 - [ ] 性能：容器启动延迟、网关吞吐达标值回填；
 - [ ] **秒级冷启动**：deferred init + 只初始化必需驱动（§19.1）；
 - [ ] **Page Cache 预算闭环**：`total_inactive_file` 可回收 + `vm.dirty_ratio=5%` 缩紧（§5.3 评审补充）；
+- [ ] **compact_zone + 分层时间轮落地**（勘误 §5/§10，order≥3 失败触发内存紧缩；时间轮换下最小堆）。
 - [ ] 看门狗 + 掉电保护（日志原子写 / FS 一致性）；
 - [ ] 可观测性：环形日志 + 落盘 + 健康指标（内存/fd/CPU）；
 - [ ] panic 可读化 + crash dump（供远程诊断）。
@@ -354,7 +361,7 @@ rustup target add x86_64-unknown-none
 - [ ] 标准设备：`/dev/null`、`/dev/zero`、`/dev/urandom`、`/dev/random`；
 - [ ] devpts：`/dev/ptmx` + `/dev/pts/N`（PTY 对 + 环形缓冲）；
 - [ ] Capabilities：`TaskCreds`（permitted/effective/inheritable/bounding）+ 权限检查（§13.5）；
-- [ ] Seccomp BPF：最小解释器（syscall number 过滤，<500 行）；
+- [ ] Seccomp BPF：最小解释器（syscall number 过滤，<500 行）+ **高风险调用参数值匹配**（eq/ne/masked_eq，至少 mount/ptrace/openat/execve/reboot/clone，勘误 §12）；
 - [ ] `getrandom` 系统调用 + `/dev/urandom`（RDRAND）（§13.9）；
 - [ ] （中期评估）**USB Host 最小集**：USB 串口 / U 盘 / 网卡（§19.1，驱动跟着目标设备走）。
 
@@ -376,7 +383,8 @@ rustup target add x86_64-unknown-none
 - [ ] 信号扩展：`sigaction`（SA_SIGINFO + SA_ONSTACK + SA_RESTART）、`sigprocmask`、`sigaltstack`（§13.10）；
 - [ ] 信号到 64 个（实时信号）；
 - [ ] timerfd：`timerfd_create` + `timerfd_settime` + epoll 可监听（§13.11）；
-- [ ] signalfd（可选，事件循环库用）。
+- [ ] signalfd（可选，事件循环库用）；
+- [ ] **Block I/O 电梯调度（评估）**：READ 优先 + 写 LBA 合并的极简 Deadline（勘误 §6，~300 行）。
 
 **验收**
 - 动态链接 busybox（musl）启动后 `/proc/self/maps` 输出正确的地址空间布局；

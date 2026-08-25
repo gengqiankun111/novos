@@ -5,6 +5,9 @@
 - 定位：面向内存受限设备（256MB–2GB）的**微型容器宿主** —— RTOS 的占地，Linux 的生态，Rust 的安全
 - 硬性目标：**常驻内存 ≤ 32MB** 稳定运行容器工作负载
 
+> ⚠️ **勘误**：2026-08-26 深度架构评审发现 12 项未覆盖/过于乐观的工程问题（OverlayFS 写放大、Futex COW、Init 自愈、SMP 预热、零拷贝、碎片化等）。
+> **补救方案见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md)**，本文档对应章节已内联关键修正。
+
 ---
 
 ## 1. 总览与设计哲学
@@ -49,7 +52,11 @@ Novos‑OS 只解决一个问题：**用最小的内核常驻开销，稳定运�
 - **用户态 ABI**：ELF64 + System V psABI，`musl` 静态链接（第一版不做动态加载器）。
 - **内核对象句柄**：文件描述符（fd）是唯一 IPC/IO 抽象，容器隔离通过 fd 表 + namespace 组合实现。
 
+> **PID 1 崩溃自愈（勘误 ①）**：PID 1（init）崩溃时**不立即 panic**——尝试执行静态编译进内核 `.rodata` 的 `rescue_init`（最小 Shell）；rescue 也失败才触发**硬件 Watchdog 复位**（三级兜底：`panic → rescue → watchdog reset`）。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §3。
+
 ### 1.3 启动流程
+
+> **PlatformInfo 抽象（勘误 ③）**：启动信息（内存布局/中断控制器基址/PCIe MMIO/时钟频率）在 x86（Multiboot/PVH）与 ARM（Device Tree）下是两套完全不同的结构。arch 层统一抽象 **`PlatformInfo`**：x86 在 `boot.rs` 解析后填充，ARM 在 `boot.S` 后调 `dtb_parse()` 填充；**内核核心（内存管理）只认 PlatformInfo**。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §8。
 
 ```
 ┌─────────────┐    ┌──────────────┐    ┌─────────────────┐
@@ -253,10 +260,12 @@ pub struct BuddyAllocator {
 }
 
 /// Slab 分配器：按对象大小分 cache
+/// ⚠️ 勘误：空闲对象池**不用 Vec<*mut u8>**（内存压力下扩容触发递归分配，且 Vec 本身不归还 Buddy）。
+/// 改**侵入式空闲链表** `free_list: *mut u8`（对象释放头插，零额外内存），对齐 Linux kmem_cache。
 pub struct SlabCache {
     pub size: usize,              // 对象大小
     pub align: usize,
-    pub free: Vec<*mut u8>,       // 空闲对象池（优先从 partial slab 取）
+    pub free_list: *mut u8,       // 侵入式空闲链表头（勘误 §9，替代 Vec）
     pub full: Vec<*mut Page>,     // 已满 slab 页
     pub partial: Vec<*mut Page>,  // 部分使用 slab 页
     pub lock: Spinlock,
@@ -514,7 +523,13 @@ pub struct Whiteout { /* upperdir 中的 .wh.<name> 占位 */ }
 - **copy‑up**：写/改上层未有的文件时，先把下层文件复制到 upper，再修改；读不触发。
 - `OvlInode.redirect` 支持目录重定向（`redirect_dir` feature），第一版可禁用以省内存。
 
+> **写放大 OOM（勘误 ①）**：全量 copy-up 会把整个大文件复制到 upper，32MB 内存下并发写大文件瞬间挤爆 Page Cache。
+> 改**稀疏 copy-up（extent-based）**：只复制被修改的块；**容器日志目录（/var/log 等）默认挂 tmpfs**，禁止持久化日志触发 copy-up。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §1。
+
 ### 3.8 网络栈
+
+> **零拷贝接收路径（勘误 ②）**：`Skb { data: Vec<u8> }` 单包 3 次拷贝（DMA→Vec→socket→重传）+ 频繁分配，100Mbps 即占满 CPU。
+> 评估期改**内存池 + 引用计数**：`Skb { ptr: *mut u8, len }` 指向预分配 DMA 池页，clone 只 `Arc` 增引用，协议层处理完归还池（池上限 256KB，超限回落内核堆）。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §4。
 
 ```rust
 pub struct NetStack {
@@ -634,6 +649,10 @@ pub struct Arc<T>;  pub struct Weak<T>;   // 引用计数共享所有权
 3. partial 全空 → 整页归还 buddy（内存可回笼）。
 
 **回收路径（shrink）：**
+
+> **内存碎片化（勘误 §10）**：长时间运行后 4K 页频繁分配释放 → 碎片化，order 9（2MB 大页/DMA）分配必然失败。
+> 引入**可移动页（MIGRATE_MOVABLE）**：用户态匿名页 + Page Cache 标记 MOVABLE，页表等内核结构 UNMOVABLE；
+> order ≥ 3 分配失败时触发 **`compact_zone()`**（低阶可移动页拷贝合并成高阶连续区）。
 - `dcache.lru` / `icache` 按 LRU 逐出未引用条目 → 释放 inode/dentry 对象到 slab；
 - `sk_buff` 超过水位 → 丢弃/压缩（TCP 已确认的段可释放）；
 - 匿名页回收：第一版无 swap，优先级最低（只做 cache 回收）；
@@ -711,6 +730,9 @@ write(ovl_inode, ...):
 
 - 读路径零拷贝（直接读 lower）；只有写才触发 copy‑up；
 - 大文件 copy‑up 按需分块，避免一次性吃满内存。
+
+> **定时器扩展（勘误 ②）**：1000+ TCP 连接时最小堆 O(n) 维护成本过高。
+> 评估期换**分层时间轮（Hierarchical Timing Wheels）**：O(1) 入队/滴答推进；五层轮（1ms/16ms/256ms/4s/64s）覆盖分钟级保活；最小堆保留给少量高精度场景。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §5。
 
 ### 4.5 TCP 状态机与拥塞控制
 
@@ -1280,6 +1302,9 @@ pub struct MemStat {
 
 ## 11. SMP 演进路线
 
+> **架构预留（勘误 ③）**：现代 ARM Cortex-A 几乎全多核，"M9 评估"会把 SMP 拖成后期推倒重来。
+> **第一版就引入 per-CPU 占位**（哪怕只初始化 CPU 0）：`per_cpu!` 宏 + `cpu_rq(cpu_id)` 访问器；调度器红黑树从第一天按 `cpu_rq(cpu_id)` 组织，SMP 打开 = 多实例化而非重构。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §7。
+
 ### 11.1 第一版：单核（UP）
 
 - 单一运行队列，`Spinlock` 保护，无需 IPI；
@@ -1636,10 +1661,13 @@ fn check_cap(task: &Task, cap: CapSet) -> bool {
 Docker 默认 seccomp profile 过滤危险 syscall。需要最小化 BPF 解释器：
 
 ```rust
-/// seccomp filter——BPF 字节码解释执行（仅 syscall number 过滤）
+/// seccomp filter——BPF 字节码解释执行
+/// ⚠️ 勘误：仅过滤 syscall number 形同虚设（攻击者可调合法 openat 打开 /etc/shadow）。
+/// 升级为**参数值匹配**（eq/ne/masked_eq），至少覆盖 mount/ptrace/openat/execve/reboot/clone 等 10 个高风险调用参数校验。
 pub struct SeccompFilter {
     pub code: Vec<BpfInsn>,    // BPF 指令序列
     pub default_action: SeccompAction,  // ALLOW / KILL / ERRNO
+    pub arg_match: Vec<ArgRule>,        // 勘误 §12：参数规则表（syscall, arg_idx, op, value）
 }
 
 pub enum SeccompAction {
@@ -1783,15 +1811,18 @@ pub fn sys_futex(uaddr: usize, op: FutexOp, val: u32, timeout: Option<Duration>,
     }
 }
 
-/// futex 等待队列——按物理页地址索引
+/// futex 等待队列——⚠️ 勘误：不再按物理页地址索引。
+/// COW 下物理页分裂后新页队列为空、旧页无人唤醒 → 锁永久睡眠。
+/// 改**逻辑键**：(Inode, 文件偏移) 或 (匿名虚拟区, 虚拟地址)；分裂时迁移等待队列。
 pub struct FutexTable {
-    pub table: HashMap<PhysAddr, WaitQueue>,  // 物理页地址 → 等待队列
+    pub table: HashMap<FutexKey, WaitQueue>,  // 逻辑键 → 等待队列
     pub lock: Spinlock,
 }
 ```
 
 设计要点：
-- 用**物理页地址**索引（而非虚拟地址），因为不同进程映射同一共享内存时虚拟地址不同但物理页相同；
+- 用**逻辑键**索引（对齐 Linux `get_futex_key`）：文件映射 = `(Inode, 文件偏移)`；匿名共享 = `(虚拟区, 虚拟地址)`——不同进程映射同一共享内存虚拟地址不同，但键一致；
+- **COW 迁移（勘误 §2）**：物理页分裂时把旧页等待队列迁移到新物理页；
 - futex 代码量目标 ~200 行，但它是 pthread/JVM/Python GIL 的底层依赖。
 
 ### 13.8 ⑫ TLS（线程局部存储）

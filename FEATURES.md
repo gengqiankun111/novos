@@ -24,17 +24,17 @@
 | 中断/异常 | 手写 IDT（0–31 异常）+ 8259A PIC 重映射 | ✅ | M0 | DESIGN §1.4 |
 | 内存映射打印 | multiboot1/2/PVH 三种启动信息解析 | ✅ | M0 | — |
 | GDT + TSS + IST | 独立栈（DF/NMI/MC/DBG） | ◻ | M2 | DESIGN §1.4 |
-| 物理内存 | Buddy（order 0–10）+ SLUB 风格 Slab + OOM 回调 | ◻ | M1 | DESIGN §3.1 |
-| 虚拟内存 | 4 级页表懒分配、COW、`MappedPages` 类型化句柄 | ◻ | M2 | DESIGN §3.2 |
-| 任务/调度 | CFS（vruntime 红黑树）+ **RT 类双队列结构预留** + **优先级继承 PIP** | ◻ | M2 | DESIGN §4.2 |
-| 同步原语 | Spinlock / Mutex / WaitQueue，锁序编译期编码 | ◻ | M2 | DESIGN §3.9 |
-| 定时器/时钟 | 最小堆 + 时钟源抽象 + RTC + monotonic | ◻ | M2 | DESIGN §6.2⑥ |
-| 系统调用 + init/shell | syscall 表 + ELF 加载 + 用户态 shell | ◻ | M3 | DESIGN §1.2 |
+| 物理内存 | Buddy（order 0–10）+ SLUB 风格 Slab（**侵入式空闲链表**）+ OOM 回调 + **可移动页标记** | ◻ | M1 | DESIGN §3.1/勘误§9-10 |
+| 虚拟内存 | 4 级页表懒分配、COW、`MappedPages` 类型化句柄 + **内存紧缩 compact_zone** | ◻ | M2/M9 | DESIGN §3.2 |
+| 任务/调度 | CFS（vruntime 红黑树）+ **RT 类双队列结构预留** + **优先级继承 PIP** + **per-CPU 占位（SMP 预热）** | ◻ | M2 | DESIGN §4.2/勘误§7 |
+| 同步原语 | Spinlock / Mutex / WaitQueue，锁序编译期编码；**RT 强制自旋锁 + CFS 关抢占** | ◻ | M2 | DESIGN §3.9/勘误§11 |
+| 定时器/时钟 | 最小堆 + 时钟源抽象 + RTC + monotonic + **分层时间轮（评估）** | ◻ | M2/M9 | DESIGN §6.2⑥/勘误§5 |
+| 系统调用 + init/shell | syscall 表 + ELF 加载 + 用户态 shell + **PID 1 崩溃自愈（rescue_init + watchdog 复位）** | ◻ | M3 | DESIGN §1.2/勘误§3 |
 | VFS + ramfs/tmpfs | Inode/Dentry/SuperBlock + dcache LRU + **最小记录锁** | ◻ | M4 | DESIGN §3.6 |
-| 网络栈 | 完整 TCP/IP（重传/拥塞控制）+ UDP/ICMP/ARP + epoll + **SNTP 客户端** | ◻ | M5 | DESIGN §3.8 |
+| 网络栈 | 完整 TCP/IP（重传/拥塞控制）+ UDP/ICMP/ARP + epoll + **SNTP 客户端** + **零拷贝 Skb 内存池（评估）** | ◻ | M5 | DESIGN §3.8/勘误§4 |
 | Namespace | pid/mnt/net/uts/ipc/user/cgroup 七类 | ◻ | M6 | DESIGN §3.4 |
 | Cgroup v2 | memory/pids/cpu 控制器 + OOM-kill（容器内） | ◻ | M6 | DESIGN §3.5 |
-| OverlayFS | lower/upper/work + copy-up + whiteout | ◻ | M7 | DESIGN §3.7 |
+| OverlayFS | lower/upper/work + **稀疏 copy-up** + whiteout + **容器日志默认 tmpfs** | ◻ | M7/M8 | DESIGN §3.7/勘误§1 |
 | 容器运行时 | 类 runC：clone → namespace → pivot_root → exec | ◻ | M8 | DESIGN §4.6 |
 | 网关 | IP 转发 + conntrack + NAT/MASQUERADE + 基础防火墙 | ◻ | M8 | DESIGN §4.7 |
 | 快速启动 | 秒级冷启动：deferred init + 只初始化必需驱动 | ◻ | M9 | DESIGN §19.1 |
@@ -47,13 +47,13 @@
 
 | 特性 | 说明 | 状态 | 里程碑 | 出处 |
 |---|---|---|---|---|
-| ext4 文件系统 | Block I/O + Page Cache + ext4 驱动（**data=journal 完整模式**，journal buffer 约 5–10% 内存） | ◻ | M10 | DESIGN §13.3 |
+| ext4 文件系统 | Block I/O + Page Cache + ext4 驱动（**data=journal 完整模式**，journal buffer 约 5–10% 内存）+ **电梯调度（评估）** | ◻ | M10/M13 | DESIGN §13.3/勘误§6 |
 | 动态链接 | ELF PT_INTERP + ld-musl + MAP_SHARED | ◻ | M11 | DESIGN §13.6 |
-| futex | WAIT/WAKE/REQUEUE，按物理页哈希等待队列 | ◻ | M11 | DESIGN §13.7 |
+| futex | WAIT/WAKE/REQUEUE，**逻辑键**（Inode/虚拟区）+ **COW 等待队列迁移** | ◻ | M11/M4 | DESIGN §13.7/勘误§2 |
 | TLS | arch_prctl(ARCH_SET_FS) + 上下文切换恢复 | ◻ | M11 | DESIGN §13.8 |
 | 设备框架 | devtmpfs + devpts + `/dev/null/zero/urandom` + PTY | ◻ | M12 | DESIGN §13.4 |
 | Capabilities | Linux capability 集（permitted/effective/...） | ◻ | M12 | DESIGN §13.5 |
-| Seccomp BPF | 最小解释器（syscall number 过滤） | ◻ | M12 | DESIGN §13.5 |
+| Seccomp BPF | 最小解释器 + **高风险调用参数值匹配**（mount/ptrace/openat/execve/reboot/clone） | ◻ | M12 | DESIGN §13.5/勘误§12 |
 | 完整 /proc | /proc/self/{maps,status,exe,fd} + cpuinfo/mounts | ◻ | M13 | DESIGN §13.12 |
 | 完整信号 | sigaction(SA_SIGINFO/sigaltstack) + 实时信号 | ◻ | M13 | DESIGN §13.10 |
 | timerfd / signalfd | 事件循环 fd | ◻ | M13 | DESIGN §13.11 |
@@ -120,7 +120,7 @@
 | RT 调度双队列 | RT 类（优先级+抢占）+ 普通类（CFS）+ **优先级继承 PIP** | ✅ 结构预留 |
 | 时钟/中断框架 | 时钟源抽象 + RTC + monotonic | ✅ 设计定型 |
 | 快速启动 | deferred init 启动路径 | ✅ 设计定型 |
-| ARM64 / RISC-V | arch 层隔离 + 双留口；**ACPI/设备树解析**（真实硬件必需）、**SMP 跨核负载均衡**、**SNTP 时间同步**（工业时钟校准） | ✅ 设计定型 + 中期补 |
+| ARM64 / RISC-V | arch 层隔离 + 双留口；**PlatformInfo 抽象**（x86=Multiboot/ARM=DTB 统一）、**ACPI/设备树解析**、**SMP per-CPU 预热 + 跨核负载均衡**、**SNTP 时间同步** | ✅ 设计定型 + 中期补 |
 
 ## 8. 明确不支持（边界）
 
