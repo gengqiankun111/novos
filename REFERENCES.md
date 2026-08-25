@@ -48,7 +48,7 @@
 **可借鉴（对应 Novos 模块）**
 - **buddy 物理内存**：Redox kernel 用 buddy 管理物理帧（`mm` 目录），与 DESIGN.md §3.1 的 `BuddyAllocator` 结构一致，可对照其分裂/合并边界条件。
 - **ralloc（Redox 的默认分配器）**：thread-local 免锁分配模型 —— Novos 单核第一版可用全局 Spinlock 简化，但 ralloc 的 size-class + 空闲链结构值得读（`redox-os/ralloc`）。
-- **redoxfs（TFS）**：日志结构 + B+树 元数据模型 —— Novos 的 tmpfs/ext4 不需要照搬，但"元数据统一建模为带版本键值对 + WAL"的**崩溃一致性思路**可借鉴到 ext4 有序写路径（TASKS M10-06）。
+- **redoxfs（TFS）**：日志结构 + B+树 元数据模型 —— Novos 的 tmpfs/ext4 不需要照搬，但"元数据统一建模为带版本键值对 + WAL"的**崩溃一致性思路**可借鉴到 ext4 data=journal 写路径（TASKS M10-06）。
 - **relibc / 驱动分离**：证明"Rust libc 替代 musl"可行，但 Novos 目标明确用 musl，不引入。
 
 **避坑**
@@ -286,7 +286,7 @@
 | 组件 | 仓库 | 定位 | 借鉴点 |
 |---|---|---|---|
 | ext4-view-rs | nicholasbishop/ext4-view-rs | `no_std` **只读** ext2/3/4 | 超级块/inode/dir/extent/htree 解析（M10-04/05 只读路径可直接对照），0.6.0 已支持 xattr 等 |
-| rust-fs-ext4（am-fs-ext4） | christhomas/rust-fs-ext4 | 纯 Rust **读写** ext2/3/4 + JBD2 | 块分配、有序写、**JBD2 日志**（M10-06 写路径 + 断电一致性测试方法的参考）、mkfs |
+| rust-fs-ext4（am-fs-ext4） | christhomas/rust-fs-ext4 | 纯 Rust **读写** ext2/3/4 + JBD2 | 块分配、**JBD2 日志**（M10-06 data=journal 写路径 + 断电一致性测试方法的参考）、mkfs |
 | mkext4 | cortexapps/mkext4 | 确定性 ext4 镜像构建 | 给测试造 ext4 磁盘镜像（M10-10 集成测试用），比 `mkfs.ext4` 更可控 |
 
 **要点**：Novos M10 主线 = ext4-view-rs 的解析结构 + am-fs-ext4 的写/日志语义；两个仓库都有与 e2fsck 对齐的测试方法，可直接复用其 test 磁盘生成思路。

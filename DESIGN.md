@@ -648,6 +648,21 @@ pub struct Arc<T>;  pub struct Weak<T>;   // 引用计数共享所有权
 - 第一版**单核**，SMP 留到稳定版（避免 per‑CPU 复杂度吃掉内存预算）；
 - **RT 预留（§19.1）**：调度器从第一天按"RT 类（优先级 + 抢占）+ 普通类（CFS/vruntime）"双队列分层设计；第一版只实现普通类，但 `SchedEntity` 与运行队列结构须能容纳 RT 类，避免后期重构。
 
+#### 优先级反转（PIP）—— 2026-08 评审补充
+
+> 工业场景（Modbus）是硬实时。CFS 红黑树有不确定性，即使预留 RT 队列，低优先级 RT 任务持锁时被 CFS 任务抢占、高优先级 RT 任务阻塞等待 → **优先级反转**，在 Modbus 采集丢包中是致命伤。
+
+- **M2 起同步原语内置优先级继承（PIP）**：`Mutex`/`WaitQueue` 在持锁者优先级低于等待者最高优先级时，把持锁者临时提升到等待者优先级，释放时还原；
+- RT 任务可选约束：RT 类任务默认只用自旋锁 + 关抢占（临界区短），避免进入可阻塞互斥路径；
+- 锁序编译期编码（§3.9 PhantomData）与 PIP 并存，不冲突。
+
+```
+pipeline for PIP:
+    waiter(w) 阻塞在 mutex(m) 上，持有者 h:
+        if prio(h) < prio(w): boost h 至 prio(w)
+        h 释放 m 后：还原 prio(h)，唤醒 w
+```
+
 ```
 tick:
     current.vruntime += delta / weight_normalized
@@ -755,7 +770,16 @@ run_container(image, spec):
 
 - 每个子系统暴露 `used/limit` 计数（`/proc` 只读视图）；
 - CI 里加**内存回归测试**：启动 N 个容器后断言内核常驻 ≤ 32MB；
-- 超预算 = bug，进 issue 必修，不允许靠“再优化编译选项”糊弄。
+- 超预算 = bug，进 issue 必修，不允许靠"再优化编译选项"糊弄。
+
+#### Page Cache 预算（2026-08 评审补充）
+
+> 台账必须包含 Page Cache：32MB 内核 + 40MB 容器 ≠ 72MB 安全线，Page Cache（文件缓存）不受 Slab/Buddy 直接限制，频繁拉取 OCI 层或写日志会吞掉剩余内存 → "台账没超但系统已 OOM"。
+
+- Page Cache 计入全局内存台账（`MemStat`，与 §13.3 `AddressSpace` 的脏页跟踪同源）；
+- **Cgroup v2（M6）强制启用 `memory.stat` 的 `total_inactive_file` 回收**：文件缓存可回收性必须从第一天进 cgroup 控制器；
+- **脏页水位动态缩紧**：`vm.dirty_ratio` 设为 **5%**（按预算口径可再降），强制尽早回写，防止缓存堆积吞噬内存；
+- 验收口径（M9）：拉取 100MB OCI 层后系统内存仍受控（page cache 收缩回目标水位）。
 
 ---
 
@@ -1481,6 +1505,16 @@ pub struct BlockLayer {
 - **同步优先 + 异步回调**——内核自身 I/O 同步等；用户态 page cache 回调填充；
 - Block 层代码量目标 ~500 行（Linux ~2 万行）。
 
+#### ext4 写路径（data=journal 完整模式）
+
+> **2026-08 评审修正**：ext4 必须实现 **`data=journal` 完整模式**（不是"有序写"）。无完整日志时突然掉电几乎 100% 导致元数据损坏，watchdog 也救不了。
+> **内存代价**：journal buffer 额外占用约 5–10% 内存（按 32MB 内核预算约 +1.6–3.2MB，计入 §5.3 台账）。
+
+- 日志流程：事务开始 → 元数据+数据写入 journal → commit 点 → 回放/检查点；
+- `BlockDevice::flush` 语义 = 事务提交点的掉电屏障；
+- 与 §19.2 掉电保护解耦：文件系统一致性由 ext4 journal 保证，watchdog 只管进程级自愈；
+- 断电一致性验证：QEMU 断电模拟（随机 kill）回归测试（TASKS M10-06）。
+
 #### Page Cache（文件页缓存）
 
 当前 tmpfs 用匿名页直接映射。ext4 的文件 mmap 需要文件页缓存：
@@ -2116,7 +2150,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ---
 
-## 15. 工具链支持与 ABI 兼容面（自编译 Go / Rust / C++）
+## 15. 工具链支持与 ABI 兼容面（宿主机交叉编译 Go / Rust / C++）
 
 > 核心决策（对应"轻量容器宿主"路线）：**兼容面 = musl 的 syscall 足迹**，而不是"实现全部 Linux syscall"。
 > 因为 Novos 对齐 Linux syscall ABI（§1.2），现成工具链 target 直接复用，**无需自定义语言 target**。
@@ -2125,28 +2159,34 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 | 语言 | 构建方式 | 说明 |
 |---|---|---|
-| **Go** | `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` | 纯静态二进制，无自定义 target |
-| **Rust** | `x86_64-unknown-linux-musl` target（rustup 现成） | `cargo build --target ... --release` 直接出静态 musl 二进制 |
-| **C++** | musl-cross（musl.cc 预编译或 musl-cross-make）+ `-static -static-libstdc++ -static-libgcc` | 复用现成工具链 |
+| **Go** | **宿主机** `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` | **设备端不编译**（go build 链接峰值 >1.5GB，256MB 设备直接 OOM）；宿主机交叉编译出静态二进制再 OTA 下发 |
+| **Rust** | `x86_64-unknown-linux-musl` target（rustup 现成） | 宿主机交叉编译；设备端只运行产物 |
+| **C++** | musl-cross（musl.cc 预编译或 musl-cross-make）+ `-static -static-libstdc++ -static-libgcc` | 宿主机交叉编译 |
 
 > 三者本就为 Linux ABI 生成代码，Novos 兼容的就是这个 ABI —— 语言层零改造。
+> **硬性约束**：Novos **不在设备上编译任何语言**（交叉编译只发生在宿主机/云端，见 §15.2 云构建服务）。TinyGo/gccgo 轻量子集仅当"设备端必须编译"的场景再评估，默认不做。
 
 ### 15.2 新增工作量（约 2–3 人月，单人）
 
 | 工作项 | 内容 | 里程碑归属 |
 |---|---|---|
-| 交叉工具链搭建 | musl-cross + crt1/crti/crtn + linker script + 版本锁定 | M11 |
+| 交叉工具链搭建 | musl-cross + crt1/crti/crtn + linker script + 版本锁定（宿主机侧） | M11 |
 | musl 适配 | 跑通 musl；把"musl 需要的 syscall"定成兼容面清单 | M11 |
-| ABI 契约文档化 | syscall 清单、结构体布局、errno、调用约定 → SDK 文档 | M11（持续维护） |
+| **Novos-SDK 基础镜像** | 预置 ld-musl + 头文件 + linker script；所有第三方应用强制 `--dynamic-linker=/novos/ld-musl...` 指向 Novos 专用路径，避免动态链接到宿主未实现的 syscall | M11 |
+| **novos-check 工具** | 扫描 ELF 的 syscall 依赖 + 内存足迹预估（RSS+虚拟内存），不通过禁止合入 | M11 |
+| ABI 契约文档化 | syscall 清单、结构体布局、errno、调用约定 → SDK 文档（黑白名单） | M11（持续维护） |
 | 测试框架 + CI | 编译 → 打包 → QEMU 真跑 + 断言 + 示例程序 | M11/M14 |
 | 语言各自增量 | Go 1–2 周、Rust 1–3 周、C++ 2–4 周（各自怪癖） | M14 |
 
 ### 15.3 兼容面收敛原则
 
 - **以 musl 的 syscall 足迹为边界**：只保证"musl + 目标程序"用到的路径全对，其余 syscall 返回 `ENOSYS`；
+- **黑白名单**：`docs/abi.md` 维护 syscall 白名单（实现）/黑名单（ENOSYS）/灰名单（跟踪中），musl 编译的 Redis/Go 程序高频用到的 `futex`/`epoll_pwait2`/`statx`/`getrandom` 必须提前覆盖，否则应用启动即 ENOSYS 崩溃；
 - **可测试、可回归**：每个新增 syscall 有对应 host 测试 + QEMU 集成断言；
 - **与 §13.6 动态链接的关系**：容器服务默认静态编译（Go/Rust/C++）；musl 动态链接（ld-musl）为 musl 生态二进制服务，两者并存；
-- **SDK 文档为交付物**：`docs/abi.md` 维护 syscall 清单/结构体/errno/调用约定，作为工具链适配的契约。
+- **SDK 文档为交付物**：`docs/abi.md` 维护 syscall 清单/结构体/errno/调用约定，作为工具链适配的契约；
+- **红线（M14 应用合入门槛）**：任何外部应用的移植，**必须先通过 `novos-check`** 扫描其 ELF 的 syscall 依赖并给出内存足迹预估（RSS+虚拟内存），否则禁止合入 M14 应用列表；
+- **（可选）Novos 官方云构建服务**：用户上传源码 → 云端交叉编译出 musl 静态二进制 → OTA 下发；既省设备内存，又避免在设备上暴露编译器。
 
 ---
 
@@ -2173,7 +2213,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ### 16.3 工程含义（工作量减一个数量级）
 
-只需：一个轻量 **`novos-pull`**（走 registry HTTPS + OCI 解析 + 摘要校验）+ 轻量容器运行时（§4.6 流程）+ 镜像打包工具（OCI layer 构建，配合 §15 自编译工具链）。OTA 升级/隔离/部署核心价值一个不少。
+只需：一个轻量 **`novos-pull`**（走 registry HTTPS + OCI 解析 + 摘要校验）+ 轻量容器运行时（§4.6 流程）+ 镜像打包工具（OCI layer 构建，配合 §15 宿主机交叉编译工具链）。OTA 升级/隔离/部署核心价值一个不少。
 
 ---
 
@@ -2227,6 +2267,15 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | 🟢 值得 | Mosquitto（MQTT）、Lua / MicroPython / QuickJS |
 | 🟡 可选 | NanoMQ、ZeroMQ、CPython |
 | ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang |
+
+#### Redis 内存受限部署模板（2026-08 评审补充）
+
+> 内存受限设备上 Redis 有"自杀风险"：默认 `noeviction` 策略写满即拒绝写入（业务中断）；RDB 快照触发 `fork()`，256MB 下 COW 极易内存超限。
+
+- **部署模板强制注入**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`（按设备内存口径缩）；
+- **禁用 RDB 持久化**：`save ""`（禁 `fork()` 快照）；
+- **只开 AOF**：`appendonly yes` + `auto-aof-rewrite-percentage 100`（重写机制必须可用，防 AOF 无限增长）；
+- 模板随镜像打包（Novos-SDK / 官方镜像仓库统一维护），应用方不得以默认配置部署。
 
 ### 18.4 消息队列路线（每类需求用最轻的那个）
 
@@ -2294,6 +2343,14 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | 可观测性 | 环形日志 + 落盘 + 远程日志、健康指标（内存/fd/CPU）、配置下发通道 |
 | GDB 调试生态 | 内核态 + 用户态调试、panic 可读化、死机转储（crash dump 供远程诊断） |
 
+#### 架构级遗漏补充（2026-08 评审）
+
+| 项 | 严重性 | 内容 |
+|---|---|---|
+| **ACPI / 设备树解析** | 高 | 启动协议（Multiboot/PVH）只能加载内核，无法传递 PCIe 中断路由、MMIO 基址；无 ACPI 则真实 x86 上无法识别 AHCI 硬盘/USB，只能跑 QEMU。第一块真实目标板确定后，按板级信息源（x86=ACPI / ARM=设备树）实现最小解析 |
+| **SMP 多核负载均衡** | 中 | 现代 Cortex-A 多为双核/四核，单核 BSP 时多核利用率卡在 25%。§11 已有 SMP 演进路径；加**跨核任务迁移**（load_balance）预留 |
+| **NTP / SNTP 时间同步** | 中 | 工业设备需要校准时钟，RTC 晶振漂移不满足 Modbus 时间戳要求。M5 网络栈完成后附带 **SNTP 客户端**（UDP 123，最小实现） |
+
 ### 19.3 产品级（商业化才需要，个人项目可暂缓）
 
 | 项 | 内容 |
@@ -2329,7 +2386,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 |---|---|---|
 | Web 管理界面 | 轻量 HTTP 服务 + 静态前端打包进 rootfs（§5 网络栈之上） | M14 |
 | SSH | dropbear（musl 静态，§15 工具链）+ devpts/PTY（§13.4，M12 已有） | M14 |
-| Agent 上联 | 用户态自编译程序（§15），走 HTTPS + JSON（§18.6） | M14 |
+| Agent 上联 | 用户态交叉编译程序（§15），走 HTTPS + JSON（§18.6） | M14 |
 | 离线导入 | OCI/Docker archive 解析（复用 §16.3 `novos-pull` 的解压/校验链） | M14 |
 
 ---

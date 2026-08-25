@@ -21,7 +21,7 @@ Novos‑OS 不是 Linux 的复制品。它砍掉了数十年来的兼容包袱�
 | 目标设备 | 边缘网关、工控盒子、IoT 设备、SD-WAN CPE（内存 256MB–2GB） |
 | 架构 | x86_64 起步（QEMU 开发便利），**ARM64 为终局目标**（arch 层隔离从第一天做好） |
 | 明确不做 | 通用 Linux 替代、桌面、大众市场、完整 glibc 生态（mysql/kafka 等） |
-| 兼容策略 | Linux syscall ABI 兼容 + musl 静态子集（Go/Rust/C++ 自编译，见 DESIGN §15） |
+| 兼容策略 | Linux syscall ABI 兼容 + musl 静态子集（Go/Rust/C++ **宿主机交叉编译**，见 DESIGN §15） |
 | 交付形态 | 官方交叉编译工具链 target + 垂直场景方案，而非"内核"单品 |
 
 ### 目标设备分级
@@ -166,7 +166,7 @@ Novos‑OS 通过 **Feature Flag** 支持两种部署形态：
 | 模式 | 内核常驻 | 定位 | 适用场景 |
 |---|---|---|---|
 | **minimal** | ≤ 32MB | 微型容器宿主（静态 musl 子集） | 边缘网关、工控盒子、IoT（256MB–2GB 设备） |
-| **full** | ≤ 40MB | 容器服务宿主（ext4 + 动态链接） | 磁盘持久化 + Redis/SQLite + 自编译 Go/Rust/C++ |
+| **full** | ≤ 40MB | 容器服务宿主（ext4 + 动态链接） | 磁盘持久化 + Redis/SQLite + 交叉编译 Go/Rust/C++ |
 
 ### minimal 模式（32MB，入场券）
 
@@ -182,7 +182,7 @@ Novos‑OS 通过 **Feature Flag** 支持两种部署形态：
 |---|---|---|
 | **容器服务宿主** | 跑 **Redis + SQLite** 等真实 musl 容器服务 + **OTA 升级回滚**，外部可访问 | OCI 镜像 + 轻量运行时（DESIGN §16，不做 docker daemon/CLI） |
 | **开发/演示环境** | Windows 运行器 = 开发/演示环境（生产负载放 Linux/KVM） | futex + TLS + 完整信号 + getrandom |
-| **自编译工具链** | Go/Rust/C++ 交叉编译 target 官方支持 | musl syscall 足迹兼容面（DESIGN §15） |
+| **交叉编译工具链** | Go/Rust/C++ 宿主机交叉编译 target 官方支持（设备端不编译） | musl syscall 足迹兼容面（DESIGN §15） |
 
 ### 不适合的场景
 
@@ -258,7 +258,7 @@ novos/
 | 开发语言 | **Rust stable**（`no_std` 裸金属 target） | 内存安全 + 零成本抽象 + 稳定通道可用 |
 | 目标三元组 | `x86_64-unknown-none`（后续 `aarch64-unknown-none`） | 不依赖宿主 OS，裸金属 |
 | 引导方式 | **自包含 multiboot2**（长模式汇编 + 手写页表/IDT） | 无宿主链接依赖，QEMU `-kernel` 直接启动 |
-| 用户态 libc | **musl（静态链接，自编译）** | 体积小、兼容 Linux ABI；Go/Rust/C++ 现成 target 复用 |
+| 用户态 libc | **musl（静态链接，宿主机交叉编译）** | 体积小、兼容 Linux ABI；Go/Rust/C++ 现成 target 复用 |
 | 构建系统 | **Cargo + Makefile** | Cargo 管依赖，Makefile 封装 QEMU/测试命令 |
 | 测试框架 | `cargo test`（host 逻辑） + QEMU 集成 | 逻辑与硬件解耦，CI 可跑 |
 | CI | GitHub Actions | 编译 + `cargo test` + QEMU 启动断言 |
@@ -336,7 +336,7 @@ novos/
 - [ ] 最小记录锁（fcntl 字节区间锁，SQLite 依赖）
 - [ ] SQLite 容器服务（musl 静态，CRUD + WAL 持久化）
 - [ ] Redis 容器服务（musl 编译，外部 TCP 访问）
-- [ ] 自编译工具链：Go（CGO_ENABLED=0）/ Rust（x86_64-unknown-linux-musl）/ C++（musl-cross）
+- [ ] 交叉编译工具链：宿主机 Go（CGO_ENABLED=0）/ Rust（x86_64-unknown-linux-musl）/ C++（musl-cross），产物 OTA 下发（DESIGN §15）
 - [ ] （值得）Mosquitto MQTT broker（musl 静态，IoT 设备接入）
 - [ ] （值得）内置 Web 管理界面（轻量 HTTP + 静态前端，设备管理标配）
 - [ ] （值得）SSH（dropbear 轻量实现）——开发层远程调试/救援
@@ -355,7 +355,7 @@ novos/
 |---|---|
 | 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、轻量 HTTP 服务（网关）、busybox、musl 交叉工具链、**JSON/CSV**（语言库自带，零难度）、**MQTT 客户端** |
 | 🟢 值得 | Mosquitto（MQTT broker）、**Modbus 工业协议**（网关核心）、**内置 Web 管理界面**（轻量 HTTP + 静态前端，设备管理标配）、**轻量 TLS**（mbedTLS/rustls）、Lua / MicroPython / QuickJS |
-| 🟡 可选 / 远期 | NanoMQ、ZeroMQ、CPython、WebSocket、NTP、OPC-UA、边缘本地推理 |
+| 🟡 可选 / 远期 | NanoMQ、ZeroMQ、CPython、WebSocket、OPC-UA、边缘本地推理（SNTP 属 M5 主线） |
 | ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang、**Excel/docx、PHP**（设备不处理文档格式；PHP 不是"前端美观"的答案） |
 
 > **边缘网关价值闭环**（组件只围绕这条链选）：**Modbus 采集 → JSON → MQTT/HTTP 上报 → Web 界面监控**。文档格式不在其中。
@@ -438,7 +438,7 @@ make run
 | M8 | 容器运行时 + 网关 | 跑起第一个容器 |
 | M9 | 内存基线 ≤32MB + 长期稳定版 | 生产可用 |
 | M10 | ext4 + BIO + Page Cache | 磁盘持久化 |
-| M11 | 动态链接 + futex + TLS + 工具链 | 动态程序 + Go/Rust/C++ 自编译 |
+| M11 | 动态链接 + futex + TLS + 工具链 | 动态程序 + Go/Rust/C++ 交叉编译 |
 | M12 | 设备 + Capabilities + Seccomp | Docker 安全模型 |
 | M13 | 完整 /proc + 信号 + 事件 fd | 动态程序可观测性 |
 | M14 | OCI 镜像 + 轻量运行时 + OTA（Redis/SQLite） | full 模式 ≤40MB 达标 |
@@ -539,7 +539,7 @@ Redox 是通用微内核 OS，有窗口系统、包管理器和用户生态。No
 
 **Q8：full 模式下能跑标准 Docker 吗？需要什么扩展？**
 
-full 模式的定位是**跑 musl 容器服务（Redis/SQLite 等自编译镜像）**，不是"任意 Docker 镜像"。需要实现以下内核扩展（见 [DESIGN.md §13](docs/DESIGN.md)）：
+full 模式的定位是**跑 musl 容器服务（Redis/SQLite 等交叉编译镜像）**，不是"任意 Docker 镜像"。需要实现以下内核扩展（见 [DESIGN.md §13](docs/DESIGN.md)）：
 - **动态链接**——容器服务若动态链接，需要内核支持 PT_INTERP + MAP_SHARED（默认推荐静态编译）；
 - **Capabilities + Seccomp**——容器安全模型依赖 Linux capability 位和 seccomp BPF 过滤；
 - **devpts**——`docker exec` 需要 PTY（/dev/ptmx + /dev/pts/N）；
@@ -550,7 +550,7 @@ mysql/kafka 等 **glibc 生态镜像不追**（glibc 兼容层价值递减、成
 
 **Q9：能跑 apt install 吗？**
 
-降为 **P3 可选**。apt/dpkg 是 glibc 生态，与 musl 静态子集定位冲突；full 模式默认用自编译工具链分发软件，不依赖 apt。
+降为 **P3 可选**。apt/dpkg 是 glibc 生态，与 musl 静态子集定位冲突；full 模式默认用交叉编译工具链分发软件，不依赖 apt。
 
 **Q10：JVM 需要哪些特殊内核支持？**
 

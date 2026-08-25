@@ -26,18 +26,19 @@
 | GDT + TSS + IST | 独立栈（DF/NMI/MC/DBG） | ◻ | M2 | DESIGN §1.4 |
 | 物理内存 | Buddy（order 0–10）+ SLUB 风格 Slab + OOM 回调 | ◻ | M1 | DESIGN §3.1 |
 | 虚拟内存 | 4 级页表懒分配、COW、`MappedPages` 类型化句柄 | ◻ | M2 | DESIGN §3.2 |
-| 任务/调度 | CFS（vruntime 红黑树）+ **RT 类双队列结构预留** | ◻ | M2 | DESIGN §4.2 |
+| 任务/调度 | CFS（vruntime 红黑树）+ **RT 类双队列结构预留** + **优先级继承 PIP** | ◻ | M2 | DESIGN §4.2 |
 | 同步原语 | Spinlock / Mutex / WaitQueue，锁序编译期编码 | ◻ | M2 | DESIGN §3.9 |
 | 定时器/时钟 | 最小堆 + 时钟源抽象 + RTC + monotonic | ◻ | M2 | DESIGN §6.2⑥ |
 | 系统调用 + init/shell | syscall 表 + ELF 加载 + 用户态 shell | ◻ | M3 | DESIGN §1.2 |
 | VFS + ramfs/tmpfs | Inode/Dentry/SuperBlock + dcache LRU + **最小记录锁** | ◻ | M4 | DESIGN §3.6 |
-| 网络栈 | 完整 TCP/IP（重传/拥塞控制）+ UDP/ICMP/ARP + epoll | ◻ | M5 | DESIGN §3.8 |
+| 网络栈 | 完整 TCP/IP（重传/拥塞控制）+ UDP/ICMP/ARP + epoll + **SNTP 客户端** | ◻ | M5 | DESIGN §3.8 |
 | Namespace | pid/mnt/net/uts/ipc/user/cgroup 七类 | ◻ | M6 | DESIGN §3.4 |
 | Cgroup v2 | memory/pids/cpu 控制器 + OOM-kill（容器内） | ◻ | M6 | DESIGN §3.5 |
 | OverlayFS | lower/upper/work + copy-up + whiteout | ◻ | M7 | DESIGN §3.7 |
 | 容器运行时 | 类 runC：clone → namespace → pivot_root → exec | ◻ | M8 | DESIGN §4.6 |
 | 网关 | IP 转发 + conntrack + NAT/MASQUERADE + 基础防火墙 | ◻ | M8 | DESIGN §4.7 |
 | 快速启动 | 秒级冷启动：deferred init + 只初始化必需驱动 | ◻ | M9 | DESIGN §19.1 |
+| 内存预算（含 Page Cache） | `total_inactive_file` 可回收 + `vm.dirty_ratio=5%` 缩紧（防缓存吞内存） | ◻ | M9 | DESIGN §5.3 |
 | 看门狗 / 掉电保护 | 硬件 watchdog + 日志原子写 + FS 一致性 | ◻ | M9 | DESIGN §19.2 |
 | 可观测性 | 环形日志 + 落盘 + 健康指标（内存/fd/CPU） | ◻ | M9 | DESIGN §19.2 |
 | GDB 调试 | panic 可读化 + crash dump（远程诊断） | ◻ | M9 | DESIGN §19.2 |
@@ -46,7 +47,7 @@
 
 | 特性 | 说明 | 状态 | 里程碑 | 出处 |
 |---|---|---|---|---|
-| ext4 文件系统 | Block I/O + Page Cache + ext4 驱动（有序写，无完整 journal） | ◻ | M10 | DESIGN §13.3 |
+| ext4 文件系统 | Block I/O + Page Cache + ext4 驱动（**data=journal 完整模式**，journal buffer 约 5–10% 内存） | ◻ | M10 | DESIGN §13.3 |
 | 动态链接 | ELF PT_INTERP + ld-musl + MAP_SHARED | ◻ | M11 | DESIGN §13.6 |
 | futex | WAIT/WAKE/REQUEUE，按物理页哈希等待队列 | ◻ | M11 | DESIGN §13.7 |
 | TLS | arch_prctl(ARCH_SET_FS) + 上下文切换恢复 | ◻ | M11 | DESIGN §13.8 |
@@ -66,11 +67,13 @@
 
 | 特性 | 说明 | 状态 | 里程碑 | 出处 |
 |---|---|---|---|---|
-| musl 静态子集 | Linux syscall ABI 兼容面 = musl syscall 足迹 | ◻ | M11 | DESIGN §15 |
-| Go 自编译 | `GOOS=linux CGO_ENABLED=0` 静态二进制 | ◻ | M11 | DESIGN §15.1 |
-| Rust 自编译 | `x86_64-unknown-linux-musl` 现成 target | ◻ | M11 | DESIGN §15.1 |
-| C++ 自编译 | musl-cross + `-static -static-libstdc++ -static-libgcc` | ◻ | M11 | DESIGN §15.1 |
-| ABI 契约文档 | `docs/abi.md`：syscall 清单/结构体/errno/调用约定 | ◻ | M11 | DESIGN §15.2 |
+| 交叉编译工具链 | musl 静态子集：**宿主机**交叉编译（Go/Rust/C++），设备端不编译 | ◻ | M11 | DESIGN §15 |
+| Go 交叉编译 | `GOOS=linux CGO_ENABLED=0`，宿主机编译 → OTA 下发 | ◻ | M11 | DESIGN §15.1 |
+| Rust 交叉编译 | `x86_64-unknown-linux-musl` 现成 target（宿主机） | ◻ | M11 | DESIGN §15.1 |
+| C++ 交叉编译 | musl-cross + `-static -static-libstdc++ -static-libgcc`（宿主机） | ◻ | M11 | DESIGN §15.1 |
+| **Novos-SDK 基础镜像** | ld-musl + 头文件 + linker script，`--dynamic-linker` 指向 Novos 专用路径 | ◻ | M11 | DESIGN §15.2 |
+| **novos-check 工具** | ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）——应用合入门槛 | ◻ | M11 | DESIGN §15.3 |
+| ABI 契约文档 | `docs/abi.md`：syscall 白/黑/灰名单 + 结构体/errno/调用约定 | ◻ | M11 | DESIGN §15.3 |
 | Lua / MicroPython / QuickJS | 轻量脚本运行时 | ○ | M14 | DESIGN §18.2 |
 | CPython / JVM | musl 构建可行性评估通过才做 | ○ | P3 | DESIGN §18.2 |
 
@@ -78,7 +81,7 @@
 
 | 特性 | 说明 | 状态 | 里程碑 | 出处 |
 |---|---|---|---|---|
-| Redis | 缓存 + 消息（Streams/Pub-Sub），外部 TCP 访问 | ◻ | M14 | DESIGN §18.3 |
+| Redis | 缓存 + 消息（Streams/Pub-Sub），外部 TCP 访问（**部署模板**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`、禁 RDB、只开 AOF+重写） | ◻ | M14 | DESIGN §18.3 |
 | SQLite | musl 静态库，CRUD + WAL 持久化（依赖最小记录锁） | ◻ | M14 | DESIGN §18.3 |
 | Mosquitto (MQTT) | IoT 设备接入 broker，Pub/Sub + QoS | ○ | M14 | DESIGN §18.4 |
 | Modbus 工业协议 | 采集侧：RTU/TCP 读寄存器 → JSON | ○ | M14 | DESIGN §18.5 |
@@ -95,6 +98,7 @@
 |---|---|---|---|---|
 | 最小攻击面 | 最小 syscall 集 + 静态驱动（无模块加载） | ✅ 设计 | — | DESIGN §9 |
 | 容器隔离 | namespace + cgroup + user ns（容器内 root ≠ 宿主 root） | ◻ | M6/M8 | DESIGN §9.2 |
+| **应用合入门槛** | 外部应用移植必须先通过 `novos-check`（syscall 依赖 + 内存足迹预估），否则禁止合入 | ◻ | M11/M14 | DESIGN §15.3 |
 | unsafe <5% | 显式标注 + SAFETY 审查边界 | ✅ 约束 | 全程 | DESIGN §6.3⑥ |
 | 内存预算强制 | 子系统 used/limit 台账 + CI 断言 ≤32MB/40MB | ◻ | M9 | DESIGN §5.3 |
 | Secure Boot | 内核签名 + 信任根（产品级准入项） | ○ | 产品级 | DESIGN §19.3 |
@@ -113,10 +117,10 @@
 | 维度 | 内容 | 状态 |
 |---|---|---|
 | 设备驱动模型 | bus→device→driver + BSP + 中断分发（GPIO/I2C/SPI/CAN/UART/PWM/ADC） | ✅ 设计定型 |
-| RT 调度双队列 | RT 类（优先级+抢占）+ 普通类（CFS） | ✅ 结构预留 |
+| RT 调度双队列 | RT 类（优先级+抢占）+ 普通类（CFS）+ **优先级继承 PIP** | ✅ 结构预留 |
 | 时钟/中断框架 | 时钟源抽象 + RTC + monotonic | ✅ 设计定型 |
 | 快速启动 | deferred init 启动路径 | ✅ 设计定型 |
-| ARM64 / RISC-V | arch 层隔离 + 双留口 | ✅ 设计定型 |
+| ARM64 / RISC-V | arch 层隔离 + 双留口；**ACPI/设备树解析**（真实硬件必需）、**SMP 跨核负载均衡**、**SNTP 时间同步**（工业时钟校准） | ✅ 设计定型 + 中期补 |
 
 ## 8. 明确不支持（边界）
 

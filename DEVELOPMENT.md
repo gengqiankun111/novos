@@ -138,7 +138,7 @@ rustup target add x86_64-unknown-none
 - [ ] `Task` 结构（§3.3）+ 内核栈 + 上下文切换（`switch` 汇编）；
 - [ ] CFS 简化调度器（§4.2）：vruntime 红黑树、tick 抢占（**结构预留 RT 类双队列**，§19.1）；
 - [ ] `fork`（克隆 Task + 复制页表，COW）、`exit`、`waitpid`；
-- [ ] 同步原语：`Spinlock`/`Mutex`/`WaitQueue`；
+- [ ] 同步原语：`Spinlock`/`Mutex`/`WaitQueue`（**内置优先级继承 PIP**，§4.2 评审补充）；
 - [ ] 定时器最小堆 + 时钟中断 + **时钟源抽象/monotonic/RTC 预留**（§19.1）。
 
 **验收**
@@ -194,6 +194,7 @@ rustup target add x86_64-unknown-none
 - [ ] TCP：三次握手、滑动窗口、重传、Cubic（或 NewReno）、TIME_WAIT（§4.5）；
 - [ ] `socket/bind/listen/accept/connect/send/recv` 系统调用；
 - [ ] `epoll_create/epoll_ctl/epoll_wait`（LT+ET，§3.8）；
+- [ ] **SNTP 客户端**（UDP 123，最小实现）——工业时钟校准（§19.2 评审补充）；
 - [ ] `NetNamespace` 雏形（loopback + 设备隔离）。
 
 **验收**
@@ -269,6 +270,7 @@ rustup target add x86_64-unknown-none
 - [ ] 稳定性：长跑 7 天无泄漏（used 不单调爬升）；
 - [ ] 性能：容器启动延迟、网关吞吐达标值回填；
 - [ ] **秒级冷启动**：deferred init + 只初始化必需驱动（§19.1）；
+- [ ] **Page Cache 预算闭环**：`total_inactive_file` 可回收 + `vm.dirty_ratio=5%` 缩紧（§5.3 评审补充）；
 - [ ] 看门狗 + 掉电保护（日志原子写 / FS 一致性）；
 - [ ] 可观测性：环形日志 + 落盘 + 健康指标（内存/fd/CPU）；
 - [ ] panic 可读化 + crash dump（供远程诊断）。
@@ -304,7 +306,7 @@ rustup target add x86_64-unknown-none
 - [ ] `BlockDevice` trait + virtio-blk 驱动（§13.3）；
 - [ ] BIO 层（简单队列 + 同步 I/O + 异步回调）；
 - [ ] Page Cache（`AddressSpace`：文件偏移 → 物理页，可 shrink）；
-- [ ] ext4 驱动（`FileSystemDriver` trait 实现）：超级块/inode/dir/extent/日志（最小化）；
+- [ ] ext4 驱动（`FileSystemDriver` trait 实现）：超级块/inode/dir/extent/**data=journal 完整模式**（§13.3，journal buffer 约占内存 5–10%）；
 - [ ] `mount -t ext4 /dev/vda /mnt`；
 - [ ] `mmap MAP_SHARED` 文件映射（多进程共享物理页）；
 - [ ] Page cache shrink：脏页回写 + 释放。
@@ -318,7 +320,7 @@ rustup target add x86_64-unknown-none
 
 ## M11：动态链接 + futex + TLS + 工具链
 
-**目标**：能跑动态链接的 ELF + pthread 线程；搭起 Go/Rust/C++ 自编译工具链与 ABI 契约（§15）。
+**目标**：能跑动态链接的 ELF + pthread 线程；搭起 Go/Rust/C++ **宿主机交叉编译**工具链与 ABI 契约（§15，设备端不编译）。
 
 **任务**
 - [ ] ELF 加载器扩展：识别 `PT_INTERP` + `PT_DYNAMIC` + 设置辅助向量（AT_BASE/AT_PHDR/AT_RANDOM）（§13.6）；
@@ -328,9 +330,11 @@ rustup target add x86_64-unknown-none
 - [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR + 上下文切换恢复（§13.8）；
 - [ ] clone 扩展：`CLONE_SETTLS` + `CLONE_CHILD_CLEARTID`；
 - [ ] 移植 musl 动态链接版用户态二进制；
-- [ ] 交叉工具链：musl-cross + crt1/crti/crtn + linker script + 版本锁定（§15.2）；
-- [ ] ABI 契约文档：`docs/abi.md`（syscall 清单/结构体布局/errno/调用约定）；
-- [ ] 自编译冒烟：Go（`CGO_ENABLED=0` 静态）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`）。
+- [ ] 交叉工具链：musl-cross + crt1/crti/crtn + linker script + 版本锁定（§15.2，宿主机侧）；
+- [ ] **Novos-SDK 基础镜像**：ld-musl + 头文件 + linker script；第三方应用强制 `--dynamic-linker` 指向 Novos 专用路径（§15.2）；
+- [ ] **novos-check 工具**：ELF syscall 依赖扫描 + 内存足迹预估（§15.3 红线）；
+- [ ] ABI 契约文档：`docs/abi.md`（syscall **白/黑/灰名单** + 结构体布局 + errno + 调用约定）；
+- [ ] 交叉编译冒烟：宿主机 Go（`CGO_ENABLED=0` 静态）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`），产物 OTA 下发到设备运行。
 
 **验收**
 - 运行动态链接的 hello world（`gcc -o hello hello.c` 不加 `-static`）；
@@ -399,7 +403,7 @@ rustup target add x86_64-unknown-none
 - [ ] **OTA 升级 + 回滚**：增量拉取变化层 + 镜像版本切换（出错切回旧层）；
 - [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖，DESIGN §6.2①）；
 - [ ] 移植 **SQLite**（musl 静态 `libsqlite3.a`，`SQLITE_THREADSAFE=0`）：CRUD + WAL 持久化；
-- [ ] 移植 **Redis**（musl 编译）：`SET/GET`、AOF/RDB、外部 TCP 访问；
+- [ ] 移植 **Redis**（musl 编译）：`SET/GET`、AOF/RDB、外部 TCP 访问（**部署模板强制**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`、禁 RDB `save ""`、只开 AOF+重写，§18.3）；
 - [ ] HTTPS/TLS 用户态库（`novos-pull` 与 P3 包管理共用）；
 - [ ] （值得）Mosquitto MQTT broker（musl 静态，IoT 设备接入，DESIGN §18.4）；
 - [ ] （值得）Modbus 工业协议（网关核心，采集侧，DESIGN §18.5）；
@@ -408,15 +412,19 @@ rustup target add x86_64-unknown-none
 - [ ] （值得）Agent 主动上联 + 离线导入（`docker save` tar → Web 上传/U 盘）（§20.2）；
 - [ ] HTTP 客户端增强：SSE 流式响应 + 长超时 + 大 JSON 流式解析（AI 调用 = HTTP 用例，DESIGN §18.6）；
 - [ ] （值得）Lua / MicroPython / QuickJS 轻量脚本运行时；
+- [ ] （可选）Novos 官方云构建服务：上传源码 → 云端交叉编译 musl 静态二进制 → OTA 下发（§15.3）；
 - [ ] （P3 可选）apt + dpkg 移植（动态链接 musl 版）；
 - [ ] （P3 可选）OpenJDK / CPython 移植（需先评估 musl 构建可行性）。
+
+**红线（应用合入门槛）**
+- 任何外部应用的移植，**必须先通过 `novos-check`**（扫描 ELF syscall 依赖 + 内存足迹预估 RSS/虚拟内存），否则禁止合入 M14 应用列表（§15.3）。
 
 **验收**
 - `novos run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问；
 - 容器内 SQLite 建表/增删改查 + 重启后数据持久化（ext4）；
 - **OTA 演示**：更新镜像层 → 增量拉取 → 重启生效；回滚旧层可恢复；
 - `novos run busybox echo hello` 完整跑通（veth + bridge + overlay + seccomp）；
-- 自编译的 Go / Rust / C++ 静态二进制作为容器进程运行（§15 工具链闭环）；
+- 宿主机交叉编译的 Go / Rust / C++ 静态二进制作为容器进程运行（§15 工具链闭环）；
 - **内存基线**：≤40MB（full 模式最终断言）。
 
 ---
