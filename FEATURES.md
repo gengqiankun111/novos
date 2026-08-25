@@ -141,6 +141,24 @@
 | 智能机器人主控 | ROS2/GPU/NPU/RT 生态 |
 | Excel / docx / PHP | 设备不处理文档格式；PHP 非"前端美观"答案 |
 
+## 9. 用户需求演进（roadmap 定心丸，只增不减）
+
+> 基于三大用户画像的高频新需求，集中在**硬件连接性 / 服务可靠性 / 远程可运维性**。
+> 详见 DESIGN §23；原则：内存优先、默认禁用、模块化（feature flag 裁剪）。
+
+| 特性 | 说明 | 状态 | 版本 | 出处 |
+|---|---|---|---|---|
+| 容器保活策略 | OCI `restartPolicy`：`always`/`on-failure`/`unless-stopped`（掉电自启无人值守） | ◻ | v1.1 | DESIGN §23.1 |
+| Web 管理界面 | 默认开启（端口 80）：容器列表/启停/日志滚动/资源曲线 | ◻ | v1.1 | DESIGN §23.1 |
+| 4G/5G 蜂窝上网 | PPP 协议栈 + USB 串口驱动 + wpa_supplicant 轻量移植（Wi-Fi WPA2/WPA3） | ◻ | v1.5 | DESIGN §23.1 |
+| 持久化日志 | 内核/容器日志异步落盘 `/var/log/journal/` + 按大小轮转 + 总大小限制 | ◻ | v1.5 | DESIGN §23.1 |
+| WireGuard VPN | `novos-vpn` 站点到站点安全连接（代码量小，32MB 友好） | ◻ | v1.5 | DESIGN §23.1 |
+| 存储卷独占锁 | `novos run --volume-exclusive`（flock/leases），防 SQLite 并发写损坏 | ◻ | v1.5 | DESIGN §23.1 |
+| MicroPython 运行时 | <256KB 脚本引擎（工业数据清洗），官方镜像入仓库 | ◻ | v1.5 | DESIGN §23.1 |
+| PTP/NTP 时间同步 | SNTP 升级 chrony/ntpd 轻量版（时钟漂移补偿）+ 评估 PTP(IEEE 1588) | ◻ | v1.5 | DESIGN §23.1 |
+| 四层负载均衡（L4LB） | 基于 IPVS 的轮询分发（多容器同服务） | ◻ | v2.0+ | DESIGN §23.2 |
+| 流量镜像 | 复制流量送测试容器做灰度验证 | ◻ | v2.0+ | DESIGN §23.2 |
+
 ---
 
 *状态随实现推进更新；对应路线图见 DEVELOPMENT.md，设计依据见 DESIGN.md，参考组件见 REFERENCES.md。*

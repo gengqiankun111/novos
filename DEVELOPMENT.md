@@ -354,3 +354,37 @@ jobs:
         run: make test-integration
       - name: Memory regression
         run: make test-memory
+```
+
+---
+
+## 用户需求演进路线（v1.1–v2.0+，只增不减）
+
+> 基于三大用户画像的高频需求，按紧迫度分三档，设计依据见 [DESIGN §23](DESIGN.md)。
+> 原则：内存优先（32MB/40MB 预算内）、默认禁用、模块化（feature flag 裁剪）。
+> 这些任务在 v1.0（M0–M14）稳定交付后按反馈优先级择机启动。
+
+### 近期规划（v1.1）
+
+| 任务 | 方案 | 验收 |
+|---|---|---|
+| 容器保活策略 | OCI `restartPolicy`（`always`/`on-failure`/`unless-stopped`），掉电自启无人值守 | 掉电重启后容器自动拉起 |
+| Web 管理界面默认开启 | `novos-webui`（端口 80）：列表/启停/日志滚动/资源曲线 | 浏览器按钮化操作容器 |
+
+### 近期规划（v1.5）
+
+| 任务 | 方案 | 验收 |
+|---|---|---|
+| 4G/5G 蜂窝上网 | PPP 栈 + USB 串口驱动 + wpa_supplicant 轻量移植 | 蜂窝/Wi-Fi 模块联网成功 |
+| 持久化日志 | 内核/容器日志异步写 `/var/log/journal/` + 按大小轮转 | 重启后日志可回溯 |
+| WireGuard VPN | `novos-vpn` 站点到站点 | 设备主动连云端 VPN |
+| 存储卷独占锁 | `novos run --volume-exclusive`（flock/leases） | SQLite 并发写安全 |
+| MicroPython | <256KB 引擎，官方镜像入仓库 | 跑通 JSON→CSV 脚本 |
+| PTP/NTP 同步 | chrony/ntpd 轻量版 + PTP 评估 | 多设备时间戳一致 |
+
+### 远期展望（v2.0+）
+
+| 任务 | 方案 | 验收 |
+|---|---|---|
+| 四层负载均衡（L4LB） | IPVS 轮询 | 多容器入口流量分发 |
+| 流量镜像 | 网关镜像端口 | 灰度验证测试容器 |
