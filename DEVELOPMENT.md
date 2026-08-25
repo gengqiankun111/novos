@@ -62,6 +62,26 @@ M0 ──────┬──▶ M1 ──────┬──▶ M2 ───
                  └────────────────────────────────────────────────────┘
 ```
 
+### 参考组件速查（完整调研见 `REFERENCES.md`，DESIGN.md §14 有设计决策落地）
+
+| 里程碑 | 首选参考 | 备选参考 |
+|---|---|---|
+| M0 引导/中断 | blog_os + rust-osdev（bootloader/x86_64/acpi） | rCore 启动章节 |
+| M1 物理内存/堆 | buddy_system_allocator、buddy-slab-allocator | buddy-alloc、smalloc、Redox mm/ralloc |
+| M2 虚存/任务/调度 | rCore（页表+CFS）、intrusive-collections | Theseus（MappedPages）、RustyHermit（位图）、Hubris |
+| M3 syscall/init/shell | rCore syscall+ELF | zCore linux-syscall、arceos-runlinuxapp |
+| M4 VFS/ramfs/tmpfs | ArceOS axfs_vfs/axfs_ramfs、rCore VFS | embed-collections（B+树目录）、Redox redoxfs |
+| M5 网络栈 | smoltcp（结构+缓冲+状态机） | RustyHermit 网络 |
+| M6 namespace/cgroup | youki libcgroups（语义） | rCore（pid 空间雏形） |
+| M7 OverlayFS | 无 Rust 内核实现 → 读 Linux overlayfs 源码 | youki rootfs 层（用户态对照） |
+| M8 容器+网关 | youki libcontainer（流程/状态机） | oci-spec-rs |
+| M9 稳定版/SMP | RustyHermit（per-core）、Hubris（确定性） | Theseus（cell 审计） |
+| M10 ext4/BIO/PageCache | virtio-drivers（blk）、ext4-view-rs、am-fs-ext4、mkext4 | ArceOS axdriver_block |
+| M11 动态链接/futex/TLS | arceos-runlinuxapp（ELF+auxv+TLS）、zCore linux-object | Rust std futex、tokio sync |
+| M12 设备/cap/seccomp | seccompiler（BPF 语义）、Tock（设备/生命周期） | getrandom、youki caps |
+| M13 /proc/信号/timerfd | zCore/rCore procfs、tokio-time（分层时间轮） | smoltcp 定时器 |
+| M14 Docker/apt/JVM | youki（libcontainer/libcgroups）、oci-spec-rs | — |
+
 **并行策略**：M6（Namespace + Cgroup）只依赖 M3，可以与 M4（VFS）、M5（网络栈）并行推进，缩短总工期。M7（OverlayFS）依赖 M4 + M6，是 M8 的前置。full 模式中 M12（设备+安全）只依赖 M9，可与 M10/M11 并行。
 
 ---

@@ -2011,4 +2011,95 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ---
 
+## 14. 参考实现映射（外部借鉴整合）
+
+> 完整调研见 `REFERENCES.md`（25 个 GitHub Rust 开源组件）。本节把这些参考的**可借鉴点落成设计决策**：每个条目 = 采纳什么、用到哪个子系统、对应本文档哪一节。
+>
+> 原则：**借鉴思路与接口设计，不引入外部依赖**——内核自包含、`no_std`，32MB/40MB 预算内不允许背大型外部 crate。
+
+### 14.1 设计决策总表
+
+| # | 设计决策（采纳） | 来源组件 | 落地位置 |
+|---|---|---|---|
+| 1 | 调度就绪队列用**侵入式红黑树**（哨兵 nil + O(1) 缓存最左节点），取 `vruntime` 最小者 = 取最左 | intrusive-collections / intrusive-red-black-tree | §4.2、§3.3 `SchedEntity` |
+| 2 | 内核堆 slab 用 **SLUB 风格 bitmap 对象位图 + size class 阶梯**（free 链表只需存 index） | buddy-slab-allocator / slabmalloc | §3.1 `SlabCache` |
+| 3 | buddy 全局分配接入 **OOM 回调**（堆耗尽 → 触发 shrink / cgroup OOM-kill，而非直接 panic） | buddy_system_allocator `LockedHeapWithRescue` | §5.2、§8.1 |
+| 4 | `mmap`/页表映射返回**类型化句柄** `MappedPages`（VA↔PA 双射、读写/执行权限分离，杜绝"映射了忘记录/权限错配"） | Theseus | §3.2 `Mm/Vma` |
+| 5 | 网络缓冲池设**编译期上限**（接口地址数、分片缓冲、重组缓冲、sk_buff 水位） | smoltcp feature 常量 | §2.1-B、§5.2、§3.8 |
+| 6 | virtio 驱动通过 **Hal trait 抽象 DMA**（`dma_alloc/dma_dealloc/phys_to_virt/virt_to_phys`），与页分配器/cgroup 记账解耦 | virtio-drivers / rCore | §13.3 `BlockDevice`、TASKS M10-01 |
+| 7 | VFS 驱动 trait 用**"必选 + 可选默认 ENOSYS"**模式，新增 FS 不改 VFS 核心 | ArceOS axfs_vfs | §13.2 `FileSystemDriver/InodeOps` |
+| 8 | 容器生命周期状态机（created/running/stopped + OOM→SIGKILL 流程）与 libcontainer 语义对齐 | youki libcontainer | §4.6、§7.2、TASKS M14-06 |
+| 9 | cgroup v2 控制器（memory/pids/cpu）行为与 libcgroups v2 语义对齐 | youki libcgroups | §3.5 |
+| 10 | seccomp 采用 **filter_action（白名单）+ default_action 分离**语义，参数匹配可扩展（eq/ne/ge/lt/masked_eq） | seccompiler | §13.5 |
+| 11 | ext4：解析结构对照 ext4-view-rs（`no_std` 只读），写路径/JBD2 语义对照 am-fs-ext4，测试磁盘镜像用 mkext4 | ext4-view-rs / am-fs-ext4 / mkext4 | §13.3、TASKS M10 |
+| 12 | 定时器：第一版最小堆（确定性），评估期对照 tokio **6 层分层时间轮**（tick 粒度 + O(1) 入队） | tokio-time | §4.5 |
+| 13 | futex 等待队列**按物理页地址哈希索引**（不同进程共享内存虚拟地址不同、物理页相同） | Rust std futex | §13.7 |
+| 14 | ELF 动态加载 + auxv 初始化 + `ARCH_SET_FS` 对照 arceos-runlinuxapp 的加载器/用户栈帧模型 | arceos-runlinuxapp | §13.6/13.8、TASKS M11 |
+| 15 | 启动链路用 rust-osdev **bootloader + x86_64 + acpi** 的类型建模（IdtEntry/Gdt/PageTable/VirtAddr） | blog_os / rust-osdev | §1.3/1.4 |
+| 16 | 内存预算可测：子系统 **cell 化 + used/limit 台账**（借鉴 Theseus cell 边界、Hubris 确定性内存） | Theseus / Hubris | §5.3、§10.3 |
+| 17 | unsafe 占比目标 <5%：RustyHermit 实测 ≈3.3% 佐证可行性 | RustyHermit（PLOS'19） | §6.3⑥ |
+
+### 14.2 各子系统借鉴落地明细
+
+#### ① 启动 / 中断 / 页表（§1.3、§1.4）→ blog_os、rust-osdev
+
+- **采纳**：`IdtEntry/Gdt/PageTable/VirtAddr` 等类型直接按 x86_64 crate 建模；`BootInfo`（内存映射/帧缓冲）作为 bootloader 传递给内核的启动信息结构，对应 §1.3 Phase 1 的 multiboot2 信息。
+- **避坑**：若走 GRUB/multiboot2，只借鉴类型不引入 bootloader crate。
+
+#### ② 物理内存（§3.1、§4.1）→ buddy_system_allocator、buddy-slab-allocator、Redox mm
+
+- **采纳**：buddy 分裂/合并的边界实现（`buddy_addr ^ (1 << order) << PAGE_SHIFT`）与测试；slab 对象位图（free 链表用 `Bitmap` 而非 `Vec<*mut u8>`，省 8B/对象）；`LockedHeapWithRescue` 的"耗尽回调"接入 §8.1 的 OOM 分级。
+- **避坑**：单核 UP 阶段不引入 per-CPU slab（DESIGN §11 已定），smoltcp/多核相关设计留到 M9+。
+
+#### ③ 虚拟内存（§3.2）→ Theseus
+
+- **采纳**：`MappedPages { pages, frames, flags }` 类型化映射 —— `mmap` 返回该句柄，保证 VA↔PA 双射、访问权限（`MappedPagesMut/Exec`）由类型区分；页表懒分配逻辑对照 rCore。
+- **避坑**：Theseus 单地址空间架构与容器隔离冲突，只借类型建模。
+
+#### ④ 调度（§4.2）→ rCore、intrusive-collections、RustyHermit
+
+- **采纳**：CFS runqueue = 侵入式 RBTree（`KeyAdapter` 提取 `vruntime`），哨兵 nil 节点免空指针分支，`O(1)` 取最左 = 选中任务；上下文切换汇编对照 rCore。
+- **备选**：若未来引入优先级，参照 RustyHermit 的 `u64` 优先级位图（`leading_zeros` O(1) 选队）。
+
+#### ⑤ 网络栈（§3.8、§4.5）→ smoltcp
+
+- **采纳**：`Socket.rx_buf/tx_buf` 用 RingBuffer（smoltcp `managed::RingBuffer`）；缓冲预算编译期常量（对应 sk_buff 水位）；事件驱动 poll 结构对应 softirq 下半部；TCP 状态机单测组织方式。
+- **避坑**：smoltcp 无 SACK/时间戳/select 全语义，是**基线**不是完整栈；TCP 重传/拥塞（Cubic/NewReno）按 §4.5 自实现。
+
+#### ⑥ VFS / 文件系统（§3.6、§13.2）→ ArceOS axfs_vfs、Redox redoxfs
+
+- **采纳**：`VfsOps/VfsNodeOps` 的"必选方法 + 可选方法默认 ENOSYS"trait 模式（§13.2 已内化）；redoxfs 的"元数据统一为带版本键值对 + WAL"思路用于 ext4 有序写（TASKS M10-06）。
+- **避坑**：redoxfs 的 B+树/日志结构不照搬（tmpfs 用匿名页即可）。
+
+#### ⑦ 容器 / cgroup / OCI（§3.5、§4.6）→ youki、oci-spec-rs
+
+- **采纳**：libcontainer 的生命周期状态机与 builder 模式（spec → 容器状态）；libcgroups v2 的 memory/pids/cpu 语义（内核侧 reimplement，行为对齐）；oci-spec-rs 的 `config.json` 字段模型作为 OCI 解析清单（TASKS M14-04）。
+- **避坑**：youki 是用户态运行时，依赖 syscall；Novos 是内核实现 —— 只借语义与状态机。
+
+#### ⑧ 安全（§13.5）→ seccompiler
+
+- **采纳**：seccomp 的 `filter_action/default_action` 分离 + 参数级匹配语义；按线程/进程类别分别加载 filter 的思路（Novos 按容器粒度）。
+- **避坑**：seccompiler 是 BPF 编译器，Novos 需要的是解释器（<500 行），读其指令生成逻辑理解语义即可。
+
+#### ⑨ 驱动 / 设备（§13.3、§13.4）→ virtio-drivers、Tock
+
+- **采纳**：virtio `Hal` trait（DMA 分配/虚实转换）解耦驱动与页分配器；split VirtQueue 三环（desc/avail/used + free_head）；Tock 的 DMA 缓冲静态化原则 + `set_client` 破环模式。
+- **避坑**：需把 DMA 层接到 Novos 页分配器 + cgroup `charge/uncharge`，直接移植会绕过记账。
+
+#### ⑩ ext4（§13.3）→ ext4-view-rs、am-fs-ext4、mkext4
+
+- **采纳**：ext4-view-rs 的超级块/inode/dir/extent/htree 解析结构（只读路径直接对照）；am-fs-ext4 的写路径 + JBD2 日志语义；mkext4 生成测试磁盘镜像（TASKS M10-10）。
+
+#### ⑪ 动态链接 / TLS / futex（§13.6–13.8）→ arceos-runlinuxapp、Rust std futex
+
+- **采纳**：ELF 动态段加载 + auxv 栈帧初始化 + `ARCH_SET_FS` 的完整链路（arceos-runlinuxapp 的 `loader.rs/main.rs/task.rs` 直接对照）；futex 按物理页哈希索引等待队列。
+- **避坑**：不引入 async runtime（zCore 的异步内核内存开销大，与 32MB 预算相悖）。
+
+#### ⑫ 定时器 / 事件（§4.5、§13.11）→ tokio-time
+
+- **采纳**：第一版最小堆；若 tick 密集、O(n) 触顶，评估 6 层分层时间轮（O(1) 入队/出队，粒度分级）。
+- **避坑**：tokio 的时间轮面向用户态异步，内核接入需包一层 `Timer` 抽象。
+
+---
+
 *本文档为规划稿，随实现推进持续修订。每个里程碑落地后回填实测内存数据。*
