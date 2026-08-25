@@ -289,10 +289,18 @@ novos/
 
 | 等级 | 组件 |
 |---|---|
-| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、轻量 HTTP 服务（网关）、busybox（基础工具）、musl 交叉工具链 |
-| 🟢 值得 | Mosquitto（MQTT）、Lua / MicroPython / QuickJS |
-| 🟡 可选 | NanoMQ、ZeroMQ、CPython |
-| ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang |
+| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、轻量 HTTP 服务（网关）、busybox、musl 交叉工具链、**JSON/CSV**（语言库自带，零难度）、**MQTT 客户端** |
+| 🟢 值得 | Mosquitto（MQTT broker）、**Modbus 工业协议**（网关核心）、**内置 Web 管理界面**（轻量 HTTP + 静态前端，设备管理标配）、**轻量 TLS**（mbedTLS/rustls）、Lua / MicroPython / QuickJS |
+| 🟡 可选 / 远期 | NanoMQ、ZeroMQ、CPython、WebSocket、NTP、OPC-UA、边缘本地推理 |
+| ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang、**Excel/docx、PHP**（设备不处理文档格式；PHP 不是"前端美观"的答案） |
+
+> **边缘网关价值闭环**（组件只围绕这条链选）：**Modbus 采集 → JSON → MQTT/HTTP 上报 → Web 界面监控**。文档格式不在其中。
+
+### AI 调用评估（并入 HTTP 用例，不单独支持）
+
+- **云端大模型 API = HTTP + TLS + JSON 一个用例**，不需要专门支持；
+- HTTP 客户端只需补三条：**SSE 流式响应、长超时、大 JSON 流式解析**（避免一次缓冲）；
+- **本地推理**是另一码事（推理引擎 + 数学库 + NPU 驱动），维持**远期独立子系统**结论。
 
 ### 语言矩阵（按定位收敛）
 
