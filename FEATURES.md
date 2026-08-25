@@ -27,8 +27,8 @@
 | GDT + TSS + IST | 独立栈（DF/NMI/MC/DBG） | ◻ | M2 | DESIGN §1.4 |
 | 物理内存 | Buddy（order 0–10，分裂/合并/`load_end=0` 修正）+ SLUB 风格 Slab（**侵入式空闲链表**）+ GlobalAlloc（Vec/Box 可用）+ OOM 回调 + **可移动页标记**（自测 ALL PASS） | ✅ | M1 | DESIGN §3.1/勘误§9-10 |
 | 虚拟内存 | 4 级页表懒分配、COW、`MappedPages` 类型化句柄 + **内存紧缩 compact_zone** | ◻ | M2/M9 | DESIGN §3.2 |
-| 任务/调度 | M2 切片：内核线程（固定任务表）+ 上下文切换 + 轮转抢占 + `sleep_ticks` 睡眠唤醒（QEMU 实测 3 线程轮转）；CFS vruntime 红黑树 + **RT 类双队列预留** + **优先级继承 PIP** + **per-CPU 占位（SMP 预热）** | ✅ 切片 / ◻ 完整 | M2 | DESIGN §4.2/勘误§7 |
-| 同步原语 | Spinlock / Mutex / WaitQueue，锁序编译期编码；**RT 强制自旋锁 + CFS 关抢占** | ◻ | M2 | DESIGN §3.9/勘误§11 |
+| 任务/调度 | M2 切片：内核线程（固定任务表）+ 上下文切换 + **优先级调度**（PIP 有效优先级）+ 轮转 + `sleep_ticks`/`block_current` 睡眠阻塞唤醒；CFS vruntime 红黑树 + **RT 类双队列预留** + **per-CPU 占位（SMP 预热）** | ✅ 切片 / ◻ 完整 | M2 | DESIGN §4.2/勘误§7 |
+| 同步原语 | Spinlock（关中断自旋）+ 阻塞 Mutex（**内置优先级继承 PIP**，等待者提升持锁者、解锁恢复）；锁序编译期编码 + **RT 强制自旋锁 + CFS 关抢占**（勘误 §11 后续切片） | ✅ 切片 / ◻ 完整 | M2 | DESIGN §3.9/勘误§11 |
 | 定时器/时钟 | PIT 8254 tick（100Hz）已接入调度；最小堆 + 时钟源抽象 + RTC + monotonic + **分层时间轮（评估）** | ✅ 切片 / ◻ 完整 | M2/M9 | DESIGN §6.2⑥/勘误§5 |
 | 系统调用 + init/shell | syscall 表 + ELF 加载 + 用户态 shell + **PID 1 崩溃自愈（rescue_init + watchdog 复位）** | ◻ | M3 | DESIGN §1.2/勘误§3 |
 | VFS + ramfs/tmpfs | Inode/Dentry/SuperBlock + dcache LRU + **最小记录锁** | ◻ | M4 | DESIGN §3.6 |

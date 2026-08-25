@@ -15,5 +15,6 @@ pub mod multiboot2;
 pub mod pit;
 pub mod port;
 pub mod serial;
+pub mod sync;
 pub mod task;
 pub mod vga;

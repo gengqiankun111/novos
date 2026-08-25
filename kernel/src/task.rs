@@ -29,6 +29,8 @@ pub enum TaskState {
     Running,
     /// 睡眠（sleep_until tick 到期前不可调度）
     Sleeping,
+    /// 阻塞（等待锁/事件，由 sync 原语唤醒）
+    Blocked,
     /// 空闲（任务 0）
     Idle,
 }
@@ -43,6 +45,10 @@ pub struct Task {
     pub stack: *mut u8,
     /// Sleeping 唤醒时刻（tick 数）。
     pub sleep_until: u64,
+    /// 基础优先级（越大越高；PIP 恢复目标）。
+    pub base_prio: u8,
+    /// 有效优先级（PIP 提升后的实际调度优先级）。
+    pub effective_prio: u8,
 }
 
 impl Task {
@@ -53,6 +59,8 @@ impl Task {
             ctx_rsp: 0,
             stack: ptr::null_mut(),
             sleep_until: 0,
+            base_prio: 0,
+            effective_prio: 0,
         }
     }
 }
@@ -73,8 +81,66 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
+/// 当前运行任务 id（0 = idle）。
+pub fn current_id() -> usize {
+    // SAFETY: 单核读。
+    unsafe { CURRENT }
+}
+
+/// 任务基础优先级。
+pub fn priority(id: usize) -> u8 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[id].base_prio }
+}
+
+/// 任务有效优先级（PIP 提升后）。
+pub fn effective(id: usize) -> u8 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[id].effective_prio }
+}
+
+/// PIP：将任务 `id` 的有效优先级提升到 `prio`（只升不降）。
+pub fn boost(id: usize, prio: u8) {
+    // SAFETY: 单核，sync 在关中断区调用。
+    unsafe {
+        if TASKS[id].effective_prio < prio {
+            TASKS[id].effective_prio = prio;
+        }
+    }
+}
+
+/// PIP 解除：恢复基础优先级。
+pub fn restore_prio(id: usize) {
+    // SAFETY: 单核，sync 在关中断区调用。
+    unsafe {
+        TASKS[id].effective_prio = TASKS[id].base_prio;
+    }
+}
+
+/// 当前任务阻塞（等锁/事件），hlt 让出直到被 `wake`。
+pub fn block_current() {
+    // SAFETY: 任务上下文，单核。
+    unsafe {
+        let cur = CURRENT;
+        TASKS[cur].state = TaskState::Blocked;
+        core::arch::asm!("hlt", options(nomem, nostack));
+    }
+}
+
+/// 唤醒一个阻塞/睡眠任务（由 sync 原语调用）。
+pub fn wake(id: usize) {
+    // SAFETY: 单核写。
+    unsafe {
+        if id != 0
+            && (TASKS[id].state == TaskState::Blocked || TASKS[id].state == TaskState::Sleeping)
+        {
+            TASKS[id].state = TaskState::Ready;
+        }
+    }
+}
+
 /// 创建内核线程（栈经 mm 分配；任务函数必须永不返回，结束前自行停机/睡眠）。
-pub fn spawn(name: &'static str, entry: fn()) -> Result<u32, &'static str> {
+pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static str> {
     // SAFETY: 创建线程仅在启动阶段（单核、无并发）调用。
     unsafe {
         if TASK_COUNT >= MAX_TASKS {
@@ -106,13 +172,15 @@ pub fn spawn(name: &'static str, entry: fn()) -> Result<u32, &'static str> {
             ctx_rsp: frame_ptr,
             stack,
             sleep_until: 0,
+            base_prio: prio,
+            effective_prio: prio,
         };
         Ok(idx as u32)
     }
 }
 
 /// PIT tick（IRQ 上下文调用，IF 关闭）：保存当前任务 → 唤醒到期睡眠任务 →
-/// 轮转选择下一个 Ready 任务 → 返回其帧指针。
+/// 按有效优先级选择下一个任务（同优先级轮转）→ 返回其帧指针。
 ///
 /// # Safety
 /// 仅由 rust_irq_handler 调用，单核且中断关闭。
@@ -126,24 +194,35 @@ pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
     TICKS.fetch_add(1, Ordering::Relaxed);
     let now = TICKS.load(Ordering::Relaxed);
 
-    // 唤醒到期任务
-    for t in TASKS.iter_mut().take(TASK_COUNT) {
-        if t.state == TaskState::Sleeping && t.sleep_until <= now {
-            t.state = TaskState::Ready;
+    // 唤醒到期睡眠任务
+    for i in 1..TASK_COUNT {
+        if TASKS[i].state == TaskState::Sleeping && TASKS[i].sleep_until <= now {
+            TASKS[i].state = TaskState::Ready;
         }
     }
 
-    // 轮转：从 cur 之后找第一个 Ready
-    let mut next = cur;
-    for i in 1..=MAX_TASKS {
-        let cand = (cur + i) % MAX_TASKS;
-        if cand < TASK_COUNT && TASKS[cand].state == TaskState::Ready {
-            next = cand;
-            break;
+    // 最高有效优先级（PIP 提升后参与选择）
+    let mut best = 0u8;
+    for i in 1..TASK_COUNT {
+        if TASKS[i].state == TaskState::Ready && TASKS[i].effective_prio > best {
+            best = TASKS[i].effective_prio;
         }
     }
-    if next == cur && TASKS[cur].state != TaskState::Ready {
-        next = 0; // 全部睡眠 → 回到 idle
+
+    // 在最高优先级集合内轮转（从 cur 之后找第一个）
+    let mut next = 0; // 默认 idle
+    if best > 0 {
+        for j in 1..=MAX_TASKS {
+            let cand = (cur + j) % MAX_TASKS;
+            if cand != 0
+                && cand < TASK_COUNT
+                && TASKS[cand].state == TaskState::Ready
+                && TASKS[cand].effective_prio == best
+            {
+                next = cand;
+                break;
+            }
+        }
     }
 
     CURRENT = next;

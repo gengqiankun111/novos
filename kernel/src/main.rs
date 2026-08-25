@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, task, vga};
+use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, sync, task, vga};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -76,44 +76,68 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         mm::free_page_count()
     );
 
-    // M2：定时器 + 内核线程轮转调度（见 worker_a/b/c）。
+    // M2 切片2：定时器 + 同步原语（PIP 演示：L 持锁 / M 中间优先级抢占 / H 高优先级等待）。
     pit::init();
-    task::spawn("worker-a", worker_a).expect("spawn worker-a");
-    task::spawn("worker-b", worker_b).expect("spawn worker-b");
-    task::spawn("worker-c", worker_c).expect("spawn worker-c");
-    println!("m2: 3 kernel threads spawned, scheduler idle loop");
+    task::spawn("low", worker_low, 1).expect("spawn low");
+    task::spawn("med", worker_med, 2).expect("spawn med");
+    task::spawn("high", worker_high, 3).expect("spawn high");
+    println!("m2: sync PIP demo (L=1 lock, M=2 busy, H=3 waiter)");
 
     println!("Novos-OS: init done, entering idle halt loop");
     halt_loop();
 }
 
-/// worker-a：睡眠 30 tick（300ms）后打印（验证睡眠唤醒 + 轮转）。
-fn worker_a() {
-    loop {
-        task::sleep_ticks(30);
-        println!("  [worker-a] tick {} woke", task::ticks());
-    }
-}
+/// PIP 演示锁。
+static LOCK: sync::Mutex = sync::Mutex::new();
 
-/// worker-b：睡眠 50 tick（500ms）后打印。
-fn worker_b() {
+/// L（低优先级 1）：拿锁后临界区忙等 10 tick。被 M 抢占会显著推迟；
+/// H 等锁时 PIP 提升 L → 临界区后半段不被 M 抢占，准时完成。
+fn worker_low() {
     loop {
-        task::sleep_ticks(50);
-        println!("  [worker-b] tick {} woke", task::ticks());
-    }
-}
-
-/// worker-c：忙等循环，每 100 tick 打印一次（验证时钟抢占 + tick 计数实时性）。
-fn worker_c() {
-    let mut last = 0u64;
-    loop {
-        let t = task::ticks();
-        if t >= last + 100 {
-            last = t;
-            println!("  [worker-c] tick {} alive", t);
+        task::sleep_ticks(10); // 错开启动，让 H 先睡、M 先跑
+        LOCK.lock();
+        println!("  [L] lock @t{}", task::ticks());
+        let start = task::ticks();
+        // 临界区：忙等 10 tick
+        while task::ticks() < start + 10 {
+            // SAFETY: 忙等。
+            unsafe { core::arch::asm!("pause", options(nomem, nostack)) };
         }
-        // SAFETY: 忙等，无副作用。
-        unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
+        let boosted = task::effective(task::current_id()) > task::priority(task::current_id());
+        println!(
+            "  [L] unlock @t{} (boosted={})",
+            task::ticks(),
+            boosted
+        );
+        LOCK.unlock();
+        task::sleep_ticks(60);
+    }
+}
+
+/// M（中间优先级 2）：睡眠 2 tick + 忙等 6 tick 的周期活动任务。
+/// 无 PIP 时会在 L 的临界区内抢占 L；PIP 提升 L(3) 后无法抢占。
+fn worker_med() {
+    loop {
+        let s = task::ticks();
+        task::sleep_ticks(2);
+        while task::ticks() < s + 8 {
+            // SAFETY: 忙等。
+            unsafe { core::arch::asm!("pause", options(nomem, nostack)) };
+        }
+        println!("  [M] busy window done @t{}", task::ticks());
+    }
+}
+
+/// H（高优先级 3）：等待锁；持锁者被 PIP 提升后快速拿到锁。
+fn worker_high() {
+    loop {
+        task::sleep_ticks(15); // 让 L 先拿到锁
+        println!("  [H] try lock @t{}", task::ticks());
+        LOCK.lock();
+        println!("  [H] got lock @t{}", task::ticks());
+        LOCK.unlock();
+        println!("  [H] released @t{}", task::ticks());
+        task::sleep_ticks(40);
     }
 }
 
