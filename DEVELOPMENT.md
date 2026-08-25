@@ -286,8 +286,8 @@ rustup target add x86_64-unknown-none
 | M10 | Block I/O + ext4 + Page Cache | 34–36 MB | M9 |
 | M11 | 动态链接 + futex + TLS | 36–38 MB | M10 |
 | M12 | 设备框架 + Capabilities + Seccomp | 37–39 MB | M9（可与 M10/M11 并行） |
-| M13 | 完整 /proc + 信号扩展 + getrandom | 38–39 MB | M11（动态链接侧路径） |
-| M14 | Docker 兼容 + apt install + JVM/Python | ≤40 MB | M10+M11+M12+M13 |
+| M13 | 完整 /proc + 信号扩展 + 事件 fd | 38–39 MB | M11 |
+| M14 | Docker 兼容 + 容器服务（Redis + SQLite） | ≤40 MB | M10+M11+M12+M13 |
 
 ---
 
@@ -311,9 +311,9 @@ rustup target add x86_64-unknown-none
 
 ---
 
-## M11：动态链接 + futex + TLS
+## M11：动态链接 + futex + TLS + 工具链
 
-**目标**：能跑动态链接的 ELF + pthread 线程。
+**目标**：能跑动态链接的 ELF + pthread 线程；搭起 Go/Rust/C++ 自编译工具链与 ABI 契约（§15）。
 
 **任务**
 - [ ] ELF 加载器扩展：识别 `PT_INTERP` + `PT_DYNAMIC` + 设置辅助向量（AT_BASE/AT_PHDR/AT_RANDOM）（§13.6）；
@@ -322,11 +322,15 @@ rustup target add x86_64-unknown-none
 - [ ] futex 系统调用（WAIT/WAKE/REQUEUE，按物理页索引等待队列）（§13.7）；
 - [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR + 上下文切换恢复（§13.8）；
 - [ ] clone 扩展：`CLONE_SETTLS` + `CLONE_CHILD_CLEARTID`；
-- [ ] 移植 musl 动态链接版用户态二进制。
+- [ ] 移植 musl 动态链接版用户态二进制；
+- [ ] 交叉工具链：musl-cross + crt1/crti/crtn + linker script + 版本锁定（§15.2）；
+- [ ] ABI 契约文档：`docs/abi.md`（syscall 清单/结构体布局/errno/调用约定）；
+- [ ] 自编译冒烟：Go（`CGO_ENABLED=0` 静态）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`）。
 
 **验收**
 - 运行动态链接的 hello world（`gcc -o hello hello.c` 不加 `-static`）；
 - `pthread_create` 创建线程 + futex 互斥锁正常工作；
+- `GOOS=linux` Go 静态二进制、`x86_64-unknown-linux-musl` Rust 静态二进制、musl 静态 C++ 二进制各自在 Novos 上运行输出；
 - **内存基线**：≤38MB。
 
 ---
@@ -353,7 +357,7 @@ rustup target add x86_64-unknown-none
 
 ## M13：完整 /proc + 信号扩展 + 事件 fd
 
-**目标**：JVM/Python 可观测性 + 完整信号。
+**目标**：动态链接程序（busybox/Go/SQLite 等 musl 二进制）可观测性 + 完整信号。
 
 **任务**
 - [ ] /proc 扩展：`/proc/self/maps`、`/proc/self/status`、`/proc/self/exe`、`/proc/self/fd/`（§13.12）；
@@ -364,32 +368,38 @@ rustup target add x86_64-unknown-none
 - [ ] signalfd（可选，事件循环库用）。
 
 **验收**
-- JVM 启动后 `/proc/self/maps` 输出正确的地址空间布局；
-- JVM 捕获 SIGSEGV 做 null 检查正常工作（`sigaltstack` + SA_SIGINFO）；
+- 动态链接 busybox（musl）启动后 `/proc/self/maps` 输出正确的地址空间布局；
+- 动态程序捕获 SIGSEGV 正常（`sigaltstack` + SA_SIGINFO）；
 - timerfd 到期后 epoll_wait 正确唤醒；
 - **内存基线**：≤39MB。
 
 ---
 
-## M14：Docker 兼容 + apt install + JVM/Python
+## M14：Docker 兼容 + 真实容器服务（Redis + SQLite）
 
-**目标**：full 模式正式达标，跑起 Docker + apt + JVM/Python。
+> 定位调整：**演示目标避开 glibc 陷阱**（见 DESIGN.md §14 与 REFERENCES.md）。
+> `apt/JVM/Python` 是 glibc 生态，价值递减、成本陡增，降为 **P3 可选**；
+> full 模式以"跑真实 musl 容器服务"为验收锚点。
+
+**目标**：full 模式正式达标——docker 兼容 CLI 跑起 **Redis + SQLite** 容器服务，外部可访问。
 
 **任务**
 - [ ] veth pair + bridge 虚拟网络设备（Docker CNI 默认网络）（§13.11）；
 - [ ] 完整 DNAT 端口映射规则（`docker -p 8080:80`）；
 - [ ] OCI runtime spec 兼容（config.json 解析 + seccomp/capability 应用）；
 - [ ] containerd-like 守护进程（容器生命周期管理 + image pull）；
-- [ ] 移植 apt + dpkg（动态链接 musl 版）；
-- [ ] FHS 目录结构：`/usr`、`/var/lib/dpkg`、`/etc/apt`；
-- [ ] 移植 OpenJDK（动态链接 + libjvm.so）；
-- [ ] 移植 CPython（动态链接 + libpython3.x.so）；
-- [ ] HTTPS 下载支持（用户态 TLS，内核 TCP 通道）。
+- [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖，DESIGN §6.2①）；
+- [ ] 移植 **SQLite**（musl 静态 `libsqlite3.a`，`SQLITE_THREADSAFE=0`）：CRUD + WAL 持久化；
+- [ ] 移植 **Redis**（musl 编译）：`SET/GET`、AOF/RDB、外部 TCP 访问；
+- [ ] HTTPS 下载支持（用户态 TLS，内核 TCP 通道）——image pull 与 P3 包管理共用；
+- [ ] （P3 可选）apt + dpkg 移植（动态链接 musl 版）；
+- [ ] （P3 可选）OpenJDK / CPython 移植（需评估 musl 构建，glibc 陷阱风险高）。
 
 **验收**
+- `docker run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问；
+- 容器内 SQLite 建表/增删改查 + 重启后数据持久化（ext4）；
 - `docker run busybox echo hello` 完整跑通（veth + bridge + overlay + seccomp）；
-- `apt install <package>` 成功安装包到 ext4 文件系统；
-- `java -version` + `python3 --version` 在容器内正常运行；
+- 自编译的 Go / Rust / C++ 静态二进制作为容器进程运行（§15 工具链闭环）；
 - **内存基线**：≤40MB（full 模式最终断言）。
 
 ---

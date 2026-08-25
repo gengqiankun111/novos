@@ -773,13 +773,13 @@ run_container(image, spec):
 |---|---|---|---|
 | `file_operations` ~30 个回调 | 兼容数十种文件系统 | 精简到 ~10 个（read/write/lookup/create/unlink/readdir/stat/mmap） | 只支持 ramfs/tmpfs/overlayfs 三种 fs |
 | `inode_operations` ~15 个回调 | 包含 ACL/xattr/fiemap/... | 去掉 ACL、xattr（第一版）、fiemap | 容器场景不依赖 ACL/xattr |
-| POSIX/BSD 文件锁（flock/fcntl） | 完整文件锁语义 | **不实现**（第一版） | 容器工作负载几乎不用内核文件锁 |
+| POSIX/BSD 文件锁（flock/fcntl） | 完整文件锁语义 | **最小字节区间记录锁**（`F_SETLK/F_GETLK/F_UNLCK`，仅 SQLite 需求） | SQLite 需要记录锁防并发写坏库；`flock` 整文件锁不实现 |
 | `address_space` + page cache 通用框架 | 为磁盘 fs 设计的页缓存机制 | tmpfs 用匿名页直接映射，不走 page cache | tmpfs/ramfs 文件本就在内存中 |
 | `getdents` + 线性目录 | 兼容 ext2 线性目录 | BTreeMap 排序目录 | 内存 fs 天然有序 |
 | 挂载传播（mount propagation） | 4 种传播类型 | 仅支持 private + bind | 容器 pivot_root 不需要共享传播 |
 | VFS dentry 操作 20+ 个 | `d_delete/d_dentry/d_iput/d_compare/...` | 去掉 `d_compare`（统一 strcmp）、`d_dentry`、`d_iput` 等 | 只有 3 种 fs，不需要多态 |
 
-> **收益估算**：VFS 层逻辑代码从 Linux 的 ~1.5 万行 → Novos‑OS 目标 ~2000 行，节省约 1–1.5MB .text。
+> **收益估算**：VFS 层逻辑代码从 Linux 的 ~1.5 万行 → Novos‑OS 目标 ~2300 行（含最小记录锁 ~300 行），节省约 1–1.5MB .text。
 
 #### ② 内存管理
 
@@ -2099,6 +2099,40 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 - **采纳**：第一版最小堆；若 tick 密集、O(n) 触顶，评估 6 层分层时间轮（O(1) 入队/出队，粒度分级）。
 - **避坑**：tokio 的时间轮面向用户态异步，内核接入需包一层 `Timer` 抽象。
+
+---
+
+## 15. 工具链支持与 ABI 兼容面（自编译 Go / Rust / C++）
+
+> 核心决策（对应"轻量容器宿主"路线）：**兼容面 = musl 的 syscall 足迹**，而不是"实现全部 Linux syscall"。
+> 因为 Novos 对齐 Linux syscall ABI（§1.2），现成工具链 target 直接复用，**无需自定义语言 target**。
+
+### 15.1 三语言的接入方式（零语言后端成本）
+
+| 语言 | 构建方式 | 说明 |
+|---|---|---|
+| **Go** | `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` | 纯静态二进制，无自定义 target |
+| **Rust** | `x86_64-unknown-linux-musl` target（rustup 现成） | `cargo build --target ... --release` 直接出静态 musl 二进制 |
+| **C++** | musl-cross（musl.cc 预编译或 musl-cross-make）+ `-static -static-libstdc++ -static-libgcc` | 复用现成工具链 |
+
+> 三者本就为 Linux ABI 生成代码，Novos 兼容的就是这个 ABI —— 语言层零改造。
+
+### 15.2 新增工作量（约 2–3 人月，单人）
+
+| 工作项 | 内容 | 里程碑归属 |
+|---|---|---|
+| 交叉工具链搭建 | musl-cross + crt1/crti/crtn + linker script + 版本锁定 | M11 |
+| musl 适配 | 跑通 musl；把"musl 需要的 syscall"定成兼容面清单 | M11 |
+| ABI 契约文档化 | syscall 清单、结构体布局、errno、调用约定 → SDK 文档 | M11（持续维护） |
+| 测试框架 + CI | 编译 → 打包 → QEMU 真跑 + 断言 + 示例程序 | M11/M14 |
+| 语言各自增量 | Go 1–2 周、Rust 1–3 周、C++ 2–4 周（各自怪癖） | M14 |
+
+### 15.3 兼容面收敛原则
+
+- **以 musl 的 syscall 足迹为边界**：只保证"musl + 目标程序"用到的路径全对，其余 syscall 返回 `ENOSYS`；
+- **可测试、可回归**：每个新增 syscall 有对应 host 测试 + QEMU 集成断言；
+- **与 §13.6 动态链接的关系**：容器服务默认静态编译（Go/Rust/C++）；musl 动态链接（ld-musl）为 musl 生态二进制服务，两者并存；
+- **SDK 文档为交付物**：`docs/abi.md` 维护 syscall 清单/结构体/errno/调用约定，作为工具链适配的契约。
 
 ---
 

@@ -79,6 +79,8 @@ M14-06 containerd / M14-07 image pull → M14-08 apt / M14-10 JVM / M14-11 Pytho
 | M11-09 | 移植 musl 动态链接用户态二进制（libc.so、ld.so、busybox 动态版） | **P1** | M11-03 | 3 | 动态 busybox 的 `ls/cat/echo` 全部可用 |
 | M11-10 | pthread 集成测试：mutex/cond/thread 生命周期 | **P1** | M11-05, M11-08 | 3 | `pthread` 压测 1000 次创建/销毁无死锁、无内存增长 |
 | M11-11 | 内存基线测量与回填（≤38MB） | **P1** | 全部 | 1 | 动态链接进程常驻统计正确，CI 断言通过 |
+| M11-12 | 交叉工具链 + ABI 契约（§15.2）：musl-cross + crt1/crti/crtn + linker script + 版本锁定；`docs/abi.md`（syscall 清单/结构体/errno/调用约定） | **P1** | M11-03 | 10 | 工具链出静态二进制可在 Novos 加载；abi.md 覆盖 musl syscall 足迹 |
+| M11-13 | 自编译冒烟：Go（`CGO_ENABLED=0`）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`） | **P1** | M11-12 | 7 | 三语言 hello 静态二进制在 Novos 上运行输出；CI 断言通过 |
 
 ---
 
@@ -127,7 +129,9 @@ M14-06 containerd / M14-07 image pull → M14-08 apt / M14-10 JVM / M14-11 Pytho
 
 ---
 
-## 6. M14：Docker 兼容 + apt install + JVM/Python（目标 ≤40MB）
+## 6. M14：Docker 兼容 + 真实容器服务（Redis + SQLite）（目标 ≤40MB）
+
+> 定位调整：**演示目标避开 glibc 陷阱**（DESIGN.md §14）。`apt/JVM/Python` 属 glibc 生态，降为 P3 可选；full 模式以"跑真实 musl 容器服务（Redis + SQLite）"为验收锚点。
 
 本里程碑把全部扩展点收拢成端到端能力。veth/bridge 与 OCI 解析是容器网络和容器创建的前置。
 
@@ -139,14 +143,15 @@ M14-06 containerd / M14-07 image pull → M14-08 apt / M14-10 JVM / M14-11 Pytho
 | M14-04 | OCI runtime spec 解析：`config.json`（rootfs/mounts/capabilities/seccomp/env） | **P0** | M9 | 5 | 解析 busybox OCI bundle 并生成正确的容器创建参数 |
 | M14-05 | 容器创建流程接入扩展：seccomp filter + capabilities + devpts 挂载 | **P1** | M14-04, M12-07/10 | 3 | 容器内进程的 cap 集与 seccomp profile 与 config.json 一致 |
 | M14-06 | containerd‑like 守护进程：容器生命周期 + image pull + 状态存储 | **P1** | M14-05 | 10 | `pull` 镜像 → 创建 → 启动 → 停止 → 删除 全流程无泄漏 |
-| M14-07 | image pull：registry API v2 + 层下载 + tar/gzip 解压（用户态） | **P1** | M14-06 | 6 | 从 registry 拉 busybox 镜像并正确解出 rootfs |
-| M14-08 | apt + dpkg 移植（动态链接 musl 版）：`/var/lib/dpkg` 状态 + `apt update/install` | **P1** | M14-06, M11-03 | 6 | `apt update` 成功；`apt install <小包>` 后二进制可执行 |
-| M14-09 | FHS 目录结构：`/usr /var/lib/dpkg /etc/apt /bin /lib` | **P2** | M14-08 | 2 | apt 安装的包按 FHS 落到正确路径 |
-| M14-10 | OpenJDK 移植（动态链接 + libjvm.so）：`java -version` + 小程序运行 | **P1** | M14-06, M13-13 | 12 | `java -version` 输出；`javac` 编译并运行 HelloWorld |
-| M14-11 | CPython 移植（动态链接 + libpython3.x.so） | **P1** | M14-06, M13-04 | 6 | `python3 -c "import ssl; print(1)"` 可执行；`pip install` 基本可用 |
-| M14-12 | HTTPS/TLS 用户态库（mbedTLS 或 Rust TLS），apt/JVM 走 HTTPS | **P2** | M14-08 | 5 | `apt update` 走 HTTPS 源成功；JVM `https://` 连接成功 |
-| M14-13 | 端到端验收：`docker run busybox` + `apt install` + `java` + `python3` 全链路 | **P0** | M14-06/08/10/11 | 4 | 四项目标演示命令全部通过；无内核 panic |
-| M14-14 | 内存基线最终测量（≤40MB）与文档回填 | **P1** | M14-13 | 1 | full 模式 CI 断言通过，`docs/bench/` 回填 |
+| M14-07 | image pull：registry API v2 + 层下载 + tar/gzip 解压（用户态） | **P1** | M14-06 | 6 | 从 registry 拉 busybox/redis 镜像并正确解出 rootfs |
+| M14-08 | **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（按文件组织锁表 `{owner,start,len,type}`） | **P0** | M10-05 | 3 | SQLite 并发读写不损坏库文件；`F_GETLK` 查询正确；锁随 fd 关闭/进程退出释放 |
+| M14-09 | 移植 **SQLite**（musl 静态 `libsqlite3.a`，`SQLITE_THREADSAFE=0`）：CRUD + WAL | **P1** | M14-08, M11-03 | 6 | 容器内建表/增删改查通过；`PRAGMA journal_mode=WAL` 重启后数据持久化 |
+| M14-10 | 移植 **Redis**（musl 编译）：`SET/GET`、AOF/RDB、外部 TCP 访问 | **P1** | M14-06, M13-11 | 8 | 容器外 `redis-cli SET/GET` 经端口映射可访问；AOF 重启恢复 |
+| M14-11 | HTTPS/TLS 用户态库（mbedTLS 或 Rust TLS），image pull / P3 包管理走 HTTPS | **P2** | M14-07 | 5 | 从 registry 走 HTTPS 拉镜像成功 |
+| M14-12 | 端到端验收：`docker run redis` + 容器内 SQLite + `docker run busybox` | **P0** | M14-09/10/06 | 4 | 三项演示命令全部通过；无内核 panic |
+| M14-13 | 内存基线最终测量（≤40MB）与文档回填 | **P1** | M14-12 | 1 | full 模式 CI 断言通过，`docs/bench/` 回填 |
+| M14-14 | （P3 可选）apt + dpkg 移植（动态链接 musl 版） | **P3** | M14-06, M11-03 | 6 | `apt update` 成功；小包安装后可执行 |
+| M14-15 | （P3 可选）OpenJDK / CPython 移植（需先评估 musl 构建可行性） | **P3** | M13-13 | 12 | `java -version` / `python3 --version` 输出 |
 
 ---
 
@@ -176,7 +181,8 @@ M14-06 containerd / M14-07 image pull → M14-08 apt / M14-10 JVM / M14-11 Pytho
 | 18 | M14-01 | M14 | P0 | veth |
 | 19 | M14-02 | M14 | P0 | bridge |
 | 20 | M14-04 | M14 | P0 | OCI spec 解析 |
-| 21 | M14-13 | M14 | P0 | 端到端验收 |
+| 21 | M14-08 | M14 | P0 | 最小记录锁（SQLite 前置） |
+| 22 | M14-12 | M14 | P0 | 端到端验收（redis + sqlite + busybox） |
 
 并行支线（仅依赖 M9，建议在主线 1–5 号任务期间启动）：M12-01 → M12-03/04 → M12-07/08 → M12-10/11。
 
@@ -189,20 +195,20 @@ P0 之后按里程碑内部顺序跟进 P1；P2 任务（ioctl 扩展、/proc �
 | 里程碑 | P0 工作量 | P1 工作量 | P2+P3 工作量 | 小计 |
 |---|---|---|---|---|
 | M10 | 28 | 17 | 0 | 45 |
-| M11 | 20 | 8 | 0 | 28 |
+| M11 | 20 | 25 | 0 | 45 |
 | M12 | 15 | 6 | 6 | 27 |
 | M13 | 14 | 13 | 8 | 35 |
-| M14 | 21 | 36 | 7 | 64 |
-| **合计** | **98** | **80** | **21** | **199 人日** |
+| M14 | 24 | 37 | 18 | 79 |
+| **合计** | **101** | **98** | **32** | **231 人日** |
 
 工期推演（假设团队 1–2 人，全职投入）：
 
 | 配置 | 关键路径 | 说明 |
 |---|---|---|
-| 1 人 | 约 10–12 个月 | 串行全部任务 + 20% 缓冲 |
-| 2 人（主线 + M12 并行） | 约 7–8 个月 | 关键路径 199 − M12(27) ≈ 172 人日 ÷ 2 + M12 并行消化 + 20% 缓冲 |
+| 1 人 | 约 12–14 个月 | 串行全部任务 + 20% 缓冲 |
+| 2 人（主线 + M12 并行） | 约 8–10 个月 | 关键路径 231 − M12(27) ≈ 204 人日 ÷ 2 + M12 并行消化 + 20% 缓冲 |
 
-估算前提：M9 已稳定，`--features full` 编译链已通，QEMU 集成测试框架可复用。若 ext4 写入一致性（M10-06）或 JVM 兼容调试（M14-10）超出预期，工期向区间上沿偏移。
+估算前提：M9 已稳定，`--features full` 编译链已通，QEMU 集成测试框架可复用。若 ext4 写入一致性（M10-06）或 Redis 网络兼容调试（M14-10）超出预期，工期向区间上沿偏移。
 
 ---
 
@@ -211,7 +217,7 @@ P0 之后按里程碑内部顺序跟进 P1；P2 任务（ioctl 扩展、/proc �
 | 风险 | 所在 | 影响 | 缓解措施 |
 |---|---|---|---|
 | ext4 写入一致性难验证 | M10-06 | 数据损坏类 bug 潜伏 | 先做只读挂载验证再开写；写路径用有序写 + flush，用 QEMU 断电模拟做回归 |
-| JVM 对内核兼容性要求最高，调试链长 | M14-10 | 单任务 12 人日可能超支 | 提前在 M13 做最小 JVM 冒烟（M13-13），把兼容问题前置暴露，而不是留到 M14 |
+| JVM 对内核兼容性要求最高，调试链长 | M14-15 | 单任务 12 人日可能超支 | 保持 P3 可选；先做 musl 构建可行性评估，不通过则不投入 |
 | seccomp profile 误杀业务程序 | M12-12 | Docker 容器内程序异常退出 | 先跑 Docker 默认 profile 全命令集回归，再开放自定义 profile |
 | 动态链接定位问题难以区分内核/用户态 | M11-03 | 调试成本高 | 准备 host 上等价环境的对照测试；musl 侧问题先排除再查内核 |
 | 40MB 预算超标 | M14-14 | full 模式无法达标 | 每个里程碑末做基线测量（M10-11/M11-11/M12-13/M13-14），超标即排查，不拖到 M14 |
@@ -224,7 +230,7 @@ P0 之后按里程碑内部顺序跟进 P1；P2 任务（ioctl 扩展、/proc �
 | 里程碑 | 核心验收 | 内存基线 |
 |---|---|---|
 | M10 | ext4 读写 + 重启持久化；MAP_SHARED 共享物理页 | ≤36MB |
-| M11 | 动态链接 hello world；pthread 100 线程无泄漏 | ≤38MB |
+| M11 | 动态链接 hello world；pthread 100 线程无泄漏；Go/Rust/C++ 自编译冒烟 | ≤38MB |
 | M12 | `docker exec` PTY 交互；seccomp 拦截 `reboot` | ≤39MB |
-| M13 | JVM 启动 + SIGSEGV 捕获 + `/proc/self/maps` 正确 | ≤39MB |
-| M14 | `docker run` + `apt install` + `java` + `python3` 全链路 | ≤40MB |
+| M13 | 动态 busybox（musl）启动 + SIGSEGV 捕获 + `/proc/self/maps` 正确 | ≤39MB |
+| M14 | `docker run redis` + 容器内 SQLite 持久化 + `docker run busybox` 全链路 | ≤40MB |
