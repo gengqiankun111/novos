@@ -6,14 +6,19 @@
 KERNEL_TARGET := x86_64-unknown-none
 KERNEL_ELF    := target/$(KERNEL_TARGET)/release/novos-kernel
 KERNEL_BIN    := target/novos-kernel.bin
-LLVM_OBJCOPY  := $(shell rustc --print sysroot)/lib/rustlib/$(KERNEL_TARGET)/bin/rust-objcopy
 
-# QEMU：Windows 常见安装路径自动探测，其余走 PATH
-QEMU ?= qemu-system-x86_64
+# objcopy：Windows(MSVC) 宿主用 llvm-objcopy，Linux 用 rust-objcopy
 ifeq ($(OS),Windows_NT)
-  ifneq ("$(wildcard C:/Program Files/qemu/qemu-system-x86_64.exe)","")
-    QEMU := "C:/Program Files/qemu/qemu-system-x86_64.exe"
-  endif
+  LLVM_OBJCOPY := $(shell rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-objcopy
+else
+  LLVM_OBJCOPY := $(shell rustc --print sysroot)/lib/rustlib/$(KERNEL_TARGET)/bin/rust-objcopy
+endif
+
+# QEMU：Windows 用安装目录完整路径（可用命令行 `make QEMU=...` 覆盖）
+ifeq ($(OS),Windows_NT)
+  QEMU ?= "C:/Program Files/qemu/qemu-system-x86_64.exe"
+else
+  QEMU ?= qemu-system-x86_64
 endif
 
 .PHONY: build image run qemu clean
