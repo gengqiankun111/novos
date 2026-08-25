@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, task, vga, vmm};
+use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, task, vga};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -76,50 +76,52 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         mm::free_page_count()
     );
 
-    // M2 切片3：定时器 + fork/COW 演示（父写 0xAAAA，fork 后子写 0xBBBB，
-    // 验证物理页独立：子 COW 复制新页，父页不受影响）。
+    // M2 切片4：定时器 + CFS vruntime 红黑树调度（权重 = 1 << prio，
+    // 期望 CPU 占比 A:B:C ≈ 2:4:8）+ per_cpu 占位。
     pit::init();
-    task::spawn("fork-demo", worker_fork, 2).expect("spawn fork-demo");
-    println!("m2: vmm/fork COW demo");
+    task::spawn("cfs-a", worker_cfs_a, 1).expect("spawn cfs-a");
+    task::spawn("cfs-b", worker_cfs_b, 2).expect("spawn cfs-b");
+    task::spawn("cfs-c", worker_cfs_c, 3).expect("spawn cfs-c");
+    // SMP 预热：验证 cpu_rq(0) 可访问（占位）
+    let rq = unsafe { novos_kernel::smp::cpu_rq(0) };
+    println!(
+        "m2: cfs demo (rq tree empty={}) started",
+        rq.rbt.is_empty()
+    );
 
     println!("Novos-OS: init done, entering idle halt loop");
     halt_loop();
 }
 
-/// fork/COW 演示：mmap 一页 → 父写 → fork → 子 COW 写 → 验证物理页分离。
-fn worker_fork() {
-    let pid = task::current_id();
-    let v = vmm::mmap(pid, vmm::PAGE_SIZE);
-    vmm::touch(pid, v);
-    vmm::write_u32(pid, v, 0x1111_AAAA);
-    println!(
-        "  [P] va={:#x} phys={:#x} val={:#x}",
-        v,
-        vmm::phys(pid, v),
-        vmm::read_u32(pid, v)
-    );
-
-    let child = task::fork("fork-child");
-    if child == 0 {
-        // 子侧：COW 写 → 分配新物理页，父页不受影响
-        let cid = task::current_id();
-        vmm::write_u32(cid, v, 0x2222_BBBB);
-        println!(
-            "  [C] phys={:#x} val={:#x} (cow copy)",
-            vmm::phys(cid, v),
-            vmm::read_u32(cid, v)
-        );
-        task::exit();
-    } else {
-        // 父侧：等子退出后读自己的页（应仍是 0x1111_AAAA，物理页 0x202000 未变）
-        task::waitpid(child as usize);
-        println!(
-            "  [P] after wait: phys={:#x} val={:#x}",
-            vmm::phys(pid, v),
-            vmm::read_u32(pid, v)
-        );
-        task::exit();
+/// CFS 忙等任务公共体：每 100 tick 打印本任务的 run_ticks 与 vruntime。
+fn cfs_loop(tag: &'static str, prio: u8) {
+    let mut last = 0u64;
+    loop {
+        let t = task::ticks();
+        if t >= last + 100 {
+            last = t;
+            let id = task::current_id();
+            println!(
+                "  [{}] prio={} run={} vr={}",
+                tag,
+                prio,
+                task::run_ticks(id),
+                task::vruntime(id)
+            );
+        }
+        // SAFETY: 忙等。
+        unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
     }
+}
+
+fn worker_cfs_a() {
+    cfs_loop("A", 1);
+}
+fn worker_cfs_b() {
+    cfs_loop("B", 2);
+}
+fn worker_cfs_c() {
+    cfs_loop("C", 3);
 }
 
 /// 空闲停机循环。

@@ -51,6 +51,12 @@ pub struct Task {
     pub base_prio: u8,
     /// 有效优先级（PIP 提升后的实际调度优先级）。
     pub effective_prio: u8,
+    /// CFS vruntime（虚拟运行时间，红黑树键）。
+    pub vruntime: u64,
+    /// 累计被调度运行 tick 数（CFS 公平性观测）。
+    pub run_ticks: u64,
+    /// 是否在 runqueue 红黑树中。
+    pub in_rq: bool,
 }
 
 impl Task {
@@ -63,6 +69,9 @@ impl Task {
             sleep_until: 0,
             base_prio: 0,
             effective_prio: 0,
+            vruntime: 0,
+            run_ticks: 0,
+            in_rq: false,
         }
     }
 }
@@ -101,6 +110,18 @@ pub fn effective(id: usize) -> u8 {
     unsafe { TASKS[id].effective_prio }
 }
 
+/// 任务累计运行 tick（CFS 公平性观测）。
+pub fn run_ticks(id: usize) -> u64 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[id].run_ticks }
+}
+
+/// 任务 vruntime（CFS 红黑树键）。
+pub fn vruntime(id: usize) -> u64 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[id].vruntime }
+}
+
 /// PIP：将任务 `id` 的有效优先级提升到 `prio`（只升不降）。
 pub fn boost(id: usize, prio: u8) {
     // SAFETY: 单核，sync 在关中断区调用。
@@ -123,20 +144,28 @@ pub fn restore_prio(id: usize) {
 pub fn block_current() {
     // SAFETY: 任务上下文，单核。
     unsafe {
+        crate::sync::cli();
         let cur = CURRENT;
         TASKS[cur].state = TaskState::Blocked;
+        if TASKS[cur].in_rq {
+            crate::smp::cpu_rq(0).rbt.remove(cur);
+            TASKS[cur].in_rq = false;
+        }
+        crate::sync::sti();
         core::arch::asm!("hlt", options(nomem, nostack));
     }
 }
 
-/// 唤醒一个阻塞/睡眠任务（由 sync 原语调用）。
+/// 唤醒一个阻塞任务（由 sync 原语调用；**调用方须已关中断**——sync 的 unlock 在 cli 区）。
 pub fn wake(id: usize) {
-    // SAFETY: 单核写。
+    // SAFETY: 单核写；cli 保护树操作。
     unsafe {
-        if id != 0
-            && (TASKS[id].state == TaskState::Blocked || TASKS[id].state == TaskState::Sleeping)
-        {
+        if id != 0 && TASKS[id].state == TaskState::Blocked {
             TASKS[id].state = TaskState::Ready;
+            if !TASKS[id].in_rq {
+                crate::smp::cpu_rq(0).rbt.insert(id, TASKS[id].vruntime);
+                TASKS[id].in_rq = true;
+            }
         }
     }
 }
@@ -176,16 +205,26 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             sleep_until: 0,
             base_prio: prio,
             effective_prio: prio,
+            vruntime: 0,
+            run_ticks: 0,
+            in_rq: false,
         };
+        // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
+        // SAFETY: 单核；cli 保护树操作。
+        unsafe {
+            crate::sync::cli();
+            crate::smp::cpu_rq(0).rbt.insert(idx, 0);
+            TASKS[idx].in_rq = true;
+            crate::sync::sti();
+        }
         Ok(idx as u32)
     }
 }
 
-/// PIT tick（IRQ 上下文调用，IF 关闭）：保存当前任务 → 唤醒到期睡眠任务 →
-/// 按有效优先级选择下一个任务（同优先级轮转）→ 返回其帧指针。
+/// PIT tick（IRQ 上下文调用，IF 关闭）：CFS 记账 → 维护就绪树 → 取最小 vruntime 运行。
 ///
 /// # Safety
-/// 仅由 rust_irq_handler 调用，单核且中断关闭。
+/// 仅由 rust_irq_handler 调用，单核且中断关闭（树操作天然互斥）。
 pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
     let cur = CURRENT;
     TASKS[cur].ctx_rsp = frame as usize;
@@ -196,33 +235,54 @@ pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
     TICKS.fetch_add(1, Ordering::Relaxed);
     let now = TICKS.load(Ordering::Relaxed);
 
-    // 唤醒到期睡眠任务
+    // CFS 记账：当前任务 vruntime += 1024 / 权重（权重 = 1 << effective_prio）。
+    // 权重高 → vruntime 增长慢 → 被选中频率高 → 获得更多 CPU（含 PIP 提升语义）。
+    let rq = crate::smp::cpu_rq(0);
+    if cur != 0 {
+        let weight = 1u64 << TASKS[cur].effective_prio;
+        TASKS[cur].vruntime += 1024 / weight;
+        TASKS[cur].run_ticks += 1;
+        // 树维护：先出树，若仍就绪再以新 vruntime 入树
+        if TASKS[cur].in_rq {
+            rq.rbt.remove(cur);
+            TASKS[cur].in_rq = false;
+        }
+        if TASKS[cur].state == TaskState::Ready {
+            rq.rbt.insert(cur, TASKS[cur].vruntime);
+            TASKS[cur].in_rq = true;
+        }
+    }
+
+    // 唤醒到期睡眠任务并入树（clamp 到最小 vruntime 防饿死）
+    let min_vruntime = rq.rbt.min().map(|id| TASKS[id].vruntime);
     for i in 1..TASK_COUNT {
         if TASKS[i].state == TaskState::Sleeping && TASKS[i].sleep_until <= now {
             TASKS[i].state = TaskState::Ready;
+            if let Some(m) = min_vruntime {
+                if TASKS[i].vruntime < m {
+                    TASKS[i].vruntime = m; // 唤醒 clamp：不落后于就绪队列
+                }
+            }
+            if !TASKS[i].in_rq {
+                rq.rbt.insert(i, TASKS[i].vruntime);
+                TASKS[i].in_rq = true;
+            }
         }
     }
 
-    // 最高有效优先级（PIP 提升后参与选择）
-    let mut best = 0u8;
-    for i in 1..TASK_COUNT {
-        if TASKS[i].state == TaskState::Ready && TASKS[i].effective_prio > best {
-            best = TASKS[i].effective_prio;
-        }
-    }
-
-    // 在最高优先级集合内轮转（从 cur 之后找第一个）
-    let mut next = 0; // 默认 idle
-    if best > 0 {
-        for j in 1..=MAX_TASKS {
-            let cand = (cur + j) % MAX_TASKS;
-            if cand != 0
-                && cand < TASK_COUNT
-                && TASKS[cand].state == TaskState::Ready
-                && TASKS[cand].effective_prio == best
-            {
-                next = cand;
-                break;
+    // 取最小 vruntime 就绪任务；树空 → idle
+    let mut next = 0;
+    if let Some(id) = rq.rbt.min() {
+        if TASKS[id].state == TaskState::Ready {
+            next = id;
+        } else {
+            // 树中有脏节点（状态非 Ready）：移除并重取
+            rq.rbt.remove(id);
+            TASKS[id].in_rq = false;
+            if let Some(id2) = rq.rbt.min() {
+                if TASKS[id2].state == TaskState::Ready {
+                    next = id2;
+                }
             }
         }
     }
@@ -238,12 +298,19 @@ pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
 pub fn sleep_ticks(n: u64) {
     // SAFETY: 任务上下文，单核。
     unsafe {
+        crate::sync::cli();
         let cur = CURRENT;
         if cur == 0 {
+            crate::sync::sti();
             return; // idle 不睡眠
         }
         TASKS[cur].sleep_until = TICKS.load(Ordering::Relaxed) + n;
         TASKS[cur].state = TaskState::Sleeping;
+        if TASKS[cur].in_rq {
+            crate::smp::cpu_rq(0).rbt.remove(cur);
+            TASKS[cur].in_rq = false;
+        }
+        crate::sync::sti();
         // 让出 CPU：下个 tick 会在 IRQ 中完成切换；hlt 可被任何中断唤醒后返回。
         core::arch::asm!("hlt", options(nomem, nostack));
     }
@@ -371,7 +438,13 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         sleep_until: 0,
         base_prio: TASKS[cur].base_prio,
         effective_prio: TASKS[cur].effective_prio,
+        vruntime: TASKS[cur].vruntime,
+        run_ticks: 0,
+        in_rq: false,
     };
+    // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
+    crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
+    TASKS[cid].in_rq = true;
     TASK_COUNT += 1;
     cid as u32 // 父侧返回子 id
 }

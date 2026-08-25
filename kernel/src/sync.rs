@@ -196,12 +196,14 @@ impl Mutex {
     }
 }
 
-fn cli() {
+/// 关中断（任务上下文临界区保护；与 `sti` 配对）。
+pub fn cli() {
     // SAFETY: cli 为特权指令。
     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
 }
 
-fn sti() {
+/// 开中断。
+pub fn sti() {
     // SAFETY: sti 为特权指令。
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
 }
