@@ -88,6 +88,25 @@ Novos‑OS 不是 Linux 的复制品。它砍掉了数十年来的兼容包袱�
 
 ---
 
+## 交互模式（无头远程运维）
+
+> 设备无头（无屏幕键盘），一切交互在电脑端远程操作，核心三层通道由浅入深（详见 `interaction.md`）。
+
+| 层级 | 通道 | 电脑端工具 | 场景 | 是否连线 |
+|---|---|---|---|---|
+| 用户层 | **Web 管理界面** | 浏览器访问 `http://<设备IP>` | 日常管理、拉取/运行容器、看状态 | 网络远程 |
+| 开发层 | **SSH / 串口 Console** | 终端 + dropbear / PuTTY + USB 转串口 | 开发调试、救援 | SSH 远程；串口需物理连线 |
+| 运维层 | **Agent 主动上联** | 云管理平台网页 | 规模化部署、远程 OTA | 设备主动连平台 |
+
+**镜像拉取（"docker pull" → `novos-pull`）**：
+- **手动**：Web 界面点"拉取镜像" → 设备端 `novos-pull` 连 registry（HTTPS + token）→ SHA-256 校验 → 解压 → 本地镜像仓库 → 点"运行" → 界面显示状态；
+- **自动**：设备上电 → Agent 上联平台 → 下发"部署 xx 版本" → 自动 pull/校验/运行 → 回报状态/日志 → 异常一键回滚（OCI 层复用）；
+- **离线**：设备连不上公网时，可上网电脑 `docker save` 导出 tar → Web 上传或 U 盘拷入。
+
+> **交互心智统一**：开发期在 Windows 上操作 QEMU 里的 Novos，生产期在浏览器/平台操作真实设备，完全一致。
+
+---
+
 ## 项目背景与动机
 
 ### 为什么不用裁剪版 Linux？
@@ -319,6 +338,9 @@ novos/
 - [ ] Redis 容器服务（musl 编译，外部 TCP 访问）
 - [ ] 自编译工具链：Go（CGO_ENABLED=0）/ Rust（x86_64-unknown-linux-musl）/ C++（musl-cross）
 - [ ] （值得）Mosquitto MQTT broker（musl 静态，IoT 设备接入）
+- [ ] （值得）内置 Web 管理界面（轻量 HTTP + 静态前端，设备管理标配）
+- [ ] （值得）SSH（dropbear 轻量实现）——开发层远程调试/救援
+- [ ] （值得）Agent 主动上联 + 离线导入（`docker save` tar → Web 上传/U 盘）
 - [ ] （值得）Lua / MicroPython / QuickJS（轻量脚本运行时）
 - [ ] （P3 可选）`apt install` 支持（动态链接 + FHS + HTTPS）
 - [ ] （P3 可选）JVM / Python 运行时（需评估 musl 构建）
@@ -396,6 +418,7 @@ make run
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 设计文档：架构、内存预算拆解、数据结构、核心算法 |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发路线图：M0–M9 里程碑、任务拆解、验收标准 |
+| [interaction.md](interaction.md) | 交互模式：无头设备三层远程通道（Web/SSH/Agent） |
 
 ---
 

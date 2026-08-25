@@ -404,6 +404,8 @@ rustup target add x86_64-unknown-none
 - [ ] （值得）Mosquitto MQTT broker（musl 静态，IoT 设备接入，DESIGN §18.4）；
 - [ ] （值得）Modbus 工业协议（网关核心，采集侧，DESIGN §18.5）；
 - [ ] （值得）内置 Web 管理界面（轻量 HTTP + 静态前端，设备管理标配）；
+- [ ] （值得）SSH（dropbear 轻量实现）——开发层远程调试/救援（§20.1）；
+- [ ] （值得）Agent 主动上联 + 离线导入（`docker save` tar → Web 上传/U 盘）（§20.2）；
 - [ ] HTTP 客户端增强：SSE 流式响应 + 长超时 + 大 JSON 流式解析（AI 调用 = HTTP 用例，DESIGN §18.6）；
 - [ ] （值得）Lua / MicroPython / QuickJS 轻量脚本运行时；
 - [ ] （P3 可选）apt + dpkg 移植（动态链接 musl 版）；
