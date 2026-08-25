@@ -447,6 +447,7 @@ make run
 | [EXTENSIONS.md](EXTENSIONS.md) | 远期扩展口：Maple Tree / rhashtable / trie / 基数树（feature-gated） |
 | [DESIGN_EXTENSION.md](DESIGN_EXTENSION.md) | 长期设计：三主线（免疫/透明/好用） |
 | [DEVELOP_EXTENSION.md](DEVELOP_EXTENSION.md) | 长期开发：三主线任务拆解 + v1.0/v2.0/v3.0 节奏 |
+| [REPOSITORY.md](REPOSITORY.md) | 软件仓库规范（NRS）：文件规范/后端协议/CLI 流程/签名验证 |
 
 ---
 
@@ -516,7 +517,7 @@ Novos-OS 从"出色内核"走向"成功平台"的关键：一个**小而精**的
 （`novos deploy redis`）。
 
 **现在即可行动**：选定 Redis 7.2.4+、给出官方下载链接、编写《为 Novos-OS 构建 Redis》
-musl 静态编译指南。详见 [DESIGN §22](docs/DESIGN.md)。
+musl 静态编译指南。详见 [DESIGN §22](docs/DESIGN.md) 与 [REPOSITORY.md](REPOSITORY.md)（NRS 完整规范）。
 
 ### 用户需求演进（roadmap 定心丸）
 

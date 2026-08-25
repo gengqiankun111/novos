@@ -2586,6 +2586,10 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 > Novos-OS 从"出色的内核"走向"成功的平台"的必经之路。对照 §21 的被动防御（`novos-check`
 > 拦截），官方仓库是**主动保障**——预编译、预配置、签名、与 musl 完全兼容，把设计哲学
 > （安全、轻量、确定）通过官方软件包传递给用户。演进节奏见 DEVELOP_EXTENSION 主线一。
+>
+> **完整技术规范（NRS）**：本地文件规范（`repos.list` + `softwares.list`）、后端协议
+> （`index.json` + `pool/` 签名归档）、CLI 流程、致命 Bug 防护、极简后端搭建，见
+> [REPOSITORY.md](REPOSITORY.md)。
 
 ### 22.1 为什么需要官方仓库（对比"官网链接清单"）
 
