@@ -394,6 +394,8 @@ rustup target add x86_64-unknown-none
 - [ ] 移植 **SQLite**（musl 静态 `libsqlite3.a`，`SQLITE_THREADSAFE=0`）：CRUD + WAL 持久化；
 - [ ] 移植 **Redis**（musl 编译）：`SET/GET`、AOF/RDB、外部 TCP 访问；
 - [ ] HTTPS/TLS 用户态库（`novos-pull` 与 P3 包管理共用）；
+- [ ] （值得）Mosquitto MQTT broker（musl 静态，IoT 设备接入，DESIGN §18.4）；
+- [ ] （值得）Lua / MicroPython / QuickJS 轻量脚本运行时；
 - [ ] （P3 可选）apt + dpkg 移植（动态链接 musl 版）；
 - [ ] （P3 可选）OpenJDK / CPython 移植（需先评估 musl 构建可行性）。
 

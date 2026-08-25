@@ -2193,4 +2193,43 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ---
 
+## 18. 用户态生态矩阵与并发结论（语言 / 组件 / 消息）
+
+### 18.1 并发结论：线程是硬需求，协程是免费附赠
+
+- **多线程是硬需求**：Go goroutine、Rust `std::thread`、C++ 线程、Redis 多线程全部建立在 OS 线程之上——兼容层必须把 **`clone + futex + TLS`** 做对（§13.7/§13.8、M2/M11 地基项）；
+- **协程不需要内核专门支持**：Go/Rust async/Python asyncio 协程全在用户态实现，内核只需 **epoll + 非阻塞 IO + 时钟**（§3.8、M5）；
+- **结论**：把线程 + epoll 做对，多线程与协程同时获得；**内核不为协程多付任何工作**。
+
+### 18.2 语言矩阵
+
+| 等级 | 语言 | 说明 |
+|---|---|---|
+| 🟢 必支持 | C / Rust / Go（musl 静态） | 现成 target 复用（§15），嵌入式主力 |
+| 🟢 值得 | Lua（极轻脚本）、MicroPython、QuickJS（轻量 JS） | 各"轻"版本均可行 |
+| 🟡 可选 / 远期 | CPython、JVM | 需要时评估（musl 构建风险高） |
+| ❌ 不推荐 | Node、Erlang/Elixir、.NET | 与轻量定位相反 |
+
+### 18.3 组件矩阵
+
+| 等级 | 组件 |
+|---|---|
+| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、轻量 HTTP 服务（网关）、busybox、musl 交叉工具链 |
+| 🟢 值得 | Mosquitto（MQTT）、Lua / MicroPython / QuickJS |
+| 🟡 可选 | NanoMQ、ZeroMQ、CPython |
+| ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang |
+
+### 18.4 消息队列路线（每类需求用最轻的那个）
+
+| 需求 | 方案 | 说明 |
+|---|---|---|
+| 设备内消息 / 队列 / 发布订阅 | **Redis Streams / Pub-Sub**（Redis 自带） | 零新增组件，M14 Redis 任务覆盖 |
+| IoT 设备接入（MQTT） | **Mosquitto**（C 轻量 broker，musl 静态） | M14 值得项 |
+| 进程间轻量消息 | ZeroMQ（libzmq） | 可选 |
+| ActiveMQ / RabbitMQ / Kafka | 排除 | Java/Erlang 生态，重且无必要 |
+
+> 定位原则：**每个需求只选最轻的方案**；服务间/设备间通信优先 Redis/MQTT，不引入重量级消息中间件。
+
+---
+
 *本文档为规划稿，随实现推进持续修订。每个里程碑落地后回填实测内存数据。*

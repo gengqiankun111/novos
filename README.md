@@ -276,8 +276,47 @@ novos/
 - [ ] SQLite 容器服务（musl 静态，CRUD + WAL 持久化）
 - [ ] Redis 容器服务（musl 编译，外部 TCP 访问）
 - [ ] 自编译工具链：Go（CGO_ENABLED=0）/ Rust（x86_64-unknown-linux-musl）/ C++（musl-cross）
+- [ ] （值得）Mosquitto MQTT broker（musl 静态，IoT 设备接入）
+- [ ] （值得）Lua / MicroPython / QuickJS（轻量脚本运行时）
 - [ ] （P3 可选）`apt install` 支持（动态链接 + FHS + HTTPS）
 - [ ] （P3 可选）JVM / Python 运行时（需评估 musl 构建）
+
+---
+
+## 支持的生态（软件矩阵）
+
+### 组件矩阵
+
+| 等级 | 组件 |
+|---|---|
+| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、轻量 HTTP 服务（网关）、busybox（基础工具）、musl 交叉工具链 |
+| 🟢 值得 | Mosquitto（MQTT）、Lua / MicroPython / QuickJS |
+| 🟡 可选 | NanoMQ、ZeroMQ、CPython |
+| ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang |
+
+### 语言矩阵（按定位收敛）
+
+| 等级 | 语言 | 理由 |
+|---|---|---|
+| 🟢 必支持 | **C、Rust、Go**（musl 静态） | 覆盖嵌入式主力，现成 target 复用（DESIGN §15） |
+| 🟢 值得 | **Lua**（极轻脚本）、**MicroPython**、**QuickJS**（轻量 JS） | 每个"轻"版本都可行 |
+| 🟡 可选 / 远期 | CPython（解释器+stdlib 偏重）、JVM（重、依赖刁钻） | 需要时再评估 |
+| ❌ 不推荐 | Node、Erlang/Elixir、.NET | 与轻量定位相反 |
+
+### 消息队列路线（每类需求用最轻的那个）
+
+| 需求 | 方案 | 成本 |
+|---|---|---|
+| 设备内消息 / 队列 / 发布订阅 | **Redis Streams / Pub-Sub**（Redis 自带，零新增组件） | 🟢 已有 |
+| IoT 设备接入（MQTT 协议） | **Mosquitto**（C 写的轻量 MQTT broker，musl 静态顺畅） | 🟢 值得加 |
+| 可选：进程间轻量消息 | ZeroMQ（libzmq，C 库） | 🟡 可选 |
+| ActiveMQ / RabbitMQ / Kafka | ❌ 排除（Java/Erlang 生态，重且无必要） | — |
+
+### 多线程 vs 协程（不是二选一）
+
+- **多线程是硬需求**：Go goroutine / Rust `std::thread` / C++ 线程 / Redis 多线程全部建立在 OS 线程之上——兼容层必须把 **`clone + futex + TLS`** 做对（地基清单核心项）；
+- **协程不需要内核专门支持**：Go/Rust async/Python asyncio 的协程全在用户态实现，内核只需 **epoll + 非阻塞 IO + 时钟**；
+- **一句话**：把**线程 + epoll** 做对，多线程和协程同时获得，内核不为协程多付任何工作。
 
 ---
 
