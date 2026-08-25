@@ -287,7 +287,7 @@ rustup target add x86_64-unknown-none
 | M11 | 动态链接 + futex + TLS | 36–38 MB | M10 |
 | M12 | 设备框架 + Capabilities + Seccomp | 37–39 MB | M9（可与 M10/M11 并行） |
 | M13 | 完整 /proc + 信号扩展 + 事件 fd | 38–39 MB | M11 |
-| M14 | Docker 兼容 + 容器服务（Redis + SQLite） | ≤40 MB | M10+M11+M12+M13 |
+| M14 | OCI 镜像 + 轻量运行时 + OTA（Redis/SQLite） | ≤40 MB | M10+M11+M12+M13 |
 
 ---
 
@@ -375,30 +375,33 @@ rustup target add x86_64-unknown-none
 
 ---
 
-## M14：Docker 兼容 + 真实容器服务（Redis + SQLite）
+## M14：OCI 镜像 + 轻量容器运行时（OTA 升级回滚）
 
-> 定位调整：**演示目标避开 glibc 陷阱**（见 DESIGN.md §14 与 REFERENCES.md）。
-> `apt/JVM/Python` 是 glibc 生态，价值递减、成本陡增，降为 **P3 可选**；
-> full 模式以"跑真实 musl 容器服务"为验收锚点。
+> 定位调整（见 DESIGN.md §14/§16）：
+> ① 演示目标避开 glibc 陷阱——`apt/JVM/Python` 降为 **P3 可选**；
+> ② **"支持 Docker" 重述为 "支持 OCI 镜像 + 轻量容器运行时（含 OTA）"**——不做 docker daemon/CLI 兼容（价值在 OCI 能力本身：OTA/隔离/标准部署包/快速恢复）。
 
-**目标**：full 模式正式达标——docker 兼容 CLI 跑起 **Redis + SQLite** 容器服务，外部可访问。
+**目标**：full 模式正式达标——`novos-pull` 拉取 OCI 镜像，轻量运行时跑起 **Redis + SQLite** 容器服务，OTA 升级回滚可演示，外部可访问。
 
 **任务**
-- [ ] veth pair + bridge 虚拟网络设备（Docker CNI 默认网络）（§13.11）；
-- [ ] 完整 DNAT 端口映射规则（`docker -p 8080:80`）；
+- [ ] veth pair + bridge 虚拟网络设备（容器网络）；
+- [ ] 完整 DNAT 端口映射规则（外部访问容器服务）；
 - [ ] OCI runtime spec 兼容（config.json 解析 + seccomp/capability 应用）；
-- [ ] containerd-like 守护进程（容器生命周期管理 + image pull）；
+- [ ] 轻量容器运行时：容器生命周期 + overlayfs 组装 + 状态存储（DESIGN §4.6，不做 daemon 兼容）；
+- [ ] `novos-pull`：registry HTTPS + OCI 解析 + SHA-256 摘要校验 + 层解压；
+- [ ] **OTA 升级 + 回滚**：增量拉取变化层 + 镜像版本切换（出错切回旧层）；
 - [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖，DESIGN §6.2①）；
 - [ ] 移植 **SQLite**（musl 静态 `libsqlite3.a`，`SQLITE_THREADSAFE=0`）：CRUD + WAL 持久化；
 - [ ] 移植 **Redis**（musl 编译）：`SET/GET`、AOF/RDB、外部 TCP 访问；
-- [ ] HTTPS 下载支持（用户态 TLS，内核 TCP 通道）——image pull 与 P3 包管理共用；
+- [ ] HTTPS/TLS 用户态库（`novos-pull` 与 P3 包管理共用）；
 - [ ] （P3 可选）apt + dpkg 移植（动态链接 musl 版）；
-- [ ] （P3 可选）OpenJDK / CPython 移植（需评估 musl 构建，glibc 陷阱风险高）。
+- [ ] （P3 可选）OpenJDK / CPython 移植（需先评估 musl 构建可行性）。
 
 **验收**
-- `docker run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问；
+- `novos run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问；
 - 容器内 SQLite 建表/增删改查 + 重启后数据持久化（ext4）；
-- `docker run busybox echo hello` 完整跑通（veth + bridge + overlay + seccomp）；
+- **OTA 演示**：更新镜像层 → 增量拉取 → 重启生效；回滚旧层可恢复；
+- `novos run busybox echo hello` 完整跑通（veth + bridge + overlay + seccomp）；
 - 自编译的 Go / Rust / C++ 静态二进制作为容器进程运行（§15 工具链闭环）；
 - **内存基线**：≤40MB（full 模式最终断言）。
 

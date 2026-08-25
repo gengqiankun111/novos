@@ -1,9 +1,48 @@
 # Novos‑OS
 
-> 用 Rust 从零编写，面向 **网关 + 容器** 场景的操作系统内核。
-> 目标：**常驻内存 ≤ 32MB** 即可稳定运行容器工作负载 —— 一个比裁剪后主线 Linux 更小、更可控的容器宿主内核。
+> **面向内存受限设备的微型容器宿主 —— RTOS 的占地，Linux 的生态，Rust 的安全。**
+>
+> 用 Rust 从零编写，定位在 FreeRTOS 与嵌入式 Linux 之间那块真实存在、但没人占住的缝隙：
+> 在 **256MB–2GB 内存的边缘设备**（网关 / 工控盒子 / IoT / SD-WAN CPE）上，用 **≤32MB 内核常驻** 跑起真实的容器服务。
 
-Novos‑OS 不是 Linux 的复制品。它砍掉了数十年来的兼容包袱和成千上万个用不到的驱动，只保留容器基础设施必须的最小闭环：**TCP/IP 完整网络栈 + epoll + Namespace + Cgroup + OverlayFS + 调度/内存管理**。
+Novos‑OS 不是 Linux 的复制品。它砍掉了数十年来的兼容包袱和成千上万个用不到的驱动，只保留容器基础设施必须的最小闭环：**TCP/IP 完整网络栈 + epoll + Namespace + Cgroup + OverlayFS + 调度/内存管理**，并兼容 Linux syscall ABI + musl 静态子集（自己编译，不追现成二进制）。
+
+---
+
+## 定位
+
+> 一句话：**面向内存受限设备的微型容器宿主** —— 多服务隔离 + 可更新 + 低延迟，确定性优先。
+
+### 定位决策
+
+| 项 | 决策 |
+|---|---|
+| 主定位 | 嵌入式容器宿主（确定性 + 安全容器网关） |
+| 目标设备 | 边缘网关、工控盒子、IoT 设备、SD-WAN CPE（内存 256MB–2GB） |
+| 架构 | x86_64 起步（QEMU 开发便利），**ARM64 为终局目标**（arch 层隔离从第一天做好） |
+| 明确不做 | 通用 Linux 替代、桌面、大众市场、完整 glibc 生态（mysql/kafka 等） |
+| 兼容策略 | Linux syscall ABI 兼容 + musl 静态子集（Go/Rust/C++ 自编译，见 DESIGN §15） |
+| 交付形态 | 官方交叉编译工具链 target + 垂直场景方案，而非"内核"单品 |
+
+### 为什么是这个定位（结构性空白）
+
+- **需求侧**：边缘计算 + 容器化下沉到设备是真实趋势；这些设备需要"多服务隔离 + 可更新 + 低延迟"。
+- **结构性空白**（两边都够不着）：
+  - RTOS（FreeRTOS/Zephyr）：无 MMU、单进程 → 够不着"多服务隔离 + 容器"；
+  - 裁剪 Linux（Yocto/OpenWrt）：空闲 50–80MB、跑 2–3 个容器就 200MB+ → 256MB 设备跑不动，且启动慢、攻击面大、抖动高。
+- **竞品挤压**：高端被精简 Linux（Alpine+Docker）蚕食，低端被 Zephyr 抬升 → 中间是**窄而真实**的缝隙。
+
+### 三条现实约束（必须接受）
+
+1. **维护成本**：嵌入式产品生命周期 10–15 年，自研内核意味着长期跟进 CVE / 安全漏洞 / 架构演进；
+2. **生态摩擦**：客户的第一句话永远是"能不能跑我现有的程序"——musl 静态子集 vs 完整 Linux 生态，获客阻力真实；
+3. **Linux 持续瘦身**：省下的内存，Linux 的裁剪方案也在追，缝隙不会消失但也不会变大。
+
+### 空间评估与决策结论
+
+- 大众市场**不够大**，但**垂直缝隙 + 技术资产够大**（工业/能源/车载/运营商 CPE）；
+- 走嵌入式主定位 + 开源教学辅定位（叠加推荐）：**技术资产 + 开源声望 + 可能的垂直商业**；
+- **≤32MB 是入场券，不是卖点**；卖点是确定性 + 安全 + 可控（秒级冷启动、低抖动调度、OTA 升级、Rust 内存安全证明）。
 
 ---
 
@@ -65,30 +104,30 @@ Novos‑OS 通过 **Feature Flag** 支持两种部署形态：
 
 | 模式 | 内核常驻 | 定位 | 适用场景 |
 |---|---|---|---|
-| **minimal** | ≤ 32MB | 最小容器宿主 | 边缘网关、IoT 节点、资源受限设备 |
-| **full** | ≤ 40MB | Linux 兼容容器宿主 | 支持 ext4、Docker 完整生态、apt install、JVM/Python |
+| **minimal** | ≤ 32MB | 微型容器宿主（静态 musl 子集） | 边缘网关、工控盒子、IoT（256MB–2GB 设备） |
+| **full** | ≤ 40MB | 容器服务宿主（ext4 + 动态链接） | 磁盘持久化 + Redis/SQLite + 自编译 Go/Rust/C++ |
 
-### minimal 模式（32MB）
+### minimal 模式（32MB，入场券）
 
 | 场景 | 描述 | 为什么选 Novos‑OS |
 |---|---|---|
-| **边缘容器网关** | 工业网关/IoT 边缘节点上运行容器化的数据采集 + 网络转发 | 32MB 内核常驻 → 留更多内存给业务容器 |
-| **轻量容器宿主** | 小型 VPS / 嵌入式设备上跑 2–5 个容器 | 比裁剪 Linux 内存更低，部署更可控 |
-| **安全隔离网关** | 需要极小可信计算基（TCB）的网络转发 + 容器隔离 | 从零内核 + Rust → 代码量小、可审计、攻击面窄 |
+| **边缘容器网关** | 工业网关/IoT 边缘节点上运行容器化的数据采集 + 网络转发 | 32MB 内核常驻 → 256MB 设备也能留内存给业务容器 |
+| **确定性容器宿主** | 需要低抖动、秒级冷启动、OTA 可更新 | RTOS 够不着多服务隔离，裁剪 Linux 跑不动 |
+| **安全隔离网关** | 极小 TCB 的网络转发 + 容器隔离 | 从零内核 + Rust → 代码量小、可审计、攻击面窄 |
 
 ### full 模式（~40MB）
 
 | 场景 | 描述 | 扩展能力 |
 |---|---|---|
-| **Linux 兼容容器宿主** | 跑标准 Docker 容器 + `apt install` 包管理 | 动态链接 + ext4 + 完整 /proc + devpts |
-| **开发/运维环境** | 容器内跑 JVM / Python / Node.js 应用 | futex + TLS + 完整信号 + getrandom |
-| **CI/CD 平台** | 高密度容器调度 + 动态语言测试 | seccomp + capabilities + CNI 网络 |
+| **容器服务宿主** | 跑 **Redis + SQLite** 等真实 musl 容器服务 + **OTA 升级回滚**，外部可访问 | OCI 镜像 + 轻量运行时（DESIGN §16，不做 docker daemon/CLI） |
+| **开发/演示环境** | Windows 运行器 = 开发/演示环境（生产负载放 Linux/KVM） | futex + TLS + 完整信号 + getrandom |
+| **自编译工具链** | Go/Rust/C++ 交叉编译 target 官方支持 | musl syscall 足迹兼容面（DESIGN §15） |
 
 ### 不适合的场景
 
+- **通用 Linux 发行版替代**——不提供 glibc 兼容层，mysql/kafka 等 glibc 生态不追；
 - **桌面/图形工作站**——无 GUI、无声卡、无 GPU 栈；
-- **通用 Linux 发行版替代**——不兼容 Linux ABI 之外的程序（不提供 glibc 兼容层）；
-- **高吞吐存储服务器**——无完整 block layer、无 RAID、无文件系统生态（只有 OverlayFS + tmpfs/ramfs）。
+- **高吞吐存储服务器**——无完整 block layer、无 RAID、无文件系统生态。
 
 ---
 
@@ -155,29 +194,22 @@ novos/
 
 | 选项 | 决策 | 理由 |
 |---|---|---|
-| 开发语言 | **Rust nightly** | 内存安全 + 零成本抽象 + `no_std` 生态 |
-| 目标三元组 | `x86_64-unknown-none` | 不依赖宿主 OS，裸金属 |
-| 引导方式 | multiboot2（第一版）/ UEFI（后续） | QEMU + GRUB 快速迭代 |
-| 用户态 libc | **musl（静态链接）** | 体积小、不依赖动态加载器、兼容常见 ELF 二进制 |
+| 开发语言 | **Rust stable**（`no_std` 裸金属 target） | 内存安全 + 零成本抽象 + 稳定通道可用 |
+| 目标三元组 | `x86_64-unknown-none`（后续 `aarch64-unknown-none`） | 不依赖宿主 OS，裸金属 |
+| 引导方式 | **自包含 multiboot2**（长模式汇编 + 手写页表/IDT） | 无宿主链接依赖，QEMU `-kernel` 直接启动 |
+| 用户态 libc | **musl（静态链接，自编译）** | 体积小、兼容 Linux ABI；Go/Rust/C++ 现成 target 复用 |
 | 构建系统 | **Cargo + Makefile** | Cargo 管依赖，Makefile 封装 QEMU/测试命令 |
 | 测试框架 | `cargo test`（host 逻辑） + QEMU 集成 | 逻辑与硬件解耦，CI 可跑 |
 | CI | GitHub Actions | 编译 + `cargo test` + QEMU 启动断言 |
-| 模拟器 | **QEMU** | 免费、支持 virtio、GDB 调试 |
+| 模拟器 | **QEMU**（Windows 为开发/演示环境） | 免费、支持 virtio、GDB 调试 |
 
-### 关键依赖 crate（规划）
+### 关键依赖 crate（M0 实际）
 
 | crate | 用途 | 是否 `no_std` |
 |---|---|---|
-| `bootloader` | UEFI/multiboot2 引导 | 是 |
-| `spin` | 自旋锁原语 | 是 |
-| `bitflags` | 标志位类型 | 是 |
-| `linked_list_allocator` | 内核堆分配（初期） | 是 |
-| `volatile` | MMIO 寄存器访问 | 是 |
-| `lazy_static` | 全局静态初始化 | 是 |
-| `x86_64` | x86_64 汇编封装（页表/IDT/GDT） | 是 |
-| `raw-cpuid` | CPU 特性检测 | 是 |
+| `spin` | 自旋锁原语（串口锁） | 是 |
 
-> 不引入 `std` 依赖的 crate；所有 crate 必须 `no_std` 兼容。
+> 内核自包含：UART/PIC/长模式启动均为手写（对应 REFERENCES.md 的"不引入外部依赖"原则）；后续按需引入无 build script、纯 Rust 的 `no_std` crate。
 
 ---
 
@@ -237,9 +269,15 @@ novos/
 - [ ] getrandom + /dev/urandom
 - [ ] 完整信号（sigaction/sigprocmask/sigaltstack + SA_SIGINFO）
 - [ ] timerfd / signalfd（事件循环）
-- [ ] veth/bridge（Docker CNI 网络）
-- [ ] `apt install` 支持（动态链接 + FHS + HTTPS）
-- [ ] JVM / Python 运行时支持
+- [ ] veth/bridge（容器网络）
+- [ ] **OCI 镜像 + `novos-pull`**（registry HTTPS + 摘要校验 + 层解压）
+- [ ] **OTA 升级 + 回滚**（层增量拉取 + 镜像版本切换）
+- [ ] 最小记录锁（fcntl 字节区间锁，SQLite 依赖）
+- [ ] SQLite 容器服务（musl 静态，CRUD + WAL 持久化）
+- [ ] Redis 容器服务（musl 编译，外部 TCP 访问）
+- [ ] 自编译工具链：Go（CGO_ENABLED=0）/ Rust（x86_64-unknown-linux-musl）/ C++（musl-cross）
+- [ ] （P3 可选）`apt install` 支持（动态链接 + FHS + HTTPS）
+- [ ] （P3 可选）JVM / Python 运行时（需评估 musl 构建）
 
 ---
 
@@ -286,6 +324,12 @@ make run
 | M7 | OverlayFS | 容器镜像挂载 |
 | M8 | 容器运行时 + 网关 | 跑起第一个容器 |
 | M9 | 内存基线 ≤32MB + 长期稳定版 | 生产可用 |
+| M10 | ext4 + BIO + Page Cache | 磁盘持久化 |
+| M11 | 动态链接 + futex + TLS + 工具链 | 动态程序 + Go/Rust/C++ 自编译 |
+| M12 | 设备 + Capabilities + Seccomp | Docker 安全模型 |
+| M13 | 完整 /proc + 信号 + 事件 fd | 动态程序可观测性 |
+| M14 | OCI 镜像 + 轻量运行时 + OTA（Redis/SQLite） | full 模式 ≤40MB 达标 |
+| M15 | **ARM64 移植评估**（终局目标） | aarch64 原型可启动 |
 
 ---
 
@@ -382,33 +426,23 @@ Redox 是通用微内核 OS，有窗口系统、包管理器和用户生态。No
 
 **Q8：full 模式下能跑标准 Docker 吗？需要什么扩展？**
 
-需要实现以下内核扩展（见 [DESIGN.md §13](docs/DESIGN.md)）：
-- **动态链接**——Docker 守护进程是动态链接的 ELF，需要内核支持 PT_INTERP + MAP_SHARED；
-- **Capabilities + Seccomp**——Docker 安全模型依赖 Linux capability 位和 seccomp BPF 过滤；
+full 模式的定位是**跑 musl 容器服务（Redis/SQLite 等自编译镜像）**，不是"任意 Docker 镜像"。需要实现以下内核扩展（见 [DESIGN.md §13](docs/DESIGN.md)）：
+- **动态链接**——容器服务若动态链接，需要内核支持 PT_INTERP + MAP_SHARED（默认推荐静态编译）；
+- **Capabilities + Seccomp**——容器安全模型依赖 Linux capability 位和 seccomp BPF 过滤；
 - **devpts**——`docker exec` 需要 PTY（/dev/ptmx + /dev/pts/N）；
-- **完整 /proc**——`docker stats` 读取 /proc/self/status 等路径；
-- **veth/bridge**——Docker 默认网络模式（bridge）依赖 veth 对 + 二层转发。
+- **完整 /proc**——容器运行时读取 /proc/self/status 等路径；
+- **veth/bridge**——容器网络默认模式（bridge）依赖 veth 对 + 二层转发。
+
+mysql/kafka 等 **glibc 生态镜像不追**（glibc 兼容层价值递减、成本陡增，见 DESIGN §14 定位决策）。
 
 **Q9：能跑 apt install 吗？**
 
-full 模式可以。apt 依赖：
-1. 动态链接（apt/dpkg 本身是动态链接二进制）；
-2. ext4 磁盘文件系统（/var/lib/dpkg 持久化状态）；
-3. HTTPS 下载（内核 TCP + TLS 在用户态）；
-4. tar/gzip 解压（纯用户态实现）。
-
-这些都在 §13 扩展性设计中覆盖。
+降为 **P3 可选**。apt/dpkg 是 glibc 生态，与 musl 静态子集定位冲突；full 模式默认用自编译工具链分发软件，不依赖 apt。
 
 **Q10：JVM 需要哪些特殊内核支持？**
 
-JVM 是最"挑剔"的用户态程序：
-- **动态链接**——libjvm.so 是 ~20MB 共享库；
-- **futex**——Java synchronized 底层是 pthread mutex → futex；
-- **TLS**——每个 Java 线程有独立的 Thread 对象，存在 TLS 区；
-- **信号**——JVM 捕获 SIGSEGV 做 null 检查、SIGPROF 做性能采样，需要 sigaltstack + SA_SIGINFO；
-- **getrandom**——SecureRandom 初始化；
-- **/proc/self/maps**——JVM 读取自身内存映射做 GC 优化。
+JVM 需要动态链接 + futex + TLS + 信号 + getrandom + /proc/self/maps，且 OpenJDK 是 **glibc 构建**——musl 移植难度高。**降为 P3 可选**：先做 musl 构建可行性评估，不通过则不投入（避免掉进 glibc 陷阱）。
 
 **Q11：Python 呢？比 JVM 简单吗？**
 
-简单一些。Python 需要：动态链接（libpython3.x.so）、getrandom（os.urandom）、基本信号。Python GIL 也是 futex，但 Python 的信号使用比 JVM 更简单（不做 SIGSEGV 捕获）。
+同属 P3 可选。Python（musl 版）需要动态链接 + getrandom + 基本信号，比 JVM 简单，但仍需评估 musl 构建；full 模式演示默认用 Redis/SQLite/Go 静态服务。
