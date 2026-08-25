@@ -28,6 +28,8 @@
 | 物理内存 | Buddy（order 0–10，分裂/合并/`load_end=0` 修正）+ SLUB 风格 Slab（**侵入式空闲链表**）+ GlobalAlloc（Vec/Box 可用）+ OOM 回调 + **可移动页标记**（自测 ALL PASS） | ✅ | M1 | DESIGN §3.1/勘误§9-10 |
 | 虚拟内存 | M2 切片：每任务地址空间（VMA 表）+ **懒分配**（首次访问分配页）+ **COW 写时复制**（fork 共享物理页，写分离，QEMU 实测父 P1/子 P2 独立）；4 级页表 + CR3 切换（M3 用户态接入）+ **内存紧缩 compact_zone** | ✅ 切片 / ◻ 完整 | M2/M9 | DESIGN §3.2 |
 | 任务/调度 | M2 完成：内核线程 + 上下文切换 + **CFS（vruntime 红黑树，固定池无 IRQ 分配）** + 权重调度（prio→权重，实测 2:4:8 CPU 占比）+ 睡眠/阻塞唤醒 + **PIP 有效优先级**；**per_cpu! 宏 + `cpu_rq(cpu_id)` 占位（SMP 预热）**；RT 类双队列预留（M9+） | ✅ 切片 / ◻ RT | M2 | DESIGN §4.2/勘误§7/§11 |
+| RT 调度类 | **SCHED_FIFO 基本模型**（优先级 + 抢占，Modbus 等硬实时场景 100ms 响应）——从 M2 双队列预留固化 | ◻ | M9 | DESIGN §21.7 |
+| 网络调试开关 | `echo 1 > /proc/sys/net/novos/packet_trace`：环形日志打印每包**五元组 + 丢弃原因**（性能降 ~50%，仅供调试，替代 tcpdump） | ◻ | M13 | DESIGN §21.8 |
 | 同步原语 | Spinlock（关中断自旋）+ 阻塞 Mutex（**内置优先级继承 PIP**，等待者提升持锁者、解锁恢复）；锁序编译期编码 + **RT 强制自旋锁 + CFS 关抢占**（勘误 §11 后续切片） | ✅ 切片 / ◻ 完整 | M2 | DESIGN §3.9/勘误§11 |
 | 定时器/时钟 | PIT 8254 tick（100Hz）已接入调度；最小堆 + 时钟源抽象 + RTC + monotonic + **分层时间轮（评估）** | ✅ 切片 / ◻ 完整 | M2/M9 | DESIGN §6.2⑥/勘误§5 |
 | 系统调用 + init/shell | syscall 表 + ELF 加载 + 用户态 shell + **PID 1 崩溃自愈（rescue_init + watchdog 复位）** | ◻ | M3 | DESIGN §1.2/勘误§3 |
@@ -60,7 +62,7 @@
 | timerfd / signalfd | 事件循环 fd | ◻ | M13 | DESIGN §13.11 |
 | **OCI 镜像** | `novos-pull`：registry HTTPS + SHA-256 校验 + 层解压 | ◻ | M14 | DESIGN §16 |
 | **轻量容器运行时** | 生命周期 + overlayfs 组装（不做 docker daemon/CLI） | ◻ | M14 | DESIGN §16 |
-| **OTA 升级 + 回滚** | 层增量拉取 + 镜像版本切换 + 一键回滚 | ◻ | M14 | DESIGN §16 |
+| **OTA 升级 + 回滚** | 层增量拉取 + 镜像版本切换 + 一键回滚；**内核镜像纳入 A/B 分区管理**（内核分区 A/B 标识 + 回滚，覆盖内核本身升级） | ◻ | M14 | DESIGN §16/§21.9 |
 | 离线导入 | `docker save` tar → Web 上传 / U 盘拷入 | ◻ | M14 | DESIGN §20.2 |
 | veth / bridge | 容器网络 + DNAT 端口映射 | ◻ | M14 | DESIGN §13.11 |
 
@@ -73,7 +75,7 @@
 | Rust 交叉编译 | `x86_64-unknown-linux-musl` 现成 target（宿主机） | ◻ | M11 | DESIGN §15.1 |
 | C++ 交叉编译 | musl-cross + `-static -static-libstdc++ -static-libgcc`（宿主机） | ◻ | M11 | DESIGN §15.1 |
 | **Novos-SDK 基础镜像** | ld-musl + 头文件 + linker script，`--dynamic-linker` 指向 Novos 专用路径 | ◻ | M11 | DESIGN §15.2 |
-| **novos-check 工具** | ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）——应用合入门槛 | ◻ | M11 | DESIGN §15.3 |
+| **novos-check 工具** | ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）——应用合入门槛；**启动前扫描 PT_INTERP，非 `/novos/ld-musl` 拒绝启动并提示（glibc 拦截）** | ◻ | M11 | DESIGN §15.3/§21.1 |
 | ABI 契约文档 | `docs/abi.md`：syscall 白/黑/灰名单 + 结构体/errno/调用约定 | ◻ | M11 | DESIGN §15.3 |
 | Lua / MicroPython / QuickJS | 轻量脚本运行时 | ○ | M14 | DESIGN §18.2 |
 | CPython / JVM | musl 构建可行性评估通过才做 | ○ | P3 | DESIGN §18.2 |
@@ -82,7 +84,7 @@
 
 | 特性 | 说明 | 状态 | 里程碑 | 出处 |
 |---|---|---|---|---|
-| Redis | 缓存 + 消息（Streams/Pub-Sub），外部 TCP 访问（**部署模板**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`、禁 RDB、只开 AOF+重写） | ◻ | M14 | DESIGN §18.3 |
+| Redis | 缓存 + 消息（Streams/Pub-Sub），外部 TCP 访问（**部署模板**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`、禁 RDB、只开 AOF+重写；**预置只读 redis.conf，防用户覆盖导致 OOM-kill**） | ◻ | M14 | DESIGN §18.3/§21.2 |
 | SQLite | musl 静态库，CRUD + WAL 持久化（依赖最小记录锁） | ◻ | M14 | DESIGN §18.3 |
 | Mosquitto (MQTT) | IoT 设备接入 broker，Pub/Sub + QoS | ○ | M14 | DESIGN §18.4 |
 | Modbus 工业协议 | 采集侧：RTU/TCP 读寄存器 → JSON | ○ | M14 | DESIGN §18.5 |

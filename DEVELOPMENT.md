@@ -93,6 +93,7 @@
 - [ ] 用户态内存管理：`mmap`/`munmap`/`brk`。
 - [ ] ELF 加载器（静态链接 musl 二进制）。
 - [ ] `init`（PID 1）+ 简易 `shell`（`fork`+`exec`+管道）。
+- [ ] `/etc/motd` 登录提示："本设备不包含编译器，请使用宿主机交叉编译（docs/nosos-sdk.md）"；`PATH` 不放置 go/rustc/g++（DESIGN §21.4）。
 - [ ] **PID 1 崩溃自愈**：内核检测到 PID 1 退出时，尝试执行 `rescue_init`（.rodata 内嵌），带**60 秒反跳计时器**（3 次崩溃后强制 Watchdog 复位）。
 - [ ] 文件描述符表（**`Vec<Option<Arc<File>>>` + 低 64 位空闲位图**，评审定案：fd 稠密整数数组 O(1)，非 BTreeMap）、`/dev/uart` 设备文件。
 
@@ -185,6 +186,8 @@
 
 - [ ] **内存紧缩（compact_zone）**：order ≥ 3 分配失败时触发低阶可移动页合并。
 - [ ] **分层时间轮**：替换最小堆，支持 1000+ TCP 连接定时器 O(1) 维护。
+- [ ] **RT 调度类（SCHED_FIFO 基本模型）**：优先级 + 抢占，从 M2 RT 双队列预留固化（Modbus 等硬实时场景 100ms 响应，DESIGN §21.7）。
+- [ ] **/proc/cpuinfo 多核报告**：报告硬件真实核心数，`online` 只显示 1（SMP 前避免用户误判板子坏了，DESIGN §21.5）。
 - [ ] 内存回归测试套件：启动 N 容器 + 网关流量下断言常驻 ≤32MB。
 - [ ] 每个子系统 shrink 路径压测（dcache/sk_buff/anon）。
 - [ ] 编译期瘦身终检：`opt-level=s/z` + LTO + strip，回填实测 .text 大小。
@@ -226,7 +229,7 @@
 - [ ] futex 系统调用（WAIT/WAKE/REQUEUE，**逻辑键索引**，支持 COW 迁移）。
 - [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR。
 - [ ] **宿主机交叉编译工具链**：musl-cross + `crt1.o` + linker script。
-- [ ] **`novos-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（M14 应用合入门槛）。
+- [ ] **`novos-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（M14 应用合入门槛）；**启动前扫描 `PT_INTERP`，非 `/novos/ld-musl` 拒绝启动并提示**（glibc 拦截，DESIGN §21.1）。
 
 **验收标准**：
 - 运行动态链接的 hello world（`gcc -o hello hello.c` 不加 `-static`）。
@@ -254,6 +257,7 @@
 - [ ] /proc 扩展：`/proc/self/maps`、`/proc/self/status`、`/proc/self/exe`、`/proc/self/fd/`。
 - [ ] 信号扩展：`sigaction`（SA_SIGINFO + SA_ONSTACK）、`sigprocmask`、`sigaltstack`。
 - [ ] timerfd：`timerfd_create` + `timerfd_settime` + epoll 可监听。
+- [ ] **网络调试开关**：`/proc/sys/net/novos/packet_trace`——开启后环形日志打印每包五元组 + 丢弃原因（性能降 ~50%，替代 tcpdump，DESIGN §21.8）。
 - [ ] **Block I/O 电梯调度（评估）**：READ 优先 + 写 LBA 合并的极简 Deadline（勘误②，DESIGN §13.3，~300 行）。
 
 **验收标准**：
@@ -268,7 +272,8 @@
 - [ ] veth pair + bridge 虚拟网络设备 + 完整 DNAT 端口映射。
 - [ ] OCI runtime spec 兼容（config.json 解析 + seccomp/capability 应用）。
 - [ ] `novos-pull`：registry HTTPS + OCI 解析 + SHA-256 摘要校验 + 层解压。
-- [ ] **OTA 升级 + 回滚**：增量拉取变化层 + 镜像版本切换（出错切回旧层）。
+- [ ] **OTA 升级 + 回滚**：增量拉取变化层 + 镜像版本切换（出错切回旧层）；**内核镜像纳入 A/B 分区管理**（内核分区 A/B 标识 + 回滚，覆盖内核本身升级，DESIGN §21.9）。
+- [ ] **Redis 部署模板**：预置只读 `/etc/redis/redis.conf`（Immutable），`--maxmemory 64mb`、禁 RDB、只开 AOF——用户无法 `-c` 覆盖导致 OOM（DESIGN §21.2）。
 - [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖）。
 - [ ] 移植 **SQLite**（musl 静态，CRUD + WAL） + **Redis**（**部署模板强制**：`--maxmemory 64mb`、禁 RDB、只开 AOF）。
 - [ ] （值得）内置 Web 管理界面 + SSH（dropbear）+ Agent 主动上联。

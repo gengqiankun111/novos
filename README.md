@@ -91,6 +91,25 @@ Novos‑OS 不是 Linux 的复制品。它砍掉了数十年来的兼容包袱�
 
 ---
 
+## ⚠️ 新手必踩的坑（从 Linux 迁移避雷）
+
+> **这三个点最反直觉，决定用户第一印象。设计约束详见 [DESIGN.md §21](docs/DESIGN.md)。**
+
+1. **glibc vs musl（第一坑）**：Novos 只支持 **musl**，不接受 glibc 编译/安装的二进制。
+   用 `apt-get install` 或 Ubuntu 工具链编译的程序会直接 `Segmentation Fault`。
+   → **必须用宿主机交叉编译（Go/Rust/C++ 现成 target，见 DESIGN §15）**；容器启动前
+   `novos-check` 扫描 `PT_INTERP`，非 `/novos/ld-musl` 一律拒绝启动并提示。
+2. **Ext4 只认 data=journal**：现成 Linux 格式化（默认 `data=ordered`）的 Ext4 盘 `mount` 会报
+   `Operation not supported`。→ 用 `tune2fs -O journal_dev` 转换或重新格式化，报错文案含完整提示。
+3. **设备端不能编译**：设备上没有 go/rustc/g++（内存装不下）。`/etc/motd` 会明示
+   "请使用宿主机交叉编译，参考 docs/nosos-sdk.md"。别在设备上 `go build`（会卡死/OOM）。
+
+**其他预期管理**：Redis 预置只读配置（防 OOM-kill 数据丢失）；`/proc/cpuinfo` 报告硬件核心数但
+online 只有 1（单核调度，SMP 见下）；容器管理是 `novos` 命令，**不是 Docker CLI**（不支持
+docker-compose）；网络排查用 `echo 1 > /proc/sys/net/novos/packet_trace`（无需 tcpdump）。
+
+---
+
 ## 交互模式（无头远程运维）
 
 > 设备无头（无屏幕键盘），一切交互在电脑端远程操作，核心三层通道由浅入深（详见 `interaction.md`）。
@@ -419,12 +438,13 @@ make run
 
 | 文档 | 内容 |
 |---|---|
-| [docs/DESIGN.md](docs/DESIGN.md) | 设计文档：架构、内存预算拆解、数据结构、核心算法 |
+| [docs/DESIGN.md](docs/DESIGN.md) | 设计文档：架构、内存预算、数据结构、核心算法（§11 SMP 设计 / §21 用户预期管理） |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发路线图：M0–M9 里程碑、任务拆解、验收标准 |
 | [DESIGN_ERRATA.md](DESIGN_ERRATA.md) | 设计勘误与补救（2026-08 评审：12 项架构问题） |
 | [VERSIONING.md](VERSIONING.md) | 版本发布策略 + 关键设计决策索引 |
 | [FEATURES.md](FEATURES.md) | 功能说明书：支持什么功能/特性、状态与边界 |
 | [interaction.md](interaction.md) | 交互模式：无头设备三层远程通道（Web/SSH/Agent） |
+| [EXTENSIONS.md](EXTENSIONS.md) | 远期扩展口：Maple Tree / rhashtable / trie / 基数树（feature-gated） |
 
 ---
 
@@ -448,6 +468,17 @@ make run
 | M13 | 完整 /proc + 信号 + 事件 fd | 动态程序可观测性 |
 | M14 | OCI 镜像 + 轻量运行时 + OTA（Redis/SQLite） | full 模式 ≤40MB 达标 |
 | M15 | ARM64/RISC-V 评估 + 功能级补强 | aarch64 原型 + 电源/Flash/调试 |
+
+### 路线图与多核支持（SMP）
+
+*   **当前版本（v1.0）**：最小可行产品（MVP）——稳定、安全、内存高效（≤32MB）的**单核（UP）**内核，验证核心架构正确性。
+*   **下一阶段（v2.0）**：**对称多处理（SMP）**为核心目标：
+    *   per-CPU 运行队列与调度器（`per_cpu!` 占位已落地，M2）；
+    *   处理器间中断（IPI）进行跨核调度；
+    *   内核锁机制重构（队列自旋锁 + RwLock），保证多核数据一致性；
+    *   跨核负载均衡，充分利用多核算力。
+
+这一演进路径确保在保持内核极简、安全的同时，性能随硬件线性增长。详见 [DESIGN §11](docs/DESIGN.md)。
 
 ---
 
@@ -532,7 +563,10 @@ seccomp/AppArmor 裁剪的是运行时行为，不改变编译期代码量和内
 
 **Q5：支持多核（SMP）吗？**
 
-第一版**单核**。SMP 引入 per-CPU 运行队列、IPI、RCU 等复杂度，会吃掉内存预算。SMP 留到 M9 稳定后评估，前提是内存预算不被打破。
+第一版（v1.0）**单核（UP）**——`/proc/cpuinfo` 报告硬件核心数但 online 只显示 1。
+**SMP 是 v2.0 核心目标**：per-CPU 运行队列/IPI/负载均衡/队列自旋锁已在架构层预留
+（`per_cpu!` 宏 + `cpu_rq(cpu_id)` 于 M2 落地，调度红黑树从第一天按 `cpu_rq` 组织），
+SMP 打开 = 多实例化而非重构，内存增量控制在 1–2MB 内。详见 [DESIGN §11](docs/DESIGN.md)。
 
 **Q6：为什么不实现 swap？**
 

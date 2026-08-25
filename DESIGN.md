@@ -1365,10 +1365,11 @@ pub struct MemStat {
 
 ---
 
-## 11. SMP 演进路线
+## 11. SMP 演进路线（v2.0 核心目标）
 
-> **架构预留（勘误 ③）**：现代 ARM Cortex-A 几乎全多核，"M9 评估"会把 SMP 拖成后期推倒重来。
-> **第一版就引入 per-CPU 占位**（哪怕只初始化 CPU 0）：`per_cpu!` 宏 + `cpu_rq(cpu_id)` 访问器；调度器红黑树从第一天按 `cpu_rq(cpu_id)` 组织，SMP 打开 = 多实例化而非重构。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §7。
+> **架构预留（勘误 ③）已落地**：现代 ARM Cortex-A 几乎全多核，"M9 评估"会把 SMP 拖成后期推倒重来。
+> 第一版就引入 per-CPU 占位（`per_cpu!` 宏 + `cpu_rq(cpu_id)` 访问器，M2 已实现）；调度器红黑树从第一天按
+> `cpu_rq(cpu_id)` 组织，SMP 打开 = 多实例化而非重构。详见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md) §7。
 
 ### 11.1 第一版：单核（UP）
 
@@ -1376,28 +1377,51 @@ pub struct MemStat {
 - 优势：无 per-CPU 数据结构，无 RCU，内存开销最低；
 - 调度器、中断、缓存全部单核设计，简单可测。
 
-### 11.2 稳定后评估（M9+）
+### 11.2 设计目标（v2.0）
 
-| 能力 | 内存成本 | 是否值得加 |
-|---|---|---|
-| Per-CPU 运行队列 | +0.3–0.5MB | 2 核以上值得 |
-| IPI（核间中断） | <0.1MB | 基础设施 |
-| RCU 简化（defer 队列→多核） | +0.2–0.5MB | 取代 spinlock 热路径 |
-| Per-CPU page cache | +0.5–1MB | 提高缓存命中率 |
-| 内核栈 per-CPU 中断栈 | +0.1MB | 嵌套安全 |
+- **兼容性**：对用户态进程透明，现有应用程序无需修改即可在多核运行；
+- **可扩展性**：支持 2–8 核心；
+- **内存开销**：SMP 带来的额外开销控制在 **1–2MB** 以内，总内存仍远低于 32MB。
 
-**评估门槛**：SMP 的总内存增量不打破 32MB 预算。若超出，优先保证 UP 稳定。
+### 11.3 核心架构变更
 
-### 11.3 SMP 演进顺序
+**Per-CPU 数据结构**：将全局数据结构（运行队列 `runqueue`、当前任务 `current`、空闲任务 `idle`）
+核心化为 per-CPU（`per_cpu!` 已就位）——无锁/低锁竞争访问的基础。
+
+**调度器演进**：
+- **负载均衡**：定期检查各 per-CPU 运行队列长度，在核心间迁移任务（"推送 / 拉取"模型）；
+- **处理器间中断（IPI）**：负载均衡迁移任务、或唤醒其他核心上的任务时，用 IPI 通知目标核心（reschedule IPI）。
+
+**同步原语升级**：
+- `Spinlock` → **队列自旋锁**（MCS/CLH），减少多核缓存一致性开销；
+- 引入 **RwLock**，读多写少场景（路由表查询）优先使用；
+- 探索 **futex** 跨核唤醒语义。
+
+### 11.4 实施路线图
 
 ```
 UP 稳定 (M9)
   │
-  ├─ 1. 加 IPI + per-CPU 运行队列（2 核验证）
-  ├─ 2. 热路径 Spinlock → RCU（dcache/sk_buff 读路径）
-  ├─ 3. per-CPU page/slab cache
-  └─ 4. 扩展到 4 核 + IRQ 亲和性
+  ├─ 阶段一（M9+）：基础架构搭建
+  │    · 调度器/内存核心数据结构 per-CPU 化
+  │    · 基础 IPI 发送/接收机制
+  │    · 队列自旋锁
+  ├─ 阶段二：调度器增强
+  │    · 负载均衡（推送/拉取模型）
+  │    · IPI 在调度中的应用（reschedule IPI）
+  └─ 阶段三：性能优化与稳定性
+       · RwLock 性能调优
+       · 大规模并发压测，解决死锁/性能瓶颈
+       · 智能负载均衡（缓存亲和性感知）
 ```
+
+### 11.5 已知挑战与缓解
+
+| 挑战 | 缓解 |
+|---|---|
+| Rust 所有权模型与 per-CPU 数据所有权难调和 | `Arc` + per-CPU 变量宏（`#[per_cpu]`），明确规则："仅当在本核心上时才可获取可变引用" |
+| 中断处理程序可重入性 | 中断处理设计为纯函数式，或仅操作 per-CPU 中断屏蔽标志 |
+| SMP 内存增量突破 32MB | 阶段门禁：每阶段实测增量，超出则退回（§11.2 预算 1–2MB 为上限） |
 
 ---
 
@@ -2496,6 +2520,64 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | SSH | dropbear（musl 静态，§15 工具链）+ devpts/PTY（§13.4，M12 已有） | M14 |
 | Agent 上联 | 用户态交叉编译程序（§15），走 HTTPS + JSON（§18.6） | M14 |
 | 离线导入 | OCI/Docker archive 解析（复用 §16.3 `novos-pull` 的解压/校验链） | M14 |
+
+---
+
+## 21. 用户预期管理（从 Linux 迁移的避雷设计）
+
+> 用户会用 Linux 的惯性思维使用 Novos-OS。本节把这些"预期错误"固化为**内核/用户态设计约束**，
+> 让错误在第一步就被明确拦截并给出可操作提示（比任何文档都更决定第一印象）。
+> 面向用户的速查版见 README"新手必踩的坑"。
+
+### 21.1 glibc vs musl（最常见的第一坑）
+
+- **现象**：用户 `apt-get install` 或用 glibc 工具链编译的程序，启动报 `Segmentation Fault`
+  （动态链接器找不到符号 / TLS 布局不兼容）。
+- **强制门槛**：`novos-check`（M11）在容器启动前扫描 ELF 的 `PT_INTERP` 段——
+  **非指向 `/novos/ld-musl` 一律拒绝启动**，报错：
+  `"请使用 musl 工具链重新编译（宿主交叉编译，见 docs/nosos-sdk.md）"`。
+
+### 21.2 Redis/服务 OOM（配置被用户覆盖）
+
+- **现象**：用户绕过部署模板传参，Redis 吃满 cgroup 限额被 OOM-kill，AOF 损坏。
+- **设计约束**：OverlayFS 层预置 `/etc/redis/redis.conf` 且**只读（Immutable）**，
+  用户无法用 `-c` 覆盖 `maxmemory`；必须显式挂载新配置文件覆盖（"我知道我在做什么"）。
+
+### 21.3 Ext4 data=journal 挂载拒绝（明确报错）
+
+- **现象**：`mount` 现成 Ext4 盘报 `Operation not supported`（Linux 默认 `data=ordered`）。
+- **报错文案**：
+  `"Novos-OS 仅支持 Ext4 data=journal 模式；请用 tune2fs -O journal_dev /dev/sdX 转换，或不支持此特性，请备份后重新格式化。"`
+
+### 21.4 设备端不编译（认知纠正）
+
+- `PATH` 中不放置 go/rustc/g++（装不下也跑不动）；`/etc/motd` 登录欢迎语明示：
+  `"本设备不包含编译器，请使用宿主机交叉编译。参考 docs/nosos-sdk.md"`。
+
+### 21.5 /proc/cpuinfo 单核（硬件 vs 在线）
+
+- 第一版 UP：`/proc/cpuinfo` / `/sys/devices/system/cpu/` **报告硬件真实核心数**，
+  但 `online` 只显示 1（其余 `offline`）——避免用户误以为板子坏了。
+
+### 21.6 非 Docker CLI 兼容（明确标语）
+
+- 所有入口（Web/CLI）明示：
+  `"Novos 容器运行时遵循 OCI 镜像规范，管理方式为 novos 命令，非 Docker CLI 兼容（不支持 docker-compose）。"`
+
+### 21.7 实时性需求（RT 调度）
+
+- 工业场景（Modbus 100ms 响应）需要硬实时：**M9 必须落地 RT 调度类（SCHED_FIFO 基本模型）**，
+  从 M2 的 RT 双队列预留结构固化；否则工业用户不买单。
+
+### 21.8 网络调试（tcpdump 替代）
+
+- 无 BPF；提供极简内核调试开关：`echo 1 > /proc/sys/net/novos/packet_trace`，
+  内核在环形日志打印每个数据包**五元组 + 丢弃原因**（性能下降 ~50%，仅供调试）。
+
+### 21.9 OTA 内核 A/B 分区
+
+- M14 OTA 不只管容器层：**内核镜像纳入 A/B 分区管理**（内核分区 A/B 标识 + 回滚），
+  覆盖内核本身升级；容器层 OTA 与之并行。
 
 ---
 
