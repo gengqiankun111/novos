@@ -21,7 +21,7 @@ else
   QEMU ?= qemu-system-x86_64
 endif
 
-.PHONY: build image run qemu clean
+.PHONY: build image run qemu test test-integration test-memory clean
 
 build:
 	cargo build -p novos-kernel --target $(KERNEL_TARGET) --release
@@ -40,6 +40,18 @@ qemu: image
 		-nographic \
 		-no-reboot \
 		-display none
+
+# CI 用（Linux `timeout`）；本地直接 `make qemu`
+test:
+	cargo test --workspace
+
+test-integration: image
+	timeout 15 $(QEMU) -kernel $(KERNEL_BIN) -m 64M -serial file:target/integration.log -display none -no-reboot -no-shutdown -d guest_errors || true
+	@echo "=== integration log ==="; cat target/integration.log
+
+test-memory: image
+	timeout 15 $(QEMU) -kernel $(KERNEL_BIN) -m 64M -serial file:target/memory.log -display none -no-reboot -no-shutdown || true
+	@echo "=== memory log ==="; cat target/memory.log
 
 clean:
 	cargo clean
