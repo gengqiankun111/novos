@@ -12,6 +12,8 @@ core::arch::global_asm!(include_str!("boot.asm"), options(att_syntax));
 pub mod interrupts;
 pub mod mm;
 pub mod multiboot2;
+pub mod pit;
 pub mod port;
 pub mod serial;
+pub mod task;
 pub mod vga;

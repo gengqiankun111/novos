@@ -205,6 +205,79 @@ EXC_NOERR 31
 stub_base = stub_0
 
 # ---------------------------------------------------------------------------
+# 外设中断 stub（PIC 重映射后向量 32-47）：压 err=0 + vec，跳 irq_common。
+# 与异常 stub 同布局（每条 9 字节，16 字节对齐），供 interrupts.rs 计算地址。
+# ---------------------------------------------------------------------------
+.macro IRQ_ENTRY vec
+.align 16
+irq_stub_\vec:
+    pushq $0
+    pushq $\vec
+    jmp irq_common
+.endm
+
+IRQ_ENTRY 32
+IRQ_ENTRY 33
+IRQ_ENTRY 34
+IRQ_ENTRY 35
+IRQ_ENTRY 36
+IRQ_ENTRY 37
+IRQ_ENTRY 38
+IRQ_ENTRY 39
+IRQ_ENTRY 40
+IRQ_ENTRY 41
+IRQ_ENTRY 42
+IRQ_ENTRY 43
+IRQ_ENTRY 44
+IRQ_ENTRY 45
+IRQ_ENTRY 46
+IRQ_ENTRY 47
+
+.global irq_stub_base
+irq_stub_base = irq_stub_32
+
+# ---------------------------------------------------------------------------
+# 公共中断入口：保存 15 个通用寄存器 → rust_irq_handler（返回目标任务的
+# ExceptionFrame 指针，用于任务切换）→ 恢复新栈 → iretq。
+# ---------------------------------------------------------------------------
+irq_common:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, %rdi
+    call rust_irq_handler        # rax = 目标任务 frame 指针
+    movq %rax, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp               # 跳过 vec + err
+    iretq
+
+# ---------------------------------------------------------------------------
 # 公共异常入口：保存 15 个通用寄存器 → 调用 rust_exception_handler（不返回）
 # ---------------------------------------------------------------------------
 exception_common:

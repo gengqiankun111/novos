@@ -96,6 +96,7 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 // boot.asm 导出的异常 stub 表基址（每个 stub 恰好 16 字节）。
 extern "C" {
     static stub_base: u8;
+    static irq_stub_base: u8;
 }
 
 /// 异常保存的寄存器帧（对应 boot.asm `exception_common` 的压栈顺序）。
@@ -140,6 +141,11 @@ pub fn init() {
         for i in 0..32u8 {
             (*idt_ptr).set_gate(i, stub_base_addr + u64::from(i) * 16);
         }
+        // 填充 32–47 外设中断（PIC 重映射后）
+        let irq_stub_base_addr = &irq_stub_base as *const u8 as u64;
+        for i in 0..16u8 {
+            (*idt_ptr).set_gate(PIC_1_OFFSET + i, irq_stub_base_addr + u64::from(i) * 16);
+        }
     }
 
     // SAFETY: 单核启动阶段独占访问，lidt 立即生效。
@@ -166,8 +172,8 @@ pub fn init() {
         // ICW4: 8086 模式
         p1d.write(0x01);
         p2d.write(0x01);
-        // OCW1: 屏蔽全部外设中断（定时器 M2 再开）
-        p1d.write(0xFF);
+        // OCW1: 屏蔽除 IRQ0（PIT 定时器）外全部外设中断；IRQ1 键盘等 M2 后按需开
+        p1d.write(0xFE);
         p2d.write(0xFF);
     }
 
@@ -205,5 +211,34 @@ pub unsafe extern "C" fn rust_exception_handler(frame: *const ExceptionFrame) ->
 
 /// 供启动日志确认 IDT 已加载。
 pub fn info() -> &'static str {
-    "idt(0-31)/pic ready"
+    "idt(0-47)/pic ready"
+}
+
+/// 向 PIC 发送 EOI（中断服务结束）。
+pub fn pic_eoi(irq: u8) {
+    // SAFETY: 8259A 标准 EOI 命令端口。
+    unsafe {
+        let mut p1 = Port::<u8>::new(0x20);
+        p1.write(0x20);
+        if irq >= 8 {
+            let mut p2 = Port::<u8>::new(0xA0);
+            p2.write(0x20);
+        }
+    }
+}
+
+/// 外设中断统一入口（由 boot.asm `irq_common` 调用）。
+///
+/// 发送 EOI 后委托调度器处理；返回目标任务应恢复的 `ExceptionFrame` 指针
+/// （未切换时返回原帧）。M2 仅开 IRQ0（PIT），其余 IRQ 保持屏蔽。
+///
+/// # Safety
+/// 由 boot.asm 以有效帧指针调用；此时中断处于关闭状态（中断门）。
+#[no_mangle]
+pub unsafe extern "C" fn rust_irq_handler(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
+    // SAFETY: frame 由 irq_common 构造，vec 字段有效。
+    let vec = unsafe { (*frame).vec };
+    pic_eoi((vec - u64::from(PIC_1_OFFSET)) as u8);
+    // SAFETY: 单核、IF 关闭，调度器无重入。
+    unsafe { crate::task::on_timer_tick(frame) }
 }

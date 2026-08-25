@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{interrupts, mm, multiboot2, println, serial, vga};
+use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, task, vga};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -76,8 +76,45 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         mm::free_page_count()
     );
 
+    // M2：定时器 + 内核线程轮转调度（见 worker_a/b/c）。
+    pit::init();
+    task::spawn("worker-a", worker_a).expect("spawn worker-a");
+    task::spawn("worker-b", worker_b).expect("spawn worker-b");
+    task::spawn("worker-c", worker_c).expect("spawn worker-c");
+    println!("m2: 3 kernel threads spawned, scheduler idle loop");
+
     println!("Novos-OS: init done, entering idle halt loop");
     halt_loop();
+}
+
+/// worker-a：睡眠 30 tick（300ms）后打印（验证睡眠唤醒 + 轮转）。
+fn worker_a() {
+    loop {
+        task::sleep_ticks(30);
+        println!("  [worker-a] tick {} woke", task::ticks());
+    }
+}
+
+/// worker-b：睡眠 50 tick（500ms）后打印。
+fn worker_b() {
+    loop {
+        task::sleep_ticks(50);
+        println!("  [worker-b] tick {} woke", task::ticks());
+    }
+}
+
+/// worker-c：忙等循环，每 100 tick 打印一次（验证时钟抢占 + tick 计数实时性）。
+fn worker_c() {
+    let mut last = 0u64;
+    loop {
+        let t = task::ticks();
+        if t >= last + 100 {
+            last = t;
+            println!("  [worker-c] tick {} alive", t);
+        }
+        // SAFETY: 忙等，无副作用。
+        unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
+    }
 }
 
 /// 空闲停机循环。
