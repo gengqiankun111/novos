@@ -136,10 +136,10 @@ rustup target add x86_64-unknown-none
 **任务**
 - [ ] 4 级页表管理：`mmap`/`munmap`、懒分配、COW；
 - [ ] `Task` 结构（§3.3）+ 内核栈 + 上下文切换（`switch` 汇编）；
-- [ ] CFS 简化调度器（§4.2）：vruntime 红黑树、tick 抢占；
+- [ ] CFS 简化调度器（§4.2）：vruntime 红黑树、tick 抢占（**结构预留 RT 类双队列**，§19.1）；
 - [ ] `fork`（克隆 Task + 复制页表，COW）、`exit`、`waitpid`；
 - [ ] 同步原语：`Spinlock`/`Mutex`/`WaitQueue`；
-- [ ] 定时器最小堆 + 时钟中断。
+- [ ] 定时器最小堆 + 时钟中断 + **时钟源抽象/monotonic/RTC 预留**（§19.1）。
 
 **验收**
 - 内核线程调度：多个线程轮转执行、可睡眠唤醒；
@@ -267,7 +267,11 @@ rustup target add x86_64-unknown-none
 - [ ] 编译期瘦身终检：`opt-level=s/z` + LTO + strip，回填实测 .text 大小；
 - [ ] SMP 支持评估（若预算允许，加 per‑CPU 运行队列）；
 - [ ] 稳定性：长跑 7 天无泄漏（used 不单调爬升）；
-- [ ] 性能：容器启动延迟、网关吞吐达标值回填。
+- [ ] 性能：容器启动延迟、网关吞吐达标值回填；
+- [ ] **秒级冷启动**：deferred init + 只初始化必需驱动（§19.1）；
+- [ ] 看门狗 + 掉电保护（日志原子写 / FS 一致性）；
+- [ ] 可观测性：环形日志 + 落盘 + 健康指标（内存/fd/CPU）；
+- [ ] panic 可读化 + crash dump（供远程诊断）。
 
 **验收**
 - 文档 2.1/2.2 的每一行预算都有**实测数据支撑**；
@@ -288,6 +292,7 @@ rustup target add x86_64-unknown-none
 | M12 | 设备框架 + Capabilities + Seccomp | 37–39 MB | M9（可与 M10/M11 并行） |
 | M13 | 完整 /proc + 信号扩展 + 事件 fd | 38–39 MB | M11 |
 | M14 | OCI 镜像 + 轻量运行时 + OTA（Redis/SQLite） | ≤40 MB | M10+M11+M12+M13 |
+| M15 | ARM64/RISC-V 评估 + 功能级补强（电源/Flash/可观测性） | ≤40 MB | M14 |
 
 ---
 
@@ -340,6 +345,7 @@ rustup target add x86_64-unknown-none
 **目标**：Docker 安全模型 + 完整设备文件。
 
 **任务**
+- [ ] **驱动框架定型**：bus→device→driver + BSP（板级包）+ 中断分发（§19.1）；
 - [ ] `CharDevice` trait + devtmpfs（§13.4）；
 - [ ] 标准设备：`/dev/null`、`/dev/zero`、`/dev/urandom`、`/dev/random`；
 - [ ] devpts：`/dev/ptmx` + `/dev/pts/N`（PTY 对 + 环形缓冲）；
@@ -409,6 +415,28 @@ rustup target add x86_64-unknown-none
 - `novos run busybox echo hello` 完整跑通（veth + bridge + overlay + seccomp）；
 - 自编译的 Go / Rust / C++ 静态二进制作为容器进程运行（§15 工具链闭环）；
 - **内存基线**：≤40MB（full 模式最终断言）。
+
+---
+
+## M15：ARM64/RISC-V 评估 + 功能级补强（DESIGN §17/§19）
+
+**目标**：终局架构验证 + 嵌入式功能级能力（个人项目按余力推进）。
+
+**任务**
+- [ ] **ARM64 原型**：QEMU `virt` 平台启动 + 串口 + 内存映射 + 调度 + 容器冒烟（§17.2）；
+- [ ] RISC-V 留口验证：`arch/` 目录结构对 riscv64 可扩展（§19.1）；
+- [ ] 电源管理：idle 指令级低功耗（x86 hlt / ARM WFI-WFE）、外设电源门控（§19.2）；
+- [ ] Flash 文件系统：littlefs / ubifs（磨损均衡 + 掉电安全）（§19.2）；
+- [ ] 看门狗 + 掉电保护闭环（§19.2）；
+- [ ] 可观测性补强：远程日志 + 配置下发通道（§19.2）；
+- [ ] GDB 调试生态：内核态/用户态调试 + crash dump 远程诊断（§19.2）。
+
+**验收**
+- ARM64 原型在 QEMU virt 上跑起容器冒烟；
+- 功能级至少落地 2 项（电源 idle / Flash FS / watchdog / crash dump）；
+- 内存基线 ≤40MB 口径不变。
+
+> **产品级**（商业化才做，个人项目可暂缓，§19.3）：安全启动（Secure Boot + 签名 + 信任根）、完整 OTA 链路（A/B 分区切换 + 失败回滚）、IEC 62443 / ISO 26262 合规、轻量远程运维协议。
 
 ---
 

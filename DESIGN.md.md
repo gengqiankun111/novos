@@ -34,11 +34,14 @@ Novos‑OS 只解决一个问题：**用最小的内核常驻开销，稳定运�
 ├────────────────────────────────────────────────────────────┤
 │  进程/内存管理 │ Namespace │ Cgroup │ OverlayFS            │
 ├────────────────────────────────────────────────────────────┤
-│  驱动层  virtio‑net / virtio‑blk / 8250 UART / 定时器      │
+│  驱动层  bus→device→driver 框架（virtio/uart/timer/GPIO/…） │
 ├────────────────────────────────────────────────────────────┤
 │  内核核心  x86‑64 启动 │ 中断/异常 │ 内存(物理+虚拟) │ 时钟  │
+│  arch 层：x86_64（起步）/ aarch64（终局）/ riscv64（留口）  │
 └────────────────────────────────────────────────────────────┘
 ```
+
+> **架构骨架（第一版分层约束，详见 §19）**：① 设备驱动模型（bus→device→driver + BSP）；② RT 调度双队列预留；③ 时钟/中断框架（时钟源抽象 + RTC + monotonic）；④ 快速启动（deferred init）；⑤ arch 层同时留 aarch64 / riscv64 口。
 
 ### 1.2 内核态 / 用户态边界
 
@@ -642,7 +645,8 @@ pub struct Arc<T>;  pub struct Weak<T>;   // 引用计数共享所有权
 - `vruntime += 运行时间 / (权重/系统总权重)`；
 - 睡眠进程唤醒时 `vruntime` 被 clamp 到最小值附近（防止饿死/抢占）；
 - 周期 tick 触发调度点 + 抢占检查；
-- 第一版**单核**，SMP 留到稳定版（避免 per‑CPU 复杂度吃掉内存预算）。
+- 第一版**单核**，SMP 留到稳定版（避免 per‑CPU 复杂度吃掉内存预算）；
+- **RT 预留（§19.1）**：调度器从第一天按"RT 类（优先级 + 抢占）+ 普通类（CFS/vruntime）"双队列分层设计；第一版只实现普通类，但 `SchedEntity` 与运行队列结构须能容纳 RT 类，避免后期重构。
 
 ```
 tick:
@@ -834,26 +838,30 @@ run_container(image, spec):
 
 #### ⑤ 设备模型 / 驱动框架
 
+> **架构骨架（§19.1）**：第一版就定型 **bus→device→driver 统一框架 + BSP（板级包）+ 中断分发**；真实设备外设（GPIO/I2C/SPI/CAN/多路 UART/PWM/ADC）五花八门，驱动模型不在第一版定型，每加一个外设推一次架构。
+
 | Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
 |---|---|---|---|
 | kobject + kset + sysfs | 设备层次化 + 用户态可见 | **不实现** sysfs | 容器管理靠 /proc 只读视图 |
-| udev / devtmpfs | 动态设备节点 | 静态设备文件（/dev/uart, /dev/net0） | 设备固定（virtio/uart/timer） |
+| udev / devtmpfs | 动态设备节点 | 静态设备文件 + 驱动注册表 | 设备固定（virtio/uart/timer），新增走 bus→device→driver |
 | 驱动模块加载（request_module） | 动态加载 | **不实现**，静态链接 | 内核裁掉不需要的代码 |
-| 通用 DMA 框架 | 各种总线/设备差异 | 仅 virtio DMA（直接 MMIO） | 只支持 virtio |
-| 通用中断框架（irq_desc/chip/domain） | 中断控制器虚拟化 | 固定中断向量表 | IRQ 来源固定（timer/uart/virtio） |
+| 通用 DMA 框架 | 各种总线/设备差异 | 仅 virtio DMA（直接 MMIO）；DMA 抽象留接口（§13.3 Hal trait） | 只支持 virtio |
+| 通用中断框架（irq_desc/chip/domain） | 中断控制器虚拟化 | 固定中断向量表 + **中断分发抽象**（外设 IRQ → 驱动回调） | IRQ 来源固定（timer/uart/virtio），分发框架留扩展 |
 
-> **收益估算**：设备框架从 Linux ~3 万行 → Novos‑OS 目标 ~1000 行，节省约 1–1.5MB .text。
+> **收益估算**：设备框架从 Linux ~3 万行 → Novos‑OS 目标 ~1500 行（含 bus→device→driver 框架），节省约 1–1.5MB .text。
 
 #### ⑥ 时间与定时器
 
+> **架构骨架（§19.1）**：第一版就定型 **通用时钟源抽象**（不同硬件 timer/RTC 差异屏蔽）+ **RTC（硬件实时时钟）** + **monotonic 时钟**；很多用户态程序依赖 monotonic 语义。
+
 | Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
 |---|---|---|---|
-| hrtimer 框架 + 红黑树 + 高精度 | 多种时钟分辨率 | 单一定时器堆（最小堆，tick 分辨率） | 32MB 预算内够用 |
-| 多时钟类型（REALTIME/MONOTONIC/BOOTTIME/TAI/...） | POSIX 时钟全集 | 仅 MONOTONIC + REALTIME | 容器不需要 TAI/BOOTTIME |
+| hrtimer 框架 + 红黑树 + 高精度 | 多种时钟分辨率 | 单一定时器堆（最小堆，tick 分辨率）+ 时钟源 trait | 32MB 预算内够用 |
+| 多时钟类型（REALTIME/MONOTONIC/BOOTTIME/TAI/...） | POSIX 时钟全集 | 仅 MONOTONIC + REALTIME + RTC | 容器不需要 TAI/BOOTTIME |
 | timer wheel（低精度）+ hrtimer（高精度）双框架 | 兼容旧 API + 新 API | 单一定时器堆 | 无旧 API 包袱 |
-| tickless / NOHZ | 省电 | **不实现**（第一版） | 服务器场景不需要省电 |
+| tickless / NOHZ | 省电 | **不实现**（第一版） | 服务器场景不需要省电（嵌入式省电 = idle 指令级，见 §19.2 电源管理） |
 
-> **收益估算**：时间子系统从 Linux ~5000 行 → Novos‑OS 目标 ~500 行，节省约 0.3–0.5MB .text。
+> **收益估算**：时间子系统从 Linux ~5000 行 → Novos‑OS 目标 ~800 行（含时钟源抽象 + RTC），节省约 0.3–0.5MB .text。
 
 #### ⑦ 进程创建（clone/fork）
 
@@ -2169,26 +2177,27 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ---
 
-## 17. ARM64 演进（终局目标）
+## 17. ARM64 / RISC-V 演进（终局目标）
 
-> x86_64 起步（QEMU 开发便利）；**ARM64 为终局目标**——arch 层隔离从第一天做好（M0 已按此组织：`boot.asm` 独立于内核逻辑，页表/中断/上下文切换收敛在 arch 边界）。
+> x86_64 起步（QEMU 开发便利）；**ARM64 为终局目标，RISC-V 留口**——arch 层隔离从第一天做好（M0 已按此组织：`boot.asm` 独立于内核逻辑，页表/中断/上下文切换收敛在 arch 边界）。
+> 嵌入式生态 ARM/RISC-V 并存，`arch/` 目录设计时把 `aarch64` 与 `riscv64` 都留口（§19.1 架构骨架）。
 
 ### 17.1 arch 抽象边界（x86_64/arm64 各自实现）
 
-| 边界 | x86_64（M0 已有雏形） | arm64 |
-|---|---|---|
-| 启动 | boot.asm（multiboot2 + 长模式） | boot.S（u-boot/QEMU virt + `_start`） |
-| 页表 | 4 级页表（PML4→PT） | 4 级页表（TTBR0/TTBR1，PGD→PTE） |
-| 中断 | IDT + PIC/APIC | VBAR + GIC |
-| 上下文切换 | 通用寄存器保存/恢复 | 同构（X0-X30 + SP/ELR） |
-| 原子/屏障 | `asm!` 内联 | `asm!` 内联（dmb/isb） |
-| 虚拟化 | 无（第一版） | 无（第一版） |
+| 边界 | x86_64（M0 已有雏形） | arm64 | riscv64（留口） |
+|---|---|---|---|
+| 启动 | boot.asm（multiboot2 + 长模式） | boot.S（u-boot/QEMU virt + `_start`） | boot.S（OpenSBI + `_start`） |
+| 页表 | 4 级页表（PML4→PT） | 4 级页表（TTBR0/TTBR1，PGD→PTE） | Sv39/Sv48 |
+| 中断 | IDT + PIC/APIC | VBAR + GIC | mtvec/stvec + PLIC |
+| 上下文切换 | 通用寄存器保存/恢复 | 同构（X0-X30 + SP/ELR） | 同构（X1-X31 + SP） |
+| 原子/屏障 | `asm!` 内联 | `asm!` 内联（dmb/isb） | `asm!` 内联（fence） |
+| 虚拟化 | 无（第一版） | 无（第一版） | 无（第一版） |
 
 ### 17.2 移植顺序与预算
 
 - M9 之后正式评估（里程碑 M15）：QEMU `virt` 平台起 aarch64 原型（串口 + 内存映射 + 调度 + 容器冒烟）；
 - 迁移原则：**内核逻辑与 arch 解耦**（`mm/sched/net/fs` 不感知 arch），仅 `arch/` 与驱动层有平台差异；
-- 预算：ARM64 指令密度与 x86_64 相当，32MB 预算口径不变；
+- 预算：ARM64/RISC-V 指令密度与 x86_64 相当，32MB 预算口径不变；
 - 目标设备：ARM 网关盒子（256MB–2GB），x86_64 定位为开发/演示环境。
 
 ---
@@ -2246,6 +2255,42 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 - **云端大模型 API = HTTP + TLS + JSON 一个用例**，不需要单独支持；
 - HTTP 客户端（§5 网络栈之上）补三条能力：**SSE 流式响应、长超时、大 JSON 流式解析**（避免一次缓冲）；
 - **本地推理**是另一码事（推理引擎 + 数学库 + NPU 驱动），维持远期独立子系统结论。
+
+---
+
+## 19. 架构骨架与演进分级（架构级 / 功能级 / 产品级）
+
+> **最重要的设计约束**：下面"架构级"四项不是"以后加的功能"，而是**决定第一天代码怎么分层的约束**——第一版不预留，后面会推倒重来。
+
+### 19.1 架构级（第一版必须预留，否则返工成本极高）
+
+| 维度 | 具体内容 | 为什么必须提前 | 落地位置 |
+|---|---|---|---|
+| **设备驱动模型** | **bus→device→driver 统一框架** + 板级包（BSP）+ 中断分发；覆盖 GPIO/I2C/SPI/**CAN**/多路 UART/PWM/ADC | 现在只有 virtio/uart/timer 三个驱动；驱动模型不在第一版定型，每加一个外设推一次架构 | §1.1、§6.2⑤、§13.4 |
+| **实时性 / 确定性** | 中断优先级、可抢占内核、**RT 调度类（优先级 + 抢占）+ 普通类（CFS）双队列** | 工业/车用要求确定性延迟，纯 CFS 不够；不预留则加实时性 = 重构调度器 | §4.2、§3.3 `SchedEntity` |
+| **时钟 / 中断框架** | 通用时钟源抽象、高精度 timer、**RTC**、**monotonic** 时钟 | 嵌入式拿到的是具体硬件（不同 timer/RTC）；很多用户态程序依赖 monotonic | §6.2⑥、§1.4 |
+| **快速启动预留** | 秒级冷启动：只初始化必需驱动、**deferred init（延迟初始化）**、直接映射优化 | 冷启动快是嵌入式核心卖点；启动路径（什么先起、什么懒加载）第一版就要定 | §1.3 启动流程 |
+| **RISC-V 预留** | `arch/` 目录把 `aarch64` 与 `riscv64` 都留口 | 嵌入式 ARM/RISC-V 并存，分层越早越省 | §17 |
+
+### 19.2 功能级（中期补，不影响架构，但要进路线图）
+
+| 项 | 内容 |
+|---|---|
+| 电源管理 | idle 指令级低功耗（x86 hlt / ARM WFI-WFE）、外设电源门控、suspend/resume、调频 —— 电池/太阳能设备第一需求 |
+| Flash 文件系统 | 设备实际用 flash（非磁盘）：littlefs/ubifs（磨损均衡 + 掉电安全）；ramfs/tmpfs 只是"内存与开发"，存储层单独设计 |
+| 看门狗 | 硬件 watchdog + 软件喂狗，防死机自愈 —— 嵌入式标配 |
+| 掉电保护 | 日志原子写、文件系统一致性（配合 SQLite WAL）、电源异常恢复 |
+| 可观测性 | 环形日志 + 落盘 + 远程日志、健康指标（内存/fd/CPU）、配置下发通道 |
+| GDB 调试生态 | 内核态 + 用户态调试、panic 可读化、死机转储（crash dump 供远程诊断） |
+
+### 19.3 产品级（商业化才需要，个人项目可暂缓）
+
+| 项 | 内容 |
+|---|---|
+| 安全启动 | Secure Boot + 内核签名 + 信任根 —— 做产品是准入项 |
+| 完整 OTA 链路 | 下载 → 签名校验 → **A/B 分区切换** → 失败回滚（§16 只是 OCI 镜像雏形） |
+| 标准合规 | IEC 62443（工业）、ISO 26262（车用）——若目标行业是这两块，提前了解 |
+| 远程运维协议 | 轻量管理通道（非 SSH 那种重的） |
 
 ---
 
