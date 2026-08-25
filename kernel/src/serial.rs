@@ -81,18 +81,24 @@ pub fn println_fmt(args: core::fmt::Arguments) {
     print_fmt(format_args!("\n"));
 }
 
-/// 直接向 `SerialPort` 写格式化内容。
+/// 直接向 `SerialPort` 写格式化内容，并镜像到 VGA 文本屏（QEMU screendump 截屏依赖）。
+///
+/// 用"双写 writer"而非 `format!`，保持零堆分配（打印可能发生在持分配器锁期间）。
 fn write_all(serial: &mut SerialPort, args: core::fmt::Arguments) -> core::fmt::Result {
-    struct W<'a>(&'a mut SerialPort);
-    impl Write for W<'_> {
+    struct Dual<'a> {
+        serial: &'a mut SerialPort,
+    }
+    impl Write for Dual<'_> {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
             for b in s.bytes() {
-                self.0.write_byte(b);
+                self.serial.write_byte(b);
             }
+            // 镜像到 VGA（无锁：M1 单核，原子光标足够）。
+            crate::vga::write_str(s);
             Ok(())
         }
     }
-    W(serial).write_fmt(args)
+    Dual { serial }.write_fmt(args)
 }
 
 /// panic 专用输出：绕过锁直接写端口，避免"持锁中 panic → 自旋死锁"。
@@ -109,6 +115,8 @@ pub fn panic_write(args: core::fmt::Arguments) {
                 let mut thr = unsafe { Port::<u8>::new(self.base + THR) };
                 unsafe { thr.write(b) };
             }
+            // 镜像到 VGA（panic 也可见，便于 screendump 捕获）。
+            crate::vga::write_str(s);
             Ok(())
         }
     }

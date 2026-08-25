@@ -5,9 +5,13 @@
 
 #![no_std]
 
+extern crate alloc;
+
 core::arch::global_asm!(include_str!("boot.asm"), options(att_syntax));
 
 pub mod interrupts;
+pub mod mm;
 pub mod multiboot2;
 pub mod port;
 pub mod serial;
+pub mod vga;

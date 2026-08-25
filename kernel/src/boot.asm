@@ -19,7 +19,7 @@ multiboot1_start:
     .long -(0x1BADB002 + 0x00010003)
     .long 0x100000            # header_addr（头自身物理地址）
     .long 0x100000            # load_addr
-    .long _kernel_load_end    # load_end_addr（文件内容末尾）
+    .long 0                   # load_end_addr（0 = 加载到文件末尾；QEMU/GRUB 均支持）
     .long _kernel_end         # bss_end_addr（QEMU 清零到此处）
     .long _start              # entry_addr
 multiboot1_end:

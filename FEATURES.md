@@ -21,10 +21,11 @@
 | 多协议启动 | 自包含 multiboot1 扁平（QEMU）/ PVH ELF / multiboot2（GRUB）三协议 | ✅ | M0 | DESIGN §1.3 |
 | 长模式 + 页表 | 32→64 位切换、1GB 2MB 大页恒等映射 | ✅ | M0 | DESIGN §1.3 |
 | 串口输出 | 手写 8250 UART，115200-8N1，`println!`/panic 落串口 | ✅ | M0 | DESIGN §1.4 |
+| VGA 文本屏 | 0xB8000 文本模式（80×25），串口输出镜像上屏（QEMU screendump 截屏验证） | ✅ | M1 | — |
 | 中断/异常 | 手写 IDT（0–31 异常）+ 8259A PIC 重映射 | ✅ | M0 | DESIGN §1.4 |
 | 内存映射打印 | multiboot1/2/PVH 三种启动信息解析 | ✅ | M0 | — |
 | GDT + TSS + IST | 独立栈（DF/NMI/MC/DBG） | ◻ | M2 | DESIGN §1.4 |
-| 物理内存 | Buddy（order 0–10）+ SLUB 风格 Slab（**侵入式空闲链表**）+ OOM 回调 + **可移动页标记** | ◻ | M1 | DESIGN §3.1/勘误§9-10 |
+| 物理内存 | Buddy（order 0–10，分裂/合并/`load_end=0` 修正）+ SLUB 风格 Slab（**侵入式空闲链表**）+ GlobalAlloc（Vec/Box 可用）+ OOM 回调 + **可移动页标记**（自测 ALL PASS） | ✅ | M1 | DESIGN §3.1/勘误§9-10 |
 | 虚拟内存 | 4 级页表懒分配、COW、`MappedPages` 类型化句柄 + **内存紧缩 compact_zone** | ◻ | M2/M9 | DESIGN §3.2 |
 | 任务/调度 | CFS（vruntime 红黑树）+ **RT 类双队列结构预留** + **优先级继承 PIP** + **per-CPU 占位（SMP 预热）** | ◻ | M2 | DESIGN §4.2/勘误§7 |
 | 同步原语 | Spinlock / Mutex / WaitQueue，锁序编译期编码；**RT 强制自旋锁 + CFS 关抢占** | ◻ | M2 | DESIGN §3.9/勘误§11 |

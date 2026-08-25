@@ -36,8 +36,9 @@ SECTIONS {
         *(.data .data.*)
     } :text
 
-    /* 文件内容末尾（.bss 前）= multiboot1 头的 load_end_addr；.bss 不占文件内容 */
-    _kernel_load_end = ADDR(.bss);
+    /* 注意：multiboot1 头的 load_end_addr 设为 0（加载到文件末尾），
+       故这里不再需要 _kernel_load_end 符号——.bss 之后的孤儿段
+       （如 .got）不会造成 QEMU 读文件越界。 */
 
     .bss : ALIGN(4K) {
         *(.bss .bss.*)
