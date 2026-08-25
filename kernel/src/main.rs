@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, sync, task, vga};
+use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, task, vga, vmm};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -76,68 +76,49 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         mm::free_page_count()
     );
 
-    // M2 切片2：定时器 + 同步原语（PIP 演示：L 持锁 / M 中间优先级抢占 / H 高优先级等待）。
+    // M2 切片3：定时器 + fork/COW 演示（父写 0xAAAA，fork 后子写 0xBBBB，
+    // 验证物理页独立：子 COW 复制新页，父页不受影响）。
     pit::init();
-    task::spawn("low", worker_low, 1).expect("spawn low");
-    task::spawn("med", worker_med, 2).expect("spawn med");
-    task::spawn("high", worker_high, 3).expect("spawn high");
-    println!("m2: sync PIP demo (L=1 lock, M=2 busy, H=3 waiter)");
+    task::spawn("fork-demo", worker_fork, 2).expect("spawn fork-demo");
+    println!("m2: vmm/fork COW demo");
 
     println!("Novos-OS: init done, entering idle halt loop");
     halt_loop();
 }
 
-/// PIP 演示锁。
-static LOCK: sync::Mutex = sync::Mutex::new();
+/// fork/COW 演示：mmap 一页 → 父写 → fork → 子 COW 写 → 验证物理页分离。
+fn worker_fork() {
+    let pid = task::current_id();
+    let v = vmm::mmap(pid, vmm::PAGE_SIZE);
+    vmm::touch(pid, v);
+    vmm::write_u32(pid, v, 0x1111_AAAA);
+    println!(
+        "  [P] va={:#x} phys={:#x} val={:#x}",
+        v,
+        vmm::phys(pid, v),
+        vmm::read_u32(pid, v)
+    );
 
-/// L（低优先级 1）：拿锁后临界区忙等 10 tick。被 M 抢占会显著推迟；
-/// H 等锁时 PIP 提升 L → 临界区后半段不被 M 抢占，准时完成。
-fn worker_low() {
-    loop {
-        task::sleep_ticks(10); // 错开启动，让 H 先睡、M 先跑
-        LOCK.lock();
-        println!("  [L] lock @t{}", task::ticks());
-        let start = task::ticks();
-        // 临界区：忙等 10 tick
-        while task::ticks() < start + 10 {
-            // SAFETY: 忙等。
-            unsafe { core::arch::asm!("pause", options(nomem, nostack)) };
-        }
-        let boosted = task::effective(task::current_id()) > task::priority(task::current_id());
+    let child = task::fork("fork-child");
+    if child == 0 {
+        // 子侧：COW 写 → 分配新物理页，父页不受影响
+        let cid = task::current_id();
+        vmm::write_u32(cid, v, 0x2222_BBBB);
         println!(
-            "  [L] unlock @t{} (boosted={})",
-            task::ticks(),
-            boosted
+            "  [C] phys={:#x} val={:#x} (cow copy)",
+            vmm::phys(cid, v),
+            vmm::read_u32(cid, v)
         );
-        LOCK.unlock();
-        task::sleep_ticks(60);
-    }
-}
-
-/// M（中间优先级 2）：睡眠 2 tick + 忙等 6 tick 的周期活动任务。
-/// 无 PIP 时会在 L 的临界区内抢占 L；PIP 提升 L(3) 后无法抢占。
-fn worker_med() {
-    loop {
-        let s = task::ticks();
-        task::sleep_ticks(2);
-        while task::ticks() < s + 8 {
-            // SAFETY: 忙等。
-            unsafe { core::arch::asm!("pause", options(nomem, nostack)) };
-        }
-        println!("  [M] busy window done @t{}", task::ticks());
-    }
-}
-
-/// H（高优先级 3）：等待锁；持锁者被 PIP 提升后快速拿到锁。
-fn worker_high() {
-    loop {
-        task::sleep_ticks(15); // 让 L 先拿到锁
-        println!("  [H] try lock @t{}", task::ticks());
-        LOCK.lock();
-        println!("  [H] got lock @t{}", task::ticks());
-        LOCK.unlock();
-        println!("  [H] released @t{}", task::ticks());
-        task::sleep_ticks(40);
+        task::exit();
+    } else {
+        // 父侧：等子退出后读自己的页（应仍是 0x1111_AAAA，物理页 0x202000 未变）
+        task::waitpid(child as usize);
+        println!(
+            "  [P] after wait: phys={:#x} val={:#x}",
+            vmm::phys(pid, v),
+            vmm::read_u32(pid, v)
+        );
+        task::exit();
     }
 }
 

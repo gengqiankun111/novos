@@ -199,6 +199,11 @@ pub fn init() {
 pub unsafe extern "C" fn rust_exception_handler(frame: *const ExceptionFrame) -> ! {
     let f = unsafe { &*frame };
     panic_write(format_args!("EXCEPTION: vector={} err={:#x}\n", f.vec, f.err));
+    // 读取 CR2（页错误地址）
+    let cr2: u64;
+    // SAFETY: mov %cr2 为只读特权指令。
+    unsafe { asm!("movq %cr2, {0}", out(reg) cr2, options(nomem, nostack, att_syntax)) };
+    panic_write(format_args!("  cr2={:#x}\n", cr2));
     panic_write(format_args!("  rip={:#x} cs={:#x} rflags={:#x}\n", f.rip, f.cs, f.rflags));
     panic_write(format_args!("  rsp={:#x} ss={:#x}\n", f.rsp, f.ss));
     panic_write(format_args!("  rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}\n", f.rax, f.rbx, f.rcx, f.rdx));

@@ -495,6 +495,19 @@ pub fn free_page_count() -> usize {
     free_pages_locked(&inner)
 }
 
+/// 从 buddy 分配 `order` 阶物理页块（vmm 用；GlobalAlloc 走 Slab 不直接暴露 buddy）。
+pub fn alloc_pages(order: usize) -> usize {
+    ALLOC.inner.lock().buddy.alloc(order)
+}
+
+/// 释放 buddy 物理页块。
+///
+/// # Safety
+/// addr 必须由 `alloc_pages` 同阶返回。
+pub unsafe fn free_pages(addr: usize, order: usize) {
+    ALLOC.inner.lock().buddy.free(addr, order);
+}
+
 /// 供 main.rs 使用的可分配字节上限常量。
 pub const fn heap_capacity_bytes() -> usize {
     MEM_END - MEM_START

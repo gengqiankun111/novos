@@ -18,3 +18,4 @@ pub mod serial;
 pub mod sync;
 pub mod task;
 pub mod vga;
+pub mod vmm;

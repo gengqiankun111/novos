@@ -205,6 +205,32 @@ EXC_NOERR 31
 stub_base = stub_0
 
 # ---------------------------------------------------------------------------
+# fork 包装：捕获 fork 点 callee-saved 寄存器（供子任务恢复局部变量），
+# 并把返回地址、保存寄存器指针、目标 rsp 传给 rust_fork_impl。
+# 父路径：call 返回后弹出保存的寄存器并 ret（cid 在 eax）。
+# 子路径：从 ret_addr 恢复，rsp=目标 rsp，rax=0，寄存器=fork 点快照。
+# ---------------------------------------------------------------------------
+.global fork_wrapper
+fork_wrapper:
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %rbx
+    pushq %rbp
+    movq 48(%rsp), %rdi        # 返回地址（worker 的 fork 调用点）
+    movq %rsp, %rsi            # 保存的寄存器块指针（r15..rbp 顺序）
+    leaq 56(%rsp), %rdx        # worker 恢复后应有的 rsp
+    call rust_fork_impl        # rax = 子任务 id（父侧）
+    popq %rbp
+    popq %rbx
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
+    ret
+
+# ---------------------------------------------------------------------------
 # 外设中断 stub（PIC 重映射后向量 32-47）：压 err=0 + vec，跳 irq_common。
 # 与异常 stub 同布局（每条 9 字节，16 字节对齐），供 interrupts.rs 计算地址。
 # ---------------------------------------------------------------------------
