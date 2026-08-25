@@ -418,6 +418,7 @@ make run
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 设计文档：架构、内存预算拆解、数据结构、核心算法 |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发路线图：M0–M9 里程碑、任务拆解、验收标准 |
+| [FEATURES.md](FEATURES.md) | 功能说明书：支持什么功能/特性、状态与边界 |
 | [interaction.md](interaction.md) | 交互模式：无头设备三层远程通道（Web/SSH/Agent） |
 
 ---
