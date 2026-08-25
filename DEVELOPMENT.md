@@ -351,7 +351,8 @@ rustup target add x86_64-unknown-none
 - [ ] devpts：`/dev/ptmx` + `/dev/pts/N`（PTY 对 + 环形缓冲）；
 - [ ] Capabilities：`TaskCreds`（permitted/effective/inheritable/bounding）+ 权限检查（§13.5）；
 - [ ] Seccomp BPF：最小解释器（syscall number 过滤，<500 行）；
-- [ ] `getrandom` 系统调用 + `/dev/urandom`（RDRAND）（§13.9）。
+- [ ] `getrandom` 系统调用 + `/dev/urandom`（RDRAND）（§13.9）；
+- [ ] （中期评估）**USB Host 最小集**：USB 串口 / U 盘 / 网卡（§19.1，驱动跟着目标设备走）。
 
 **验收**
 - `echo hello > /dev/null` + `dd if=/dev/zero bs=4096 count=1`；

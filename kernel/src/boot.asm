@@ -7,6 +7,24 @@
 .set MB2_BOOT_MAGIC,  0x36D76289     # bootloader 回传的 magic（eax）
 
 # ---------------------------------------------------------------------------
+# multiboot1 头（QEMU 对 ELF 走 PVH、对扁平镜像走 multiboot loader；
+# 本头用于 objcopy 扁平镜像经 QEMU -kernel 启动；GRUB 走 multiboot2 头）
+# flags: MEMINFO(0x1) | ALIGN(0x2) | LOAD_ADDR(0x10000)
+# ---------------------------------------------------------------------------
+.section .multiboot1, "a"
+.align 4
+multiboot1_start:
+    .long 0x1BADB002
+    .long 0x00010003
+    .long -(0x1BADB002 + 0x00010003)
+    .long 0x100000            # header_addr（头自身物理地址）
+    .long 0x100000            # load_addr
+    .long _kernel_load_end    # load_end_addr（文件内容末尾）
+    .long _kernel_end         # bss_end_addr（QEMU 清零到此处）
+    .long _start              # entry_addr
+multiboot1_end:
+
+# ---------------------------------------------------------------------------
 # multiboot2 头（16 字节 + end tag）
 # ---------------------------------------------------------------------------
 .section .multiboot2, "a"
@@ -20,6 +38,21 @@ header_start:
     .short 0
     .long 8
 header_end:
+
+# ---------------------------------------------------------------------------
+# PVH ELF note（QEMU -kernel 走 PVH 路径；GRUB 走上面的 multiboot2 路径）
+# XEN_ELFNOTE_PHYS32_ENTRY: QEMU 在 32 位保护模式、分页关闭下跳转 _start，
+# ebx = &hvm_start_info（与 multiboot2 的 mbi 位置一致）。
+# ---------------------------------------------------------------------------
+.section .note.Xen, "a", @note
+    .align 4
+    .long 2f - 1f      # namesz
+    .long 4f - 3f      # descsz
+    .long 6            # type: XEN_ELFNOTE_PHYS32_ENTRY
+1:  .asciz "Xen"
+2:  .align 4
+3:  .quad _start
+4:  .align 4
 
 # ---------------------------------------------------------------------------
 # BSS：内核栈；DATA：页表（1GB 恒等映射，含重定位，须放 .data）
