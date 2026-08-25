@@ -230,6 +230,7 @@
 - [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR。
 - [ ] **宿主机交叉编译工具链**：musl-cross + `crt1.o` + linker script。
 - [ ] **`novos-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（M14 应用合入门槛）；**启动前扫描 `PT_INTERP`，非 `/novos/ld-musl` 拒绝启动并提示**（glibc 拦截，DESIGN §21.1）。
+- [ ] **官方推荐软件清单（阶段一）**：文档页表格列出软件/功能/官方地址/官方验证 musl 静态二进制链接（core/runtime/service/net-tools 四类，DESIGN §22）；配套 `novos-build` 一键构建；**立即产出《为 Novos-OS 构建 Redis》musl 静态编译指南**（Redis 7.2.4+）。
 
 **验收标准**：
 - 运行动态链接的 hello world（`gcc -o hello hello.c` 不加 `-static`）。

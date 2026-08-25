@@ -11,7 +11,11 @@
 
 | 任务 | 设计依据 | 依赖 | 产出 |
 |---|---|---|---|
-| `novos` 应用仓库 + 镜像签名（预审核上架、拉取校验） | DESIGN_EXT §1.1 | M14 `novos-pull` | 官方仓库 + `novos pull` 强制校验 |
+| `novos` 应用仓库 + 镜像签名（预审核上架、拉取校验） | DESIGN_EXT §1.1 / DESIGN §22 | M14 `novos-pull` | 官方仓库 + `novos pull` 强制校验 |
+| **阶段一：官方推荐软件清单 + `novos-build`**（软件/功能/官网地址/官方 musl 静态二进制链接） | DESIGN §22.3 | M11 工具链 | 清单页 + `novos-build` 工具 |
+| **阶段二：社区软件仓库**（`novos repo-add`/`novos install`；核心包：musl-gcc 静态编译 + 私钥签名） | DESIGN §22.3 | 阶段一 | 软件仓库服务器 + 包维护流程 |
+| **阶段三：云端应用商店**（`novos deploy redis`） | DESIGN §22.3 | 云端构建（主线二） | 云端原生应用商店 |
+| **立即行动：Redis 构建指南**（Redis 7.2.4+，musl-gcc 静态编译） | DESIGN §22.4 | 无 | 《为 Novos-OS 构建 Redis》 |
 | `novos-check` 升级适配器（glibc 沙盒 / syscall 翻译层评估） | DESIGN_EXT §1.1 | M11 `novos-check` | 兼容性沙盒原型 |
 | Ext4 自适应挂载（后台 data=ordered → journal 转换） | DESIGN_EXT §1.2 | M10 ext4 | 挂载不拒绝、自动转换 |
 | F2FS 支持评估（SD/eMMC 断电恢复 + 磨损均衡） | DESIGN_EXT §1.2 | M10 Block I/O | F2FS 可行性报告 |

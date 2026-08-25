@@ -498,6 +498,26 @@ make run
 
 详见 [DESIGN_EXTENSION.md](DESIGN_EXTENSION.md)（设计）/ [DEVELOP_EXTENSION.md](DEVELOP_EXTENSION.md)（路线）。
 
+### 官方软件仓库（从精选清单到应用商店）
+
+Novos-OS 从"出色内核"走向"成功平台"的关键：一个**小而精**的官方软件仓库，提供
+**预编译 + 预配置 + 签名 + 与 musl 完全兼容**的软件包——用户 `novos install redis`
+开箱即用，告别手动编译和依赖地狱（内置部署模板，自动应用 `--maxmemory 64mb` 等最佳实践）。
+
+| 分类 | 内容 |
+|---|---|
+| **core** | init、shell、`novos` 命令行工具 |
+| **runtime** | musl 运行时、Go/Rust 运行时支持 |
+| **service** | Redis、SQLite、Mosquitto (MQTT) |
+| **net-tools** | curl、wget、dropbear (SSH) |
+
+**三阶段演进**：① 官方推荐软件清单 + `novos-build`（1.0 初期）→ ② 社区软件仓库
+（`novos repo-add`/`novos install`，musl-gcc 静态编译 + 私钥签名）→ ③ 云端应用商店
+（`novos deploy redis`）。
+
+**现在即可行动**：选定 Redis 7.2.4+、给出官方下载链接、编写《为 Novos-OS 构建 Redis》
+musl 静态编译指南。详见 [DESIGN §22](docs/DESIGN.md)。
+
 ---
 
 ## License

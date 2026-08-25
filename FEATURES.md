@@ -76,6 +76,9 @@
 | C++ 交叉编译 | musl-cross + `-static -static-libstdc++ -static-libgcc`（宿主机） | ◻ | M11 | DESIGN §15.1 |
 | **Novos-SDK 基础镜像** | ld-musl + 头文件 + linker script，`--dynamic-linker` 指向 Novos 专用路径 | ◻ | M11 | DESIGN §15.2 |
 | **novos-check 工具** | ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）——应用合入门槛；**启动前扫描 PT_INTERP，非 `/novos/ld-musl` 拒绝启动并提示（glibc 拦截）** | ◻ | M11 | DESIGN §15.3/§21.1 |
+| **官方软件仓库** | "小而精"精选集合（core/runtime/service/net-tools），预编译 + 预配置 + 签名 + musl 完全兼容；`novos install redis` 开箱即用，内置部署模板（DESIGN §22） | ◻ | M11（清单）/ 长期 | DESIGN §22 |
+| **`novos-build` 工具** | 一键从源码构建 Novos 兼容软件包（阶段一）；源码 → OCI 镜像 + 自动 `novos-check` 验证（阶段二） | ◻ | M11 | DESIGN §22.3 |
+| **`novos` 软件仓库 CLI** | `novos repo-add`/`novos install`（阶段二社区仓库）/`novos deploy redis`（阶段三云端商店） | ◻ | 长期 | DESIGN §22.3 |
 | ABI 契约文档 | `docs/abi.md`：syscall 白/黑/灰名单 + 结构体/errno/调用约定 | ◻ | M11 | DESIGN §15.3 |
 | Lua / MicroPython / QuickJS | 轻量脚本运行时 | ○ | M14 | DESIGN §18.2 |
 | CPython / JVM | musl 构建可行性评估通过才做 | ○ | P3 | DESIGN §18.2 |
