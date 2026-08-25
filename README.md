@@ -87,6 +87,7 @@ Novos‑OS 不是 Linux 的复制品。它砍掉了数十年来的兼容包袱�
 > **驱动分期**：首期只有 UART/定时器/virtio；**USB Host 最小集**（串口/U 盘/网卡）中期加，Type-C 只当供电通道，音频默认不做。**驱动跟着锁定的目标设备走，不预先全做**——下一步先定第一块真实目标板（ARM 工业板），按外设清单定驱动清单。
 
 > **2026-08 架构评审**：12 项工程问题（OverlayFS 写放大、Futex COW、PID1 自愈、SMP 预热、零拷贝 skb、时间轮、内存碎片化、Seccomp 参数过滤等）及补救方案已入 [DESIGN_ERRATA.md](DESIGN_ERRATA.md)，并同步进 DESIGN/DEVELOPMENT/FEATURES。**三个必改红线**：OverlayFS 稀疏 copy-up、Futex 逻辑键、PID 1 热备 init。
+> **遗留缺陷修正（3 处）**：① PID1 自愈加**反跳计时器**（60s 内崩溃 ≥3 次跳过 rescue 直接 watchdog 复位，防死循环）；② PIP **仅解决优先级反转、不改变锁层级规则**，审查清单加"PIP 与锁层级冲突检测"；③ 零拷贝 Skb 池补 **TCP 已确认段批量回收**（ACK 后 `snd_una` 前移释放 retrans_queue，Arc 归零自动还池）。详见 DESIGN §1.2/§4.2/§4.5。
 
 ---
 
