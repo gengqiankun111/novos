@@ -445,6 +445,8 @@ make run
 | [FEATURES.md](FEATURES.md) | 功能说明书：支持什么功能/特性、状态与边界 |
 | [interaction.md](interaction.md) | 交互模式：无头设备三层远程通道（Web/SSH/Agent） |
 | [EXTENSIONS.md](EXTENSIONS.md) | 远期扩展口：Maple Tree / rhashtable / trie / 基数树（feature-gated） |
+| [DESIGN_EXTENSION.md](DESIGN_EXTENSION.md) | 长期设计：三主线（免疫/透明/好用） |
+| [DEVELOP_EXTENSION.md](DEVELOP_EXTENSION.md) | 长期开发：三主线任务拆解 + v1.0/v2.0/v3.0 节奏 |
 
 ---
 
@@ -479,6 +481,22 @@ make run
     *   跨核负载均衡，充分利用多核算力。
 
 这一演进路径确保在保持内核极简、安全的同时，性能随硬件线性增长。详见 [DESIGN §11](docs/DESIGN.md)。
+
+### 长期演进路线图（三主线）
+
+面向未来，Novos-OS 沿三条主线长期演进（基于对用户"致命 Bug / 核心困惑 / 高频需求"的预判）：
+
+| 维度 | 短期 v1.0 | 中期 v2.0 | 长期 v3.0+ |
+|---|---|---|---|
+| **致命 Bug**（防御→免疫） | `novos-check` 强制拦截 | 轻量兼容层、自动 FS 转换 | 官方应用商店、Cgroup 策略硬化 |
+| **核心困惑**（解释→透明） | 文档引导、`/etc/motd` 提示 | 云端构建服务、SMP 负载均衡 | OCI 原生生态、与 Balena 集成 |
+| **高频需求**（可用→好用） | 调试开关、预留 RT 接口 | SCHED_FIFO、结构化日志 | eBPF 子集、A/B 分区原子升级 |
+
+- **主线一**（免疫）：契约式交付体系——应用签名仓库、Ext4 自适应挂载、Cgroup 内核级限额；
+- **主线二**（透明）：重塑认知——云端构建、SMP 透明调度、OCI 原生生态（非 Docker 兼容）；
+- **主线三**（好用）：深度定制——SCHED_FIFO 硬实时、eBPF 子集可观测、A/B 分区原子升级。
+
+详见 [DESIGN_EXTENSION.md](DESIGN_EXTENSION.md)（设计）/ [DEVELOP_EXTENSION.md](DEVELOP_EXTENSION.md)（路线）。
 
 ---
 

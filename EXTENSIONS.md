@@ -9,6 +9,21 @@
 
 ---
 
+## 0. 长期演进方向总览
+
+本文件登记的是**数据结构级**远期项（Maple Tree / rhashtable / trie / 基数树）。
+除此之外，Novos-OS 沿三条主线长期演进（基于 DESIGN §21 的预期管理），有独立文档：
+
+| 文档 | 内容 |
+|---|---|
+| [DESIGN_EXTENSION.md](DESIGN_EXTENSION.md) | 长期设计：契约式交付（免疫）、透明化体验、深度定制三主线 |
+| [DEVELOP_EXTENSION.md](DEVELOP_EXTENSION.md) | 长期开发：三主线任务拆解 + v1.0/v2.0/v3.0 演进节奏 |
+
+三条主线与本文档的关系：本文档的 trait 预留（如 `RouteTable`/`PageCache`）服务于主线三的
+性能深水区；主线一/二不涉及本文档的数据结构项。
+
+---
+
 ## 1. VMA：Maple Tree（`--features advanced-vma`）
 
 **第一版（已定案）**：`BTreeMap<VirtAddr, Vma>`（红黑树）。
