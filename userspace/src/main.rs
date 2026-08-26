@@ -37,6 +37,8 @@ const SYS_SETHOSTNAME: u64 = 170;
 const SYS_CGROUP_STAT: u64 = 500;
 const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
+const SYS_GETCWD: u64 = 79;
+const SYS_CHDIR: u64 = 80;
 
 // open flags（Linux O_*）
 const O_CREAT: u64 = 0o100;
@@ -250,7 +252,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -830,9 +832,125 @@ fn exec(cmd: &[u8]) {
                 print("\n");
             }
         }
+        b"novos" => {
+            // M8-切片1：容器运行时骨架——overlay rootfs 组装 + ns/cgroup 隔离 +
+            // 生命周期回收（类 runC 流程：准备镜像 → 挂 rootfs → clone 进 ns → 执行 → 回收）。
+            // 1) 准备镜像 lower：/img/app.txt（宿主侧"镜像层"）
+            syscall3(SYS_MKDIR, b"/img\0".as_ptr() as u64, 0o755, 0);
+            syscall3(SYS_MKDIR, b"/containers\0".as_ptr() as u64, 0o755, 0);
+            syscall3(SYS_MKDIR, b"/containers/c0\0".as_ptr() as u64, 0o755, 0);
+            syscall3(SYS_MKDIR, b"/containers/c0/rootfs\0".as_ptr() as u64, 0o755, 0);
+            let fd = syscall3(SYS_OPEN, b"/img/app.txt\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+            let img = b"app-data";
+            syscall3(SYS_WRITE, fd, img.as_ptr() as u64, img.len() as u64);
+            syscall3(SYS_CLOSE, fd, 0, 0);
+            // 2) overlay rootfs：lower=/img, upper=新建, target=/containers/c0/rootfs
+            let rc = syscall5(SYS_MOUNT, b"/img\0".as_ptr() as u64, b"/containers/c0/rootfs\0".as_ptr() as u64, b"overlay\0".as_ptr() as u64, 0, 0);
+            if rc != 0 {
+                print("novos run: mount rc=");
+                print_u64(rc);
+                print("\n");
+            } else {
+                print("novos run: rootfs mounted\n");
+                // 3) 容器进程：CLONE_NEWPID | CLONE_NEWUTS（pid/uts 隔离）
+                let r = syscall3(SYS_CLONE, 0x2000_0000 | 0x0400_0000, 0, 0);
+                if r == 0 {
+                    // 容器 init（子进程）：新 pid ns 内 pid=1，独立 hostname
+                    syscall3(SYS_SETHOSTNAME, b"c0\0".as_ptr() as u64, 2, 0);
+                    print("novos run: container init pid=");
+                    print_u64(syscall3(SYS_GETPID, 0, 0, 0));
+                    print(" host=");
+                    print_hostname();
+                    print("\n");
+                    // 4) chdir 进容器 rootfs（cwd 隔离，后续相对路径落在容器内）
+                    let cr = syscall3(SYS_CHDIR, b"/containers/c0/rootfs\0".as_ptr() as u64, 0, 0);
+                    let mut cwdb = [0u8; 64];
+                    let cn = syscall3(SYS_GETCWD, cwdb.as_mut_ptr() as u64, 64, 0);
+                    print("novos run: chdir rc=");
+                    print_u64(cr);
+                    print(" cwd=");
+                    print(unsafe { core::str::from_utf8_unchecked(&cwdb[..cn as usize]) });
+                    print("\n");
+                    // 5) 读镜像层文件（经 rootfs 合并视图，相对路径）
+                    let fd2 = syscall3(SYS_OPEN, b"app.txt\0".as_ptr() as u64, 0, 0);
+                    if (fd2 as i64) >= 0 {
+                        let mut rb = [0u8; 32];
+                        let n = syscall3(SYS_READ, fd2, rb.as_mut_ptr() as u64, 32);
+                        syscall3(SYS_CLOSE, fd2, 0, 0);
+                        print("novos run: rootfs read: ");
+                        print(unsafe { core::str::from_utf8_unchecked(&rb[..n as usize]) });
+                        print("\n");
+                    } else {
+                        print("novos run: rootfs read FAILED\n");
+                    }
+                    // 6) 容器写：/var/log 目录 + 日志文件（进 upper 层，镜像层不变）
+                    syscall3(SYS_MKDIR, b"var\0".as_ptr() as u64, 0o755, 0);
+                    syscall3(SYS_MKDIR, b"var/log\0".as_ptr() as u64, 0o755, 0);
+                    let fd3 = syscall3(SYS_OPEN, b"var/log/container.log\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+                    let log = b"c0-booted\n";
+                    syscall3(SYS_WRITE, fd3, log.as_ptr() as u64, log.len() as u64);
+                    syscall3(SYS_CLOSE, fd3, 0, 0);
+                    let fd4 = syscall3(SYS_OPEN, b"var/log/container.log\0".as_ptr() as u64, 0, 0);
+                    let mut rb2 = [0u8; 32];
+                    let n2 = syscall3(SYS_READ, fd4, rb2.as_mut_ptr() as u64, 32);
+                    syscall3(SYS_CLOSE, fd4, 0, 0);
+                    print("novos run: container log: ");
+                    print(unsafe { core::str::from_utf8_unchecked(&rb2[..n2 as usize]) });
+                    print("\n");
+                    // 7) cgroup 记账（容器进程计入根 cgroup，pids+1 / mem+64KB）
+                    print_cg("novos run: cg ");
+                    syscall3(SYS_EXIT, 0, 0, 0);
+                } else {
+                    // 宿主（父）：等容器 init 退出并回收
+                    let mut w = 0u64;
+                    let mut n = 0u32;
+                    while w == 0 && n < 300000 {
+                        w = syscall3(SYS_WAITPID, r, 0, 0);
+                        n += 1;
+                        let mut s = 0u32;
+                        while s < 50000 {
+                            s += 1;
+                        }
+                    }
+                    print("novos run: reaped=");
+                    print_u64(w);
+                    print("\n");
+                    // 8) 回收后 cgroup 回到基线（无泄漏）
+                    print_cg("novos run: after reap ");
+                    // 镜像层不被容器写污染
+                    let fd5 = syscall3(SYS_OPEN, b"/img/app.txt\0".as_ptr() as u64, 0, 0);
+                    let mut rb3 = [0u8; 32];
+                    let n3 = syscall3(SYS_READ, fd5, rb3.as_mut_ptr() as u64, 32);
+                    syscall3(SYS_CLOSE, fd5, 0, 0);
+                    print("novos run: image intact: ");
+                    print(unsafe { core::str::from_utf8_unchecked(&rb3[..n3 as usize]) });
+                    print("\n");
+                    print("novos run: container exited\n");
+                }
+            }
+        }
         b"exit" => {
             print("bye\n");
             syscall3(SYS_EXIT, 0, 0, 0);
+        }
+        b"pwd" => {
+            let mut cwd = [0u8; 64];
+            let n = syscall3(SYS_GETCWD, cwd.as_mut_ptr() as u64, 64, 0);
+            if (n as i64) < 0 {
+                print("pwd: failed\n");
+            } else {
+                print(unsafe { core::str::from_utf8_unchecked(&cwd[..n as usize]) });
+                print("\n");
+            }
+        }
+        _ if cmd.starts_with(b"cd ") => {
+            let p = path_arg(cmd, 3);
+            let rc = syscall3(SYS_CHDIR, p.as_ptr() as u64, 0, 0);
+            if (rc as i64) < 0 {
+                print("cd: rc=");
+                print_u64(rc);
+                print("\n");
+            }
         }
         b"ls" => {
             list_dir(b"/\0");
