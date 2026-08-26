@@ -238,7 +238,8 @@ impl VirtioNet {
         let proto = ip[9];
         let src = [ip[12], ip[13], ip[14], ip[15]];
         let dst = [ip[16], ip[17], ip[18], ip[19]];
-        if dst != OUR_IP {
+        // M8-切片2：网关接受本机地址与容器虚拟地址（DNAT 目标）。
+        if dst != OUR_IP && dst != CONTAINER_IP {
             return;
         }
         let payload = &ip[ihl..core::cmp::min(total_len, ip.len())];
@@ -268,6 +269,8 @@ impl VirtioNet {
         if calc != csum {
             return; // 校验失败丢弃
         }
+        // M8-切片2：DNAT——网关监听端口 → 容器端口（命中登记 conntrack）
+        let dst_port = dnat(6, dst_port);
         let data = &tcp[core::cmp::min(doff, tcp.len())..];
         let segs = crate::socket::tcp_receive(src_ip, src_port, dst_port, flags, seq, ack, data);
         for s in segs {
@@ -278,7 +281,9 @@ impl VirtioNet {
     /// 组 TCP 段（20 字节头 + 数据）并发送。
     fn send_tcp_seg(&mut self, s: crate::socket::TcpSeg) {
         let mut seg = [0u8; 20 + 1460];
-        seg[0..2].copy_from_slice(&s.src_port.to_be_bytes());
+        // M8-切片2：出向反向 NAT——conntrack 命中的容器端口还原为对外端口
+        let sport = rnat(6, s.src_port);
+        seg[0..2].copy_from_slice(&sport.to_be_bytes());
         seg[2..4].copy_from_slice(&s.dst_port.to_be_bytes());
         seg[4..8].copy_from_slice(&s.seq.to_be_bytes());
         seg[8..12].copy_from_slice(&s.ack.to_be_bytes());
@@ -287,7 +292,7 @@ impl VirtioNet {
         seg[14..16].copy_from_slice(&4096u16.to_be_bytes()); // 窗口
         let n = 20 + s.data.len();
         seg[20..n].copy_from_slice(&s.data);
-        let cs = tcp_checksum(OUR_IP, s.dst_ip, s.src_port, s.dst_port, &seg[..n]);
+        let cs = tcp_checksum(OUR_IP, s.dst_ip, sport, s.dst_port, &seg[..n]);
         seg[16..18].copy_from_slice(&cs.to_be_bytes());
         self.send_ipv4(s.dst_ip, 6, &seg[..n]);
     }
@@ -671,6 +676,7 @@ pub fn init() {
 
 /// 轮询接收：处理已完成的 rx 描述符并重新投递。
 pub fn net_poll() {
+    ct_age(); // M8-切片2：conntrack 老化（~1s 粒度）
     let mut net = NET.lock();
     let io = net.io;
     loop {
@@ -708,6 +714,93 @@ pub fn net_poll() {
     let segs = crate::socket::tcp_drain_tx();
     for s in segs {
         net.send_tcp_seg(s);
+    }
+}
+
+// ---- M8-切片2：网关 NAT（端口映射 DNAT + conntrack 会话跟踪）----
+
+/// 容器虚拟 IP（网关内侧"容器网络"；本机收发均接受该地址）。
+pub const CONTAINER_IP: [u8; 4] = [192, 168, 77, 2];
+
+/// NAT 规则：{ 协议, 网关监听端口 → 容器端口 }（第一版线性表，规则少）。
+struct NatRule {
+    proto: u8,
+    listen: u16,
+    container: u16,
+}
+
+/// conntrack 条目：端口映射会话（简化：按端口对记账，非 5 元组）。
+struct CtEntry {
+    proto: u8,
+    orig_dport: u16, // 对外端口（网关侧）
+    nat_dport: u16,  // 对内端口（容器侧）
+    ticks: u32,      // 剩余寿命（~1s/单位）
+}
+
+static NAT_RULES: spin::Lazy<spin::Mutex<alloc::vec::Vec<NatRule>>> =
+    spin::Lazy::new(|| spin::Mutex::new(alloc::vec::Vec::new()));
+static CT: spin::Lazy<spin::Mutex<alloc::vec::Vec<CtEntry>>> =
+    spin::Lazy::new(|| spin::Mutex::new(alloc::vec::Vec::new()));
+static CT_HITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static CT_LAST_AGE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// 添加 NAT 端口映射规则（网关控制面调用）。
+pub fn nat_add(proto: u8, listen: u16, container: u16) -> i64 {
+    if listen == 0 || container == 0 {
+        return -22; // EINVAL
+    }
+    let mut r = NAT_RULES.lock();
+    if r.iter().any(|x| x.proto == proto && x.listen == listen) {
+        return -98; // EADDRINUSE
+    }
+    r.push(NatRule { proto, listen, container });
+    0
+}
+
+/// 入向 DNAT：命中规则 → 返回容器端口并登记 conntrack（否则原端口返回）。
+fn dnat(proto: u8, dport: u16) -> u16 {
+    let container = {
+        let r = NAT_RULES.lock();
+        match r.iter().find(|x| x.proto == proto && x.listen == dport) {
+            Some(x) => x.container,
+            None => return dport,
+        }
+    };
+    let mut ct = CT.lock();
+    match ct.iter_mut().find(|e| e.proto == proto && e.orig_dport == dport) {
+        Some(e) => e.ticks = 12, // 刷新寿命
+        None => ct.push(CtEntry { proto, orig_dport: dport, nat_dport: container, ticks: 12 }),
+    }
+    CT_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    container
+}
+
+/// 出向反向 NAT：命中 conntrack 的容器端口 → 还原为对外端口（否则原端口返回）。
+pub fn rnat(proto: u8, sport: u16) -> u16 {
+    let ct = CT.lock();
+    ct.iter()
+        .find(|e| e.proto == proto && e.nat_dport == sport)
+        .map(|e| e.orig_dport)
+        .unwrap_or(sport)
+}
+
+/// conntrack 统计（{ 活动条目数, 累计命中数 }）。
+pub fn ct_stats() -> (u64, u64) {
+    (CT.lock().len() as u64, CT_HITS.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// conntrack 老化（net_poll 每 ~1s 调一次；寿命耗尽条目回收）。
+fn ct_age() {
+    let now = crate::task::ticks();
+    let last = CT_LAST_AGE.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(last) < 100 {
+        return;
+    }
+    CT_LAST_AGE.store(now, core::sync::atomic::Ordering::Relaxed);
+    let mut ct = CT.lock();
+    ct.retain(|e| e.ticks > 0);
+    for e in ct.iter_mut() {
+        e.ticks = e.ticks.saturating_sub(1);
     }
 }
 

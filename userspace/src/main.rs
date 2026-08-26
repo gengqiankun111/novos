@@ -39,6 +39,8 @@ const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
+const SYS_NAT_ADD: u64 = 501;
+const SYS_CT_STAT: u64 = 502;
 
 // open flags（Linux O_*）
 const O_CREAT: u64 = 0o100;
@@ -252,7 +254,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -927,6 +929,70 @@ fn exec(cmd: &[u8]) {
                     print("\n");
                     print("novos run: container exited\n");
                 }
+            }
+        }
+        b"natdemo" => {
+            // M8-切片2：网关 DNAT 端口映射——容器服务监听 8080，网关把对外 20001
+            // 映射进来（conntrack 会话跟踪 + 回包反向还原）。
+            let fd = syscall3(SYS_SOCKET, 2, 1, 0); // AF_INET, SOCK_STREAM
+            if (fd as i64) < 0 {
+                print("natdemo: socket failed\n");
+            } else {
+                let mut sa = [0u8; 16];
+                sa[0..2].copy_from_slice(&2u16.to_le_bytes());
+                sa[2..4].copy_from_slice(&8080u16.to_be_bytes());
+                syscall3(SYS_BIND, fd, sa.as_ptr() as u64, 16);
+                syscall3(SYS_LISTEN, fd, 4, 0);
+                // NAT 规则：tcp 20001 -> 8080（网关控制面添加）
+                let rc = syscall3(SYS_NAT_ADD, 6, 20001, 8080);
+                print("natdemo: rule add rc=");
+                print_u64(rc);
+                print("\n");
+                print("natdemo: listening on 8080\n");
+                // accept：等宿主经 hostfwd(20001) 连接（DNAT 投递到 8080）
+                let mut afd: u64 = 0;
+                while afd == 0 {
+                    afd = syscall3(SYS_ACCEPT, fd, 0, 0);
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                }
+                print("natdemo: accepted via DNAT fd=");
+                print_u64(afd);
+                print("\n");
+                // recv：等宿主数据
+                let mut rb = [0u8; 128];
+                let mut got: u64 = 0;
+                while got == 0 {
+                    got = syscall6(SYS_RECVFROM, afd, rb.as_mut_ptr() as u64, 128, 0, 0, 0);
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                }
+                print("natdemo: recv ");
+                print_u64(got);
+                print("B: ");
+                print(unsafe { core::str::from_utf8_unchecked(&rb[..got as usize]) });
+                print("\n");
+                // echo 回发（出向反向 NAT：8080 -> 20001）
+                let n = syscall6(SYS_SENDTO, afd, rb.as_mut_ptr() as u64, got, 0, 0, 0);
+                print("natdemo: echoed ");
+                print_u64(n);
+                print("\n");
+                // conntrack 会话统计
+                let mut st = [0u8; 16];
+                syscall3(SYS_CT_STAT, st.as_mut_ptr() as u64, 0, 0);
+                let entries = u64::from_le_bytes([st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7]]);
+                let hits = u64::from_le_bytes([st[8], st[9], st[10], st[11], st[12], st[13], st[14], st[15]]);
+                print("natdemo: ct entries=");
+                print_u64(entries);
+                print(" hits=");
+                print_u64(hits);
+                print("\n");
+                syscall3(SYS_CLOSE, afd, 0, 0);
+                syscall3(SYS_CLOSE, fd, 0, 0);
             }
         }
         b"exit" => {

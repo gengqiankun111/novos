@@ -59,7 +59,7 @@ if ($Mode -eq "boot") {
         # M5-切片3/4/5：hostfwd 规则
         #   udp 12345/12344→19999：guest 发往 10.0.2.2:port 经 slirp 宿主侧回环
         #   tcp 20000：宿主连 guest echo 服务；tcp 80：宿主 HTTP GET guest 服务
-        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
+        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:20001-10.0.2.15:20001,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
         "-display", "none", "-no-reboot",
         "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
     )
@@ -90,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -189,6 +189,49 @@ if ($Mode -eq "boot") {
                 $script:hostHttp = "<connect timeout>"
             }
         }
+        # M8-切片2：等 guest 进入 natdemo 监听后，宿主经 hostfwd(20001) 连接，
+        # 验证网关 DNAT 端口映射（20001 -> 容器 8080）。
+        $script:hostNat = ""
+        $natReady = $false
+        $ndeadline = (Get-Date).AddMilliseconds(15000)
+        while ((Get-Date) -lt $ndeadline -and -not $natReady) {
+            while ($s.DataAvailable) {
+                [void]$sb.Append([char]$s.ReadByte())
+                if ($sb.ToString().Contains("natdemo: listening on 8080")) { $natReady = $true }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($natReady) {
+            $natClient = $null
+            $nc = (Get-Date).AddMilliseconds(10000)
+            while ((Get-Date) -lt $nc -and $null -eq $natClient) {
+                try {
+                    $natClient = New-Object Net.Sockets.TcpClient
+                    $natClient.Connect("127.0.0.1", 20001)
+                } catch {
+                    $natClient = $null
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+            if ($null -ne $natClient) {
+                try {
+                    Start-Sleep -Milliseconds 1500
+                    $ns = $natClient.GetStream()
+                    $payload = [Text.Encoding]::ASCII.GetBytes("hello nat")
+                    $ns.Write($payload, 0, 9)
+                    $ns.Flush()
+                    $natClient.Client.ReceiveTimeout = 5000
+                    $nb = New-Object byte[] 128
+                    $nn = $ns.Read($nb, 0, 128)
+                    if ($nn -gt 0) { $script:hostNat = [Text.Encoding]::ASCII.GetString($nb, 0, $nn) }
+                } catch {
+                    $script:hostNat = "<io>"
+                }
+                $natClient.Close()
+            } else {
+                $script:hostNat = "<connect timeout>"
+            }
+        }
         # 排空串口输出（guest 依次执行命令，udptest 回环 + tcptest echo + httptest 服务后自行结束）
         Start-Sleep -Milliseconds 4000
         $s.ReadTimeout = 1500
@@ -217,7 +260,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -276,7 +319,12 @@ if ($Mode -eq "boot") {
         "novos run: cg pids=2 mem=65536",     # M8-切片1：容器进程 cgroup 记账
         "novos run: after reap pids=1 mem=0", # M8-切片1：回收后 cgroup 回到基线
         "novos run: image intact: app-data",  # M8-切片1：镜像层未被容器写污染
-        "novos run: container exited"         # M8-切片1：容器生命周期回收完成
+        "novos run: container exited",        # M8-切片1：容器生命周期回收完成
+        "natdemo: rule add rc=0",             # M8-切片2：NAT 端口映射规则添加成功
+        "natdemo: accepted via DNAT fd=",     # M8-切片2：经 DNAT 投递到容器端口
+        "natdemo: recv 9B: hello nat",        # M8-切片2：容器收到宿主数据
+        "natdemo: echoed 9",                  # M8-切片2：回包反向 NAT 还原
+        "natdemo: ct entries=1"               # M8-切片2：conntrack 会话跟踪
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
@@ -286,6 +334,10 @@ if ($Mode -eq "boot") {
 $ok = $true
 if ($Mode -eq "shell" -and $script:hostTcp -ne "hello tcp from host") {
     Write-Host "FAIL: host TCP echo mismatch (got '$($script:hostTcp)')"
+    $ok = $false
+}
+if ($Mode -eq "shell" -and $script:hostNat -ne "hello nat") {
+    Write-Host "FAIL: host NAT DNAT echo mismatch (got '$($script:hostNat)')"
     $ok = $false
 }
 if ($Mode -eq "shell" -and ($script:hostHttp -notmatch "HTTP/1.0 200 OK" -or $script:hostHttp -notmatch "Novos-OS HTTP OK")) {

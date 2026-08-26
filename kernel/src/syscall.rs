@@ -46,6 +46,10 @@ pub const SYS_MOUNT: u64 = 165;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
+/// Novos 扩展：添加 NAT 端口映射规则（网关控制面）。
+pub const SYS_NAT_ADD: u64 = 501;
+/// Novos 扩展：读 conntrack 统计 { 条目数, 命中数 }。
+pub const SYS_CT_STAT: u64 = 502;
 
 /// boot.asm 导出的 syscall 入口。
 extern "C" {
@@ -164,6 +168,8 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_UNLINK => sys_unlink(a1),
         SYS_GETCWD => sys_getcwd(a1, a2),
         SYS_CHDIR => sys_chdir(a1),
+        SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
+        SYS_CT_STAT => sys_ct_stat(a1),
         SYS_MOUNT => sys_mount(a1, a2, a3, a4, a5),
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
@@ -576,6 +582,22 @@ fn sys_cgroup_stat(buf: u64) -> u64 {
     let mut tmp = [0u8; 16];
     tmp[0..8].copy_from_slice(&pids.to_le_bytes());
     tmp[8..16].copy_from_slice(&mem.to_le_bytes());
+    // SAFETY: buf 为用户态地址（16 字节可写）。
+    unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, 16) };
+    0
+}
+
+/// nat_add(proto, listen_port, container_port)：添加网关端口映射规则（M8-切片2）。
+fn sys_nat_add(proto: u64, listen: u64, container: u64) -> u64 {
+    crate::net::nat_add(proto as u8, listen as u16, container as u16) as u64
+}
+
+/// conntrack 统计：向 buf 写 { entries: u64, hits: u64 }（当前会话）。
+fn sys_ct_stat(buf: u64) -> u64 {
+    let (entries, hits) = crate::net::ct_stats();
+    let mut tmp = [0u8; 16];
+    tmp[0..8].copy_from_slice(&entries.to_le_bytes());
+    tmp[8..16].copy_from_slice(&hits.to_le_bytes());
     // SAFETY: buf 为用户态地址（16 字节可写）。
     unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, 16) };
     0
