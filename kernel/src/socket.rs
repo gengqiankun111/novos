@@ -588,3 +588,157 @@ pub fn tcp_drain_tx() -> Vec<TcpSeg> {
     }
     out
 }
+
+// ---- epoll（M5-切片5）----
+
+/// epoll fd 空间起点（UDP 100、TCP 200、epoll 300）。
+pub const EPOLL_FD_BASE: usize = 300;
+
+/// epoll_ctl 操作。
+pub const EPOLL_CTL_ADD: u32 = 1;
+pub const EPOLL_CTL_DEL: u32 = 2;
+pub const EPOLL_CTL_MOD: u32 = 3;
+
+/// 关注事件（EPOLLIN=0x1，其他后续扩展）。
+pub const EPOLLIN: u32 = 0x1;
+
+pub struct EpollItem {
+    pub fd: usize,
+    pub events: u32,
+}
+
+pub struct EpollInst {
+    pub fd: usize,
+    pub items: Vec<EpollItem>,
+}
+
+static EPOLLS: spin::Lazy<Mutex<Vec<EpollInst>>> = spin::Lazy::new(|| Mutex::new(Vec::new()));
+
+pub fn is_epoll_fd(fd: usize) -> bool {
+    fd >= EPOLL_FD_BASE
+}
+
+/// epoll_create(size)：创建 epoll 实例。
+pub fn epoll_create(_size: usize) -> i64 {
+    let mut e = EPOLLS.lock();
+    let fd = EPOLL_FD_BASE + e.len();
+    e.push(EpollInst {
+        fd,
+        items: Vec::new(),
+    });
+    fd as i64
+}
+
+/// epoll_ctl(epfd, op, fd, events)：ADD/DEL/MOD 关注项。
+pub fn epoll_ctl(epfd: usize, op: u32, fd: usize, events: u32) -> i64 {
+    let mut e = EPOLLS.lock();
+    match e.iter_mut().find(|x| x.fd == epfd) {
+        None => -9, // EBADF
+        Some(inst) => {
+            let pos = inst.items.iter().position(|x| x.fd == fd);
+            match op {
+                EPOLL_CTL_ADD => {
+                    if pos.is_some() {
+                        return -17; // EEXIST
+                    }
+                    inst.items.push(EpollItem { fd, events });
+                    0
+                }
+                EPOLL_CTL_DEL => match pos {
+                    Some(i) => {
+                        inst.items.remove(i);
+                        0
+                    }
+                    None => -9,
+                },
+                EPOLL_CTL_MOD => match pos {
+                    Some(i) => {
+                        inst.items[i].events = events;
+                        0
+                    }
+                    None => -9,
+                },
+                _ => -22, // EINVAL
+            }
+        }
+    }
+}
+
+/// TCP fd 就绪：监听有已建立连接待 accept；连接态有数据可读。
+pub fn tcp_ready(fd: usize) -> bool {
+    let c = TCP_CONNS.lock();
+    match c.get(idx_of(fd)).and_then(|s| s.as_ref()) {
+        Some(x) => match x.state {
+            TcpState::Listen => {
+                let l = TCP_LISTENERS.lock();
+                l.iter().find(|lis| lis.fd == fd).map_or(false, |lis| {
+                    lis.pending.iter().any(|&p| {
+                        c.get(p)
+                            .and_then(|s| s.as_ref())
+                            .map_or(false, |cc| cc.state == TcpState::Established)
+                    })
+                })
+            }
+            TcpState::Established | TcpState::CloseWait => !x.rx.is_empty(),
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+/// UDP fd 就绪：接收队列非空。
+pub fn udp_ready(fd: usize) -> bool {
+    let s = SOCKETS.lock();
+    s.iter()
+        .find(|x| x.fd == fd)
+        .map_or(false, |x| !x.recv.is_empty())
+}
+
+fn epoll_item_ready(fd: usize) -> bool {
+    if fd >= TCP_FD_BASE {
+        tcp_ready(fd)
+    } else if fd >= 100 {
+        udp_ready(fd)
+    } else {
+        false
+    }
+}
+
+/// epoll_wait(epfd, events, maxevents, timeout_ms)：非阻塞轮询就绪项。
+/// 每个 epoll_event 为 { events: u32, data: u64 }（12 字节）。
+pub fn epoll_wait(epfd: usize, events: *mut u8, maxevents: usize) -> i64 {
+    let e = EPOLLS.lock();
+    let inst = match e.iter().find(|x| x.fd == epfd) {
+        Some(x) => x,
+        None => return -9,
+    };
+    let mut n = 0usize;
+    for item in &inst.items {
+        if n >= maxevents {
+            break;
+        }
+        if epoll_item_ready(item.fd) {
+            // SAFETY: events 为用户态可写 maxevents*12 字节。
+            unsafe {
+                let base = events.add(n * 12);
+                core::ptr::write_volatile(base as *mut u32, item.events);
+                core::ptr::write_volatile(base.add(4) as *mut u32, 0); // pad
+                core::ptr::write_volatile(base.add(8) as *mut u64, 0); // data
+            }
+            n += 1;
+        }
+    }
+    n as i64
+}
+
+/// close epoll 实例。
+pub fn epoll_close(fd: usize) -> i64 {
+    let mut e = EPOLLS.lock();
+    match e.iter().position(|x| x.fd == fd) {
+        Some(i) => {
+            e.remove(i);
+            0
+        }
+        None => -9,
+    }
+}

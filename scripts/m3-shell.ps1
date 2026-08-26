@@ -21,8 +21,8 @@ $qemuArgs = @(
     "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
     "-serial", "chardev:com1",
     "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
-    # M5-切片3/4：UDP 双规则回环 + TCP hostfwd（宿主连 guest echo 服务）
-    "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000",
+    # M5-切片3/4/5：UDP 双规则回环 + TCP hostfwd（echo + HTTP）
+    "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
     "-display", "none", "-no-reboot",
     "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
 )
@@ -45,7 +45,7 @@ try {
     $s.ReadTimeout = 300
     # 先清空启动期间已到达的输出
     while ($s.DataAvailable) { [void]$s.ReadByte() }
-    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nls`nversion`n"
+    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nls`nversion`n"
     $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
     $s.Write($bytes, 0, $bytes.Length)
     $s.Flush()
@@ -76,6 +76,41 @@ try {
             if ($n -gt 0) { Write-Host ("host got TCP echo: " + [Text.Encoding]::ASCII.GetString($rbuf, 0, $n)) }
             $tcp.Close()
         } catch { Write-Host ("host TCP io: " + $_.Exception.Message) }
+    }
+    # M5-切片5：宿主 HTTP GET guest 服务（hostfwd tcp:80）
+    $httpReady = $false
+    $hdeadline = (Get-Date).AddMilliseconds(12000)
+    while ((Get-Date) -lt $hdeadline -and -not $httpReady) {
+        while ($s.DataAvailable) {
+            [void]$sb.Append([char]$s.ReadByte())
+            if ($sb.ToString().Contains("httptest: listening on 80")) { $httpReady = $true }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($httpReady) {
+        try {
+            $http = New-Object Net.Sockets.TcpClient
+            $http.Connect("127.0.0.1", 80)
+            Start-Sleep -Milliseconds 1500
+            $hs = $http.GetStream()
+            $req = [Text.Encoding]::ASCII.GetBytes("GET / HTTP/1.0`r`n`r`n")
+            $hs.Write($req, 0, $req.Length)
+            $hs.Flush()
+            $http.Client.ReceiveTimeout = 5000
+            $hb = New-Object System.Text.StringBuilder
+            $hrb = New-Object byte[] 256
+            $hdone = (Get-Date).AddMilliseconds(4000)
+            while ((Get-Date) -lt $hdone -and $hb.Length -lt 400) {
+                try {
+                    $rn = $hs.Read($hrb, 0, 256)
+                    if ($rn -le 0) { break }
+                    [void]$hb.Append([Text.Encoding]::ASCII.GetString($hrb, 0, $rn))
+                    if ($hb.ToString().Contains("</h1>")) { break }
+                } catch { break }
+            }
+            Write-Host ("host got HTTP: " + $hb.ToString())
+            $http.Close()
+        } catch { Write-Host ("host HTTP io: " + $_.Exception.Message) }
     }
     Write-Host "draining output..."
     Start-Sleep -Milliseconds 2000
