@@ -257,7 +257,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1137,7 +1137,7 @@ fn exec(cmd: &[u8]) {
                 if r == 0 {
                     let fd2 = syscall3(SYS_OPEN, b"/proc\0".as_ptr() as u64, 0, 0);
                     if (fd2 as i64) >= 0 {
-                        let mut cnt = 0u64;
+                        let mut pids = 0u64;
                         let mut only1 = true;
                         loop {
                             let mut buf = [0u8; 512];
@@ -1153,21 +1153,34 @@ fn exec(cmd: &[u8]) {
                                     nl += 1;
                                 }
                                 if nl > 0 {
-                                    cnt += 1;
-                                    if !(nl == 1 && buf[off + 19] == b'1') {
-                                        only1 = false;
+                                    // 仅统计纯数字项（pid 目录；health/cpuinfo 非数字忽略）
+                                    let mut numeric = nl > 0;
+                                    let mut j = 0usize;
+                                    while j < nl {
+                                        let c = buf[off + 19 + j];
+                                        if c < b'0' || c > b'9' {
+                                            numeric = false;
+                                            break;
+                                        }
+                                        j += 1;
+                                    }
+                                    if numeric {
+                                        pids += 1;
+                                        if !(nl == 1 && buf[off + 19] == b'1') {
+                                            only1 = false;
+                                        }
                                     }
                                 }
                                 off += reclen;
                             }
                         }
                         syscall3(SYS_CLOSE, fd2, 0, 0);
-                        print("proctest: child ns /proc entries=");
-                        print_u64(cnt);
+                        print("proctest: child ns /proc pids=");
+                        print_u64(pids);
                         print(" only_self=");
                         print_u64(only1 as u64);
                         print("\n");
-                        if cnt == 1 && only1 {
+                        if pids == 1 && only1 {
                             print("proctest: child ns sees only self\n");
                         }
                     }
@@ -1187,6 +1200,85 @@ fn exec(cmd: &[u8]) {
                     print_u64(w);
                     print("\n");
                 }
+            }
+        }
+        b"healthtest" => {
+            // M9-切片1：/proc/health（JSON 健康指标）+ /proc/cpuinfo（多核报告）。
+            // 1) 基线 health
+            let fd = syscall3(SYS_OPEN, b"/proc/health\0".as_ptr() as u64, 0, 0);
+            if (fd as i64) < 0 {
+                print("healthtest: open health failed\n");
+            } else {
+                let mut buf = [0u8; 256];
+                let n = syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, 256);
+                syscall3(SYS_CLOSE, fd, 0, 0);
+                print("healthtest: base ");
+                print(unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) });
+                let s = unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) };
+                let ok_json = s.contains("mem_used") && s.contains("mem_free")
+                    && s.contains("fds") && s.contains("cpu_load");
+                if ok_json {
+                    print("healthtest: health json ok\n");
+                } else {
+                    print("healthtest: health json FAILED\n");
+                }
+            }
+            // 2) cpuinfo：online 只显示 1（SMP 前避免误判）
+            let fd2 = syscall3(SYS_OPEN, b"/proc/cpuinfo\0".as_ptr() as u64, 0, 0);
+            if (fd2 as i64) < 0 {
+                print("healthtest: open cpuinfo failed\n");
+            } else {
+                let mut buf2 = [0u8; 256];
+                let n2 = syscall3(SYS_READ, fd2, buf2.as_mut_ptr() as u64, 256);
+                syscall3(SYS_CLOSE, fd2, 0, 0);
+                let s2 = unsafe { core::str::from_utf8_unchecked(&buf2[..n2 as usize]) };
+                if s2.contains("processor\t: 0") && s2.contains("online\t\t: 1") {
+                    print("healthtest: cpuinfo online=1 ok\n");
+                } else {
+                    print("healthtest: cpuinfo FAILED\n");
+                }
+            }
+            // 3) 容器计数：fork 容器子进程（NEWPID）存活期间 containers>=1
+            let r = syscall3(SYS_CLONE, 0x2000_0000, 0, 0);
+            if r == 0 {
+                // 容器 init：短时自旋（给父读 health 的窗口），然后退出
+                let mut i = 0u32;
+                while i < 4000 {
+                    i += 1;
+                    let mut spin = 0u32;
+                    while spin < 100_000 {
+                        spin += 1;
+                    }
+                }
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                // 父：子先执行（自旋中），此时读 health → containers 应为 1
+                let fd3 = syscall3(SYS_OPEN, b"/proc/health\0".as_ptr() as u64, 0, 0);
+                let mut buf3 = [0u8; 256];
+                let n3 = syscall3(SYS_READ, fd3, buf3.as_mut_ptr() as u64, 256);
+                syscall3(SYS_CLOSE, fd3, 0, 0);
+                print("healthtest: with container ");
+                print(unsafe { core::str::from_utf8_unchecked(&buf3[..n3 as usize]) });
+                let s3 = unsafe { core::str::from_utf8_unchecked(&buf3[..n3 as usize]) };
+                if s3.contains("\"containers\":1") {
+                    print("healthtest: container counted ok\n");
+                } else {
+                    print("healthtest: container count FAILED\n");
+                }
+                // 回收容器 init
+                let mut w = 0u64;
+                let mut n = 0u32;
+                while w == 0 && n < 300000 {
+                    w = syscall3(SYS_WAITPID, r, 0, 0);
+                    n += 1;
+                    let mut s = 0u32;
+                    while s < 50000 {
+                        s += 1;
+                    }
+                }
+                print("healthtest: reaped=");
+                print_u64(w);
+                print("\n");
             }
         }
         b"exit" => {
