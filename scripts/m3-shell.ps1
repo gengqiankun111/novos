@@ -1,4 +1,4 @@
-﻿# M3 切片4 demo: 启动内核 -> 进入用户态 shell -> 经 TCP 串口注入命令
+# M3 切片4 demo: 启动内核 -> 进入用户态 shell -> 经 TCP 串口注入命令
 # -> 读取 shell 输出 -> screendump -> quit。
 # 用法: powershell -ExecutionPolicy Bypass -File scripts/m3-shell.ps1
 param(
@@ -20,6 +20,8 @@ $qemuArgs = @(
     "-kernel", $Kernel, "-m", "64M",
     "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
     "-serial", "chardev:com1",
+    "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
+    "-netdev", "user,id=net0",
     "-display", "none", "-no-reboot",
     "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
 )

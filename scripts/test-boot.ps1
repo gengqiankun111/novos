@@ -18,6 +18,8 @@ $qemu = "C:/Program Files/qemu/qemu-system-x86_64.exe"
 if ($Mode -eq "boot") {
     $qemuArgs = @("-kernel", $Kernel, "-m", "64M",
                   "-serial", "file:$LogFile", "-display", "none", "-no-reboot",
+                  "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
+                  "-netdev", "user,id=net0",
                   "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait")
     $p = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -WindowStyle Hidden
     Start-Sleep -Seconds $WaitSec
@@ -39,7 +41,10 @@ if ($Mode -eq "boot") {
         "Novos-OS: boot ok",
         "m3: loading embedded userspace init",
         "m3/elf: PT_LOAD vaddr=0x8000000000",
-        "Novos-OS M3 userspace shell (init)"
+        "Novos-OS M3 userspace shell (init)",
+        "virtio-net: io=",                    # M5-切片1：virtio-net 驱动初始化
+        "net: arp who-has 10.0.2.2",          # tx：ARP 请求发出
+        "arp: got reply from 10.0.2.2"        # rx：收到网关 ARP 应答（收发回路）
     )
 } else {
     # shell 模式：socket chardev（无客户端时丢弃输出，须尽早连接）
@@ -47,6 +52,8 @@ if ($Mode -eq "boot") {
         "-kernel", $Kernel, "-m", "64M",
         "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
         "-serial", "chardev:com1",
+        "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
+        "-netdev", "user,id=net0",
         "-display", "none", "-no-reboot",
         "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
     )

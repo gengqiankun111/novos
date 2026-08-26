@@ -88,6 +88,8 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
     f.r12 = user_r12;
     f.rsp = user_rsp;
     let nr = f.rax; // syscall 号
+    // M5：每次系统调用轮询一次网络收包（无中断依赖）
+    crate::net::net_poll();
     let ret = dispatch(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
     f.rax = ret; // 返回值写回 rax
     frame

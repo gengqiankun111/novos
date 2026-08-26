@@ -88,6 +88,8 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         novos_kernel::dcache::SHRINK_TARGET,
         novos_kernel::dcache::SHRINK_WATERMARK
     );
+    // M5 切片1：virtio-net 驱动 + ARP（此后系统调用路径轮询收包）
+    novos_kernel::net::init();
     // M4 切片1/2：ELF 加载器 → 进入用户态 init/shell（不返回）。
     println!("m3: loading embedded userspace init (ELF)...");
     elf::load_and_run();
