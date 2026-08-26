@@ -311,8 +311,24 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
             }
             continue;
         }
-        // overlay 内：upper 优先，其次 lower（M7-切片1）
+        // overlay 内：upper 优先，其次 lower；.wh.* 白标记视为已删除（M7-切片2）
         if let Some((up, low)) = ov.take() {
+            let marker = alloc::format!(".wh.{}", comp);
+            if up.as_ref().map_or(false, |u| u.lookup(&marker).is_some()) {
+                if last && create_last {
+                    // 重建：移除 whiteout，在 upper 新建文件
+                    let u = up.as_ref().unwrap();
+                    u.children.lock().retain(|d| d.name != marker);
+                    let ino = Inode::file();
+                    u.insert_child(comp, ino.clone());
+                    crate::dcache::dcache_insert(Arc::as_ptr(&u) as usize, comp, ino.clone());
+                    cur = ino.clone();
+                    ov = Some((Some(ino), low));
+                } else {
+                    return Err(());
+                }
+                continue;
+            }
             let up_ino = up.as_ref().and_then(|u| u.lookup(comp));
             let low_ino = low.as_ref().and_then(|l| l.lookup(comp));
             if let Some(ino) = up_ino {
@@ -326,15 +342,22 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
                 continue;
             }
             if last && create_last {
-                if let Some(u) = up {
-                    let ino = Inode::file();
-                    u.insert_child(comp, ino.clone());
-                    crate::dcache::dcache_insert(Arc::as_ptr(&u) as usize, comp, ino.clone());
-                    cur = ino.clone();
-                    ov = Some((Some(ino), low));
-                } else {
-                    return Err(());
-                }
+                // 父目录在 upper 中直接建；仅存于 lower 时按需补建 upper 目录链
+                let u = match up {
+                    Some(u) => u,
+                    None => {
+                        let (pparent, _) = split_last(&acc);
+                        match overlay_upper_dir(&pparent) {
+                            Some(u) => u,
+                            None => return Err(()),
+                        }
+                    }
+                };
+                let ino = Inode::file();
+                u.insert_child(comp, ino.clone());
+                crate::dcache::dcache_insert(Arc::as_ptr(&u) as usize, comp, ino.clone());
+                cur = ino.clone();
+                ov = Some((Some(ino), low));
             } else {
                 return Err(());
             }
@@ -380,10 +403,24 @@ fn split_last(path: &str) -> (String, String) {
 }
 
 /// 创建目录（父目录必须存在且为空路径不合法）。
+/// M7-切片2：overlay 内目录创建进 upper（父仅在下层时按需补建 upper 链）。
 pub fn create_dir(path: &str) -> Result<(), i64> {
     let (parent, leaf) = split_last(path);
     if leaf.is_empty() {
         return Err(-2i64); // ENOENT
+    }
+    if let Some((up_p, _low_p)) = overlay_parents(path) {
+        let up = match up_p {
+            Some(u) => u,
+            None => overlay_upper_dir(&parent).ok_or(-2i64)?,
+        };
+        if up.lookup(&leaf).is_some() {
+            return Err(-17i64); // EEXIST
+        }
+        let ino = Inode::dir();
+        up.insert_child(&leaf, ino.clone());
+        crate::dcache::dcache_insert(Arc::as_ptr(&up) as usize, &leaf, ino);
+        return Ok(());
     }
     let p = resolve(&parent, false).map_err(|_| -2i64)?;
     if !p.is_dir() {
@@ -399,6 +436,7 @@ pub fn create_dir(path: &str) -> Result<(), i64> {
 }
 
 /// 删除路径：is_dir=true 走 rmdir（要求空目录），否则 unlink 文件。
+/// M7-切片2：overlay 中删除 lower 文件 → 在 upper 打 whiteout 标记，lower 保持只读。
 pub fn remove(path: &str, is_dir: bool) -> Result<(), i64> {
     let (parent, leaf) = split_last(path);
     if leaf.is_empty() {
@@ -408,6 +446,37 @@ pub fn remove(path: &str, is_dir: bool) -> Result<(), i64> {
     if !p.is_dir() {
         return Err(-20i64); // ENOTDIR
     }
+    // overlay：目标在下层 → 打 whiteout 标记（upper 有拷贝则一并移除）
+    if let Some((up_p, low_p)) = overlay_parents(path) {
+        let in_lower = low_p.as_ref().map_or(false, |l| l.lookup(&leaf).is_some());
+        if in_lower {
+            let up = match up_p {
+                Some(u) => u,
+                None => overlay_upper_dir(&parent).ok_or(-2i64)?,
+            };
+            let ino = low_p.as_ref().unwrap().lookup(&leaf).unwrap();
+            if is_dir {
+                if !ino.is_dir() {
+                    return Err(-20i64); // ENOTDIR
+                }
+                if !ino.children.lock().is_empty() {
+                    return Err(-39i64); // ENOTEMPTY
+                }
+            } else if ino.is_dir() {
+                return Err(-21i64); // EISDIR
+            }
+            let mut ukids = up.children.lock();
+            ukids.retain(|d| d.name != leaf); // 移除 upper 拷贝（如有）
+            let marker = alloc::format!(".wh.{}", leaf);
+            if !ukids.iter().any(|d| d.name == marker) {
+                ukids.push(Dentry { name: marker, inode: Inode::file() });
+            }
+            drop(ukids);
+            crate::dcache::dcache_remove(Arc::as_ptr(&p) as usize, &leaf);
+            return Ok(());
+        }
+    }
+    // 常规删除（upper 层独占文件、非 overlay 路径）
     let mut kids = p.children.lock();
     let idx = kids.iter().position(|d| d.name == leaf).ok_or(-2i64)?; // ENOENT
     let ino = kids[idx].inode.clone();
@@ -431,11 +500,12 @@ pub fn remove(path: &str, is_dir: bool) -> Result<(), i64> {
 /// 枚举目录 inode（跳过前 skip 项），按 Linux dirent64 格式写入 buf。
 /// 返回 (填充字节数, 写入项数)。
 /// 布局：u64 d_ino | u64 d_off | u16 d_reclen | u8 d_type | char d_name[]（NUL 结尾）。
+/// M7-切片2：overlay 目录走合并视图（隐藏 .wh.*）。
 pub fn read_dir(ino: &Inode, skip: usize, buf: &mut [u8]) -> Result<(usize, usize), i64> {
     if !ino.is_dir() {
         return Err(-20i64); // ENOTDIR
     }
-    let kids = ino.children.lock();
+    let kids = visible_children(ino);
     let mut off = 0usize;
     let mut items = 0usize;
     for d in kids.iter().skip(skip) {
@@ -531,6 +601,142 @@ pub fn copy_up(path: &str) -> Option<Arc<Inode>> {
     ucur.insert_child(leaf, f.clone());
     crate::dcache::dcache_insert(Arc::as_ptr(&ucur) as usize, leaf, f.clone());
     Some(f)
+}
+
+// ---- M7-切片2：whiteout + 合并视图 ----
+
+/// 在 overlay 树中按指针定位 inode，返回相对根路径（DFS；demo 规模足够）。
+fn find_in_tree(root: &Arc<Inode>, target: usize) -> Option<Vec<String>> {
+    fn go(dir: &Arc<Inode>, target: usize, acc: &mut Vec<String>) -> bool {
+        if Arc::as_ptr(dir) as usize == target {
+            return true;
+        }
+        for d in dir.children.lock().iter() {
+            if !d.inode.is_dir() {
+                continue;
+            }
+            acc.push(d.name.clone());
+            if go(&d.inode, target, acc) {
+                return true;
+            }
+            acc.pop();
+        }
+        false
+    }
+    let mut acc = Vec::new();
+    if go(root, target, &mut acc) {
+        Some(acc)
+    } else {
+        None
+    }
+}
+
+/// 沿相对路径导航。
+fn walk_path(root: &Arc<Inode>, path: &[String]) -> Option<Arc<Inode>> {
+    let mut cur = root.clone();
+    for c in path {
+        cur = cur.lookup(c)?;
+    }
+    Some(cur)
+}
+
+/// 返回 overlay 中 path 的父目录在 upper/lower 的 inode（仅限 overlay 内路径）。
+/// 返回 (upper 父(可无), lower 父(可无))。
+fn overlay_parents(path: &str) -> Option<(Option<Arc<Inode>>, Option<Arc<Inode>>)> {
+    let ov = ACTIVE_OVERLAY.lock();
+    let (mnt, upper, lower) = ov.as_ref()?;
+    let (parent, _leaf) = split_last(path);
+    let rel = match parent.strip_prefix(mnt) {
+        Some("") => "",
+        Some(rest) if rest.starts_with('/') => rest,
+        _ => return None,
+    };
+    let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+    let mut up = Some(upper.clone());
+    let mut low = Some(lower.clone());
+    for comp in &comps {
+        up = up.and_then(|u| u.lookup(comp).filter(|i| i.is_dir()));
+        low = low.and_then(|l| l.lookup(comp).filter(|i| i.is_dir()));
+    }
+    Some((up, low))
+}
+
+/// 定位 parent 在 upper 中的对应目录；缺失时按需补建目录链（overlay 写时建 upper）。
+fn overlay_upper_dir(parent: &str) -> Option<Arc<Inode>> {
+    let ov = ACTIVE_OVERLAY.lock();
+    let (mnt, upper, _lower) = ov.as_ref()?;
+    let rel = match parent.strip_prefix(mnt) {
+        Some("") => "",
+        Some(rest) if rest.starts_with('/') => rest,
+        _ => return None,
+    };
+    let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+    let mut ucur = upper.clone();
+    for comp in &comps {
+        match ucur.lookup(comp) {
+            Some(c) if c.is_dir() => ucur = c,
+            _ => {
+                let d = Inode::dir();
+                ucur.insert_child(comp, d.clone());
+                ucur = d;
+            }
+        }
+    }
+    Some(ucur)
+}
+
+/// 合并视图目录子项：lower 起底 + upper 覆盖，隐藏 .wh.* 标记（M7-切片2）。
+fn overlay_merged_children(ino: &Inode) -> Option<Vec<Dentry>> {
+    let ov = ACTIVE_OVERLAY.lock();
+    let (_, upper, lower) = ov.as_ref()?;
+    let target = ino as *const Inode as usize;
+    let (up_dir, low_dir) = if let Some(path) = find_in_tree(upper, target) {
+        (walk_path(upper, &path), walk_path(lower, &path))
+    } else if let Some(path) = find_in_tree(lower, target) {
+        (None, walk_path(lower, &path))
+    } else {
+        return None;
+    };
+    let mut out: Vec<Dentry> = Vec::new();
+    if let Some(ld) = low_dir {
+        for d in ld.children.lock().iter() {
+            if d.name.starts_with(".wh.") {
+                continue;
+            }
+            // 该 lower 项在 upper 有 whiteout → 已删除，隐藏
+            let whited = up_dir.as_ref().map_or(false, |u| {
+                u.lookup(&alloc::format!(".wh.{}", d.name)).is_some()
+            });
+            if whited {
+                continue;
+            }
+            out.push(Dentry { name: d.name.clone(), inode: d.inode.clone() });
+        }
+    }
+    if let Some(ud) = up_dir {
+        for d in ud.children.lock().iter() {
+            if d.name.starts_with(".wh.") {
+                continue;
+            }
+            match out.iter_mut().find(|x| x.name == d.name) {
+                Some(x) => *x = Dentry { name: d.name.clone(), inode: d.inode.clone() },
+                None => out.push(Dentry { name: d.name.clone(), inode: d.inode.clone() }),
+            }
+        }
+    }
+    Some(out)
+}
+
+/// 目录可见子项：overlay 走合并视图，否则直接子项。
+fn visible_children(ino: &Inode) -> Vec<Dentry> {
+    if let Some(merged) = overlay_merged_children(ino) {
+        return merged;
+    }
+    ino.children
+        .lock()
+        .iter()
+        .map(|d| Dentry { name: d.name.clone(), inode: d.inode.clone() })
+        .collect()
 }
 
 pub fn open_path(name: &str, flags: u64) -> Result<Arc<File>, i64> {

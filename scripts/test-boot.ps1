@@ -90,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -217,7 +217,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -261,7 +261,13 @@ if ($Mode -eq "boot") {
         "ovltest: copy-up write 13B",        # M7-切片1：copy-up 后写入 upper
         "ovltest: overlay read: overlay-write", # M7-切片1：overlay 视图读到 upper 新内容
         "ovltest: lower unchanged: lower-data", # M7-切片1：写后 lower 不变
-        "ovltest: upper new file ok"         # M7-切片1：upper 新建文件
+        "ovltest: upper new file ok",         # M7-切片1：upper 新建文件
+        "whtest: unlink rc=0",                # M7-切片2：删除 lower 文件成功
+        "whtest: deleted via whiteout",       # M7-切片2：whiteout 生效（再开 ENOENT）
+        "whtest: lower intact: to-delete",    # M7-切片2：删除后 lower 保持只读不变
+        "whtest: merged listing clean",       # M7-切片2：合并视图无 del.txt、无 .wh.* 标记
+        "whtest: recreate: reborn",           # M7-切片2：重建同路径文件覆盖 whiteout
+        "whtest: log tmpfs read: log-line-1"  # M7-切片2：容器日志 tmpfs 挂载读写
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )

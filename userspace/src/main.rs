@@ -250,7 +250,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -688,6 +688,146 @@ fn exec(cmd: &[u8]) {
                 } else {
                     print("ovltest: upper new failed\n");
                 }
+            }
+        }
+        b"whtest" => {
+            // M7-切片2：whiteout——删除 lower 文件后合并视图"已删除"，lower 保持只读；
+            //          同时演示容器日志目录默认 tmpfs（日志不触发 overlay copy-up）。
+            // 1) 独立 lower：/wlower/{del.txt, keep.txt}
+            syscall3(SYS_MKDIR, b"/wlower\0".as_ptr() as u64, 0o755, 0);
+            syscall3(SYS_MKDIR, b"/mnt/wht\0".as_ptr() as u64, 0o755, 0);
+            let fd = syscall3(SYS_OPEN, b"/wlower/del.txt\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+            let d1 = b"to-delete";
+            syscall3(SYS_WRITE, fd, d1.as_ptr() as u64, d1.len() as u64);
+            syscall3(SYS_CLOSE, fd, 0, 0);
+            let fd = syscall3(SYS_OPEN, b"/wlower/keep.txt\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+            let d2 = b"keep-data";
+            syscall3(SYS_WRITE, fd, d2.as_ptr() as u64, d2.len() as u64);
+            syscall3(SYS_CLOSE, fd, 0, 0);
+            // 2) mount overlay：lower=/wlower, upper=新建
+            let rc = syscall5(SYS_MOUNT, b"/wlower\0".as_ptr() as u64, b"/mnt/wht\0".as_ptr() as u64, b"overlay\0".as_ptr() as u64, 0, 0);
+            if rc != 0 {
+                print("whtest: mount rc=");
+                print_u64(rc);
+                print("\n");
+            } else {
+                // 3) 经 overlay 读到 del.txt
+                let fd2 = syscall3(SYS_OPEN, b"/mnt/wht/del.txt\0".as_ptr() as u64, 0, 0);
+                if (fd2 as i64) >= 0 {
+                    let mut rb = [0u8; 32];
+                    let n = syscall3(SYS_READ, fd2, rb.as_mut_ptr() as u64, 32);
+                    syscall3(SYS_CLOSE, fd2, 0, 0);
+                    print("whtest: overlay read: ");
+                    print(unsafe { core::str::from_utf8_unchecked(&rb[..n as usize]) });
+                    print("\n");
+                }
+                // 4) 删除 lower 文件 → 触发 whiteout
+                let rc2 = syscall3(SYS_UNLINK, b"/mnt/wht/del.txt\0".as_ptr() as u64, 0, 0);
+                print("whtest: unlink rc=");
+                print_u64(rc2);
+                print("\n");
+                // 5) 再开 → ENOENT（whiteout 生效）
+                let fd3 = syscall3(SYS_OPEN, b"/mnt/wht/del.txt\0".as_ptr() as u64, 0, 0);
+                if (fd3 as i64) < 0 {
+                    print("whtest: deleted via whiteout\n");
+                } else {
+                    syscall3(SYS_CLOSE, fd3, 0, 0);
+                    print("whtest: whiteout FAILED (still visible)\n");
+                }
+                // 6) lower 直读不受影响（只读保证）
+                let fd4 = syscall3(SYS_OPEN, b"/wlower/del.txt\0".as_ptr() as u64, 0, 0);
+                if (fd4 as i64) >= 0 {
+                    let mut rb2 = [0u8; 32];
+                    let n2 = syscall3(SYS_READ, fd4, rb2.as_mut_ptr() as u64, 32);
+                    syscall3(SYS_CLOSE, fd4, 0, 0);
+                    print("whtest: lower intact: ");
+                    print(unsafe { core::str::from_utf8_unchecked(&rb2[..n2 as usize]) });
+                    print("\n");
+                }
+                // 7) 合并视图枚举：del.txt 消失、keep.txt 仍在、无 .wh.* 标记
+                let fd5 = syscall3(SYS_OPEN, b"/mnt/wht\0".as_ptr() as u64, 0, 0);
+                let mut found_keep = false;
+                let mut found_del = false;
+                let mut found_wh = false;
+                loop {
+                    let mut buf = [0u8; 512];
+                    let n = syscall3(SYS_GETDENTS64, fd5, buf.as_mut_ptr() as u64, 512);
+                    if n == 0 {
+                        break;
+                    }
+                    let mut off = 0usize;
+                    while off + 19 <= n as usize {
+                        let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                        let mut nl = 0usize;
+                        while off + 19 + nl < buf.len() && buf[off + 19 + nl] != 0 {
+                            nl += 1;
+                        }
+                        if nl > 0 {
+                            // SAFETY: 目录项名称为 ASCII。
+                            let nm = unsafe {
+                                core::str::from_utf8_unchecked(&buf[off + 19..off + 19 + nl])
+                            };
+                            if nm == "keep.txt" {
+                                found_keep = true;
+                            }
+                            if nm == "del.txt" {
+                                found_del = true;
+                            }
+                            if nm.starts_with(".wh.") {
+                                found_wh = true;
+                            }
+                        }
+                        off += reclen;
+                    }
+                }
+                syscall3(SYS_CLOSE, fd5, 0, 0);
+                if found_keep && !found_del && !found_wh {
+                    print("whtest: merged listing clean\n");
+                } else {
+                    print("whtest: listing keep=");
+                    print_u64(found_keep as u64);
+                    print(" del=");
+                    print_u64(found_del as u64);
+                    print(" wh=");
+                    print_u64(found_wh as u64);
+                    print("\n");
+                }
+                // 8) 重建同路径文件（覆盖 whiteout 后新建）
+                let fd6 = syscall3(SYS_OPEN, b"/mnt/wht/del.txt\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+                if (fd6 as i64) >= 0 {
+                    let m3 = b"reborn";
+                    syscall3(SYS_WRITE, fd6, m3.as_ptr() as u64, m3.len() as u64);
+                    syscall3(SYS_CLOSE, fd6, 0, 0);
+                    let fd7 = syscall3(SYS_OPEN, b"/mnt/wht/del.txt\0".as_ptr() as u64, 0, 0);
+                    let mut rb3 = [0u8; 32];
+                    let n3 = syscall3(SYS_READ, fd7, rb3.as_mut_ptr() as u64, 32);
+                    syscall3(SYS_CLOSE, fd7, 0, 0);
+                    print("whtest: recreate: ");
+                    print(unsafe { core::str::from_utf8_unchecked(&rb3[..n3 as usize]) });
+                    print("\n");
+                } else {
+                    print("whtest: recreate failed\n");
+                }
+            }
+            // 9) 容器日志 tmpfs：/logs 挂 tmpfs，写读日志文件
+            syscall3(SYS_MKDIR, b"/logs\0".as_ptr() as u64, 0o755, 0);
+            let rc3 = syscall5(SYS_MOUNT, b"tmpfs\0".as_ptr() as u64, b"/logs\0".as_ptr() as u64, b"tmpfs\0".as_ptr() as u64, 0, 0);
+            if rc3 != 0 {
+                print("whtest: log mount rc=");
+                print_u64(rc3);
+                print("\n");
+            } else {
+                let fd8 = syscall3(SYS_OPEN, b"/logs/container.log\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+                let lg = b"log-line-1\n";
+                syscall3(SYS_WRITE, fd8, lg.as_ptr() as u64, lg.len() as u64);
+                syscall3(SYS_CLOSE, fd8, 0, 0);
+                let fd9 = syscall3(SYS_OPEN, b"/logs/container.log\0".as_ptr() as u64, 0, 0);
+                let mut rb4 = [0u8; 32];
+                let n4 = syscall3(SYS_READ, fd9, rb4.as_mut_ptr() as u64, 32);
+                syscall3(SYS_CLOSE, fd9, 0, 0);
+                print("whtest: log tmpfs read: ");
+                print(unsafe { core::str::from_utf8_unchecked(&rb4[..n4 as usize]) });
+                print("\n");
             }
         }
         b"exit" => {
