@@ -28,6 +28,10 @@ const SYS_LISTEN: u64 = 50;
 const SYS_EPOLL_CREATE: u64 = 213;
 const SYS_EPOLL_WAIT: u64 = 232;
 const SYS_EPOLL_CTL: u64 = 233;
+const SYS_CLONE: u64 = 56;
+const SYS_FORK: u64 = 57;
+const SYS_GETPID: u64 = 39;
+const SYS_WAITPID: u64 = 61;
 const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 
@@ -217,7 +221,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -470,6 +474,72 @@ fn exec(cmd: &[u8]) {
                 syscall3(SYS_CLOSE, afd, 0, 0);
                 syscall3(SYS_CLOSE, epfd, 0, 0);
                 syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        b"forktest" => {
+            // M6-切片1：用户态 fork + pid namespace。
+            // 父打印自身 pid（根 ns = 1）；子 A 打印 getpid（根 ns 顺序号 2）；
+            // clone(CLONE_NEWPID) 的子 B 进入新 pid ns，getpid = 1。
+            print("forktest: parent getpid=");
+            print_u64(syscall3(SYS_GETPID, 0, 0, 0));
+            print("\n");
+            // 1) fork：子返回 0，父返回子任务 id
+            let ra = syscall3(SYS_FORK, 0, 0, 0);
+            if (ra as i64) < 0 {
+                print("forktest: fork failed\n");
+            } else if ra == 0 {
+                // 子 A：打印 ns pid 后退出
+                print("forktest: child A getpid=");
+                print_u64(syscall3(SYS_GETPID, 0, 0, 0));
+                print("\n");
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                print("forktest: fork -> child id=");
+                print_u64(ra);
+                print("\n");
+                // 父：waitpid 自旋回收
+                let mut wa = 0u64;
+                let mut n = 0u32;
+                while wa == 0 && n < 200000 {
+                    wa = syscall3(SYS_WAITPID, ra, 0, 0);
+                    n += 1;
+                    let mut s = 0u32;
+                    while s < 50000 {
+                        s += 1;
+                    }
+                }
+                print("forktest: waitpid A reaped=");
+                print_u64(wa);
+                print("\n");
+            }
+            // 2) clone(CLONE_NEWPID)：子 B 进入新 pid ns
+            if (ra as i64) < 0 {
+                // fork 失败则不继续
+            } else {
+                let rb = syscall3(SYS_CLONE, 0x2000_0000, 0, 0); // CLONE_NEWPID
+                if rb == 0 {
+                    print("forktest: child B getpid=");
+                    print_u64(syscall3(SYS_GETPID, 0, 0, 0));
+                    print(" (new pid ns)\n");
+                    syscall3(SYS_EXIT, 0, 0, 0);
+                } else {
+                    print("forktest: clone NEWPID -> child id=");
+                    print_u64(rb);
+                    print("\n");
+                    let mut wb = 0u64;
+                    let mut n2 = 0u32;
+                    while wb == 0 && n2 < 200000 {
+                        wb = syscall3(SYS_WAITPID, rb, 0, 0);
+                        n2 += 1;
+                        let mut s = 0u32;
+                        while s < 50000 {
+                            s += 1;
+                        }
+                    }
+                    print("forktest: waitpid B reaped=");
+                    print_u64(wb);
+                    print("\n");
+                }
             }
         }
         b"exit" => {

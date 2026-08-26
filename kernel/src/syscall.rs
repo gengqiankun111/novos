@@ -30,6 +30,9 @@ pub const SYS_LISTEN: u64 = 50;
 pub const SYS_EPOLL_CREATE: u64 = 213;
 pub const SYS_EPOLL_WAIT: u64 = 232;
 pub const SYS_EPOLL_CTL: u64 = 233;
+pub const SYS_CLONE: u64 = 56;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_WAITPID: u64 = 61;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
@@ -100,8 +103,35 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
     let nr = f.rax; // syscall 号
     // M5：每次系统调用轮询一次网络收包（无中断依赖）
     crate::net::net_poll();
-    let ret = dispatch(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
-    f.rax = ret; // 返回值写回 rax
+    // M6-切片1：fork/clone 需要当前用户上下文（帧），单独处理。
+    // 子任务帧 = 本帧拷贝（rax 置 0）；子先执行（直接切到子帧），
+    // 子退出后调度器经父帧恢复父进程（父返回子任务 id）。
+    if nr == SYS_FORK {
+        // SAFETY: f 为当前 syscall 帧（用户上下文），user_fork 仅拷贝不修改。
+        let cid = unsafe { crate::task::user_fork(f, 0) };
+        f.rax = cid as u64; // 父侧返回值
+        if cid > 0 {
+            // 父帧登记为 ctx_rsp（父 syscall 未完成，保留在其内核栈上）；
+            // 切 CURRENT 到子任务，并切 tss_rsp0 到子栈（子 syscall 不覆盖父帧）。
+            crate::task::save_ctx(f as *const _ as usize);
+            crate::task::set_current(cid as usize);
+            crate::gdt::set_rsp0(crate::task::task_kstack_top(cid as usize));
+            return crate::task::task_ctx(cid as usize) as *mut ExceptionFrame;
+        }
+    } else if nr == SYS_CLONE {
+        // SAFETY: f 为当前 syscall 帧；flags 取 rdi（Linux clone 第 1 参数）。
+        let cid = unsafe { crate::task::user_fork(f, f.rdi as u32) };
+        f.rax = cid as u64;
+        if cid > 0 {
+            crate::task::save_ctx(f as *const _ as usize);
+            crate::task::set_current(cid as usize);
+            crate::gdt::set_rsp0(crate::task::task_kstack_top(cid as usize));
+            return crate::task::task_ctx(cid as usize) as *mut ExceptionFrame;
+        }
+    } else {
+        let ret = dispatch(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
+        f.rax = ret; // 返回值写回 rax
+    }
     frame
 }
 
@@ -129,6 +159,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_MOUNT => sys_mount(a1, a2, a3, a4, a5),
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
+        SYS_WAITPID => sys_waitpid(a1, a2, a3),
         SYS_EXIT => sys_exit(a1),
         _ => (-1i64) as u64, // ENOSYS
     }
@@ -421,13 +452,22 @@ fn sys_mount(source: u64, target: u64, _fstype: u64, _flags: u64, _data: u64) ->
 
 /// getpid()：返回当前任务 id（M3 切片：固定 1）。
 fn sys_getpid() -> u64 {
-    1
+    crate::task::current_pid() as u64
+}
+
+/// waitpid(pid, status, options)：非阻塞——子已 Exited 则回收并返回 pid，否则 0。
+fn sys_waitpid(pid: u64, _status: u64, _options: u64) -> u64 {
+    crate::task::waitpid_nb(pid as usize) as u64
 }
 
 /// exit(code)：用户态进程退出——M3 切片先打印并停机（真正的 exit 待进程模型完善）。
 fn sys_exit(code: u64) -> u64 {
-    crate::println!("[syscall] user process exit({code})");
-    // SAFETY: hlt 特权指令，用户态退出后停机（M3 切片简化）。
+    crate::println!("[syscall] task exit({code})");
+    // M6-切片1：非 init 任务走 task::exit（置 Exited，父可 waitpid 回收）；init（task 0）退出则停机。
+    if crate::task::current_id() != 0 {
+        crate::task::exit();
+    }
+    // SAFETY: hlt 特权指令，用户态退出后停机（init）。
     unsafe { asm!("hlt", options(nomem, nostack)) };
     0 // 不可达
 }

@@ -111,6 +111,8 @@ pub fn load_and_run() -> ! {
     crate::println!(
         "m3/elf: user stack {stack_top:#x} sp={sp:#x}, entering ring3..."
     );
+    // M6-切片1：注册用户任务（CR3 + 根 pid），使 fork/调度可用。
+    crate::task::register_user_task(pt.pml4);
     crate::page_table::enter_user(pt.pml4, entry, sp as u64)
 }
 

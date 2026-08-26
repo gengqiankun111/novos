@@ -215,7 +215,9 @@ syscall_stack_top:
 syscall_entry:
     pushq %r12             # [用户栈 rsp-8] = 用户 r12（溢出保存）
     movq %rsp, %r12        # r12 = 用户 rsp-8
-    movabsq $syscall_stack_top, %rsp
+    # M6-切片1：内核栈取当前任务（TSS.RSP0，随任务切换更新；task 0 = syscall 栈）。
+    # 注意：必须用 RIP 相对寻址——直接 movabs 会冲掉用户 rax（syscall 号）。
+    movq tss_rsp0(%rip), %rsp
     # 构造 ExceptionFrame（从高到低 push：ss,rsp,rflags,cs,rip,err,vec,rax..r15）
     pushq $0x1B            # ss = user data (0x18 | 3)
     pushq %r12             # rsp（= 用户 rsp-8，rust_syscall_handler 修复为原值）
@@ -240,7 +242,8 @@ syscall_entry:
     pushq %r14
     pushq %r15
     movq %rsp, %rdi        # frame 指针
-    call rust_syscall_handler   # 返回后 frame 已修改（rax=返回值，rsp/r12 已修复）
+    call rust_syscall_handler   # 返回目标任务 frame（fork 时为子帧，普通 syscall 为原帧）
+    movq %rax, %rsp        # M6-切片1：切到返回帧（fork 子先执行；普通 syscall 等效原帧）
     # 恢复通用寄存器
     popq %r15
     popq %r14
