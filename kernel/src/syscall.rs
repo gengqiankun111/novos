@@ -442,8 +442,8 @@ fn sys_stat(path: u64, buf: u64) -> u64 {
 
 /// mount(source, target, fstype, flags, data)：M4-切片4 简化——忽略 source/fstype，
 /// 挂载新 tmpfs 根到 target。
-fn sys_mount(source: u64, target: u64, _fstype: u64, _flags: u64, _data: u64) -> u64 {
-    let _src = match copy_path(source) {
+fn sys_mount(source: u64, target: u64, fstype: u64, _flags: u64, _data: u64) -> u64 {
+    let src = match copy_path(source) {
         Ok(n) => n,
         Err(e) => return e,
     };
@@ -451,7 +451,20 @@ fn sys_mount(source: u64, target: u64, _fstype: u64, _flags: u64, _data: u64) ->
         Ok(n) => n,
         Err(e) => return e,
     };
-    match crate::fs::mount_fs(&tgt) {
+    let mut ft = [0u8; 16];
+    if fstype != 0 {
+        // SAFETY: fstype 为用户态 NUL 结尾字符串。
+        let n = unsafe { copy_cstr_from_user(fstype, &mut ft) };
+        let _ = n;
+    }
+    let fstype_str = core::str::from_utf8(&ft[..ft.iter().position(|&b| b == 0).unwrap_or(0)])
+        .unwrap_or("");
+    let r = if fstype_str == "overlay" {
+        crate::fs::mount_overlay(&src, &tgt)
+    } else {
+        crate::fs::mount_fs(&tgt)
+    };
+    match r {
         Ok(()) => 0,
         Err(e) => e as u64,
     }

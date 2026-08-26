@@ -250,7 +250,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -623,6 +623,71 @@ fn exec(cmd: &[u8]) {
                     }
                 }
                 print_cg("cgtest: after reap ");
+            }
+        }
+        b"ovltest" => {
+            // M7-切片1：OverlayFS——只读 lower 上叠可写 upper，写后下层不变。
+            // 1) 准备 lower：/lower/base.txt = "lower-data"
+            syscall3(SYS_MKDIR, b"/lower\0".as_ptr() as u64, 0o755, 0);
+            syscall3(SYS_MKDIR, b"/mnt/ovl\0".as_ptr() as u64, 0o755, 0);
+            let fd = syscall3(SYS_OPEN, b"/lower/base.txt\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+            let msg = b"lower-data";
+            syscall3(SYS_WRITE, fd, msg.as_ptr() as u64, msg.len() as u64);
+            syscall3(SYS_CLOSE, fd, 0, 0);
+            // 2) mount overlay：lower=/lower, upper=新建
+            let rc = syscall5(SYS_MOUNT, b"/lower\0".as_ptr() as u64, b"/mnt/ovl\0".as_ptr() as u64, b"overlay\0".as_ptr() as u64, 0, 0);
+            if rc != 0 {
+                print("ovltest: mount rc=");
+                print_u64(rc);
+                print("\n");
+            } else {
+                print("ovltest: overlay mounted\n");
+                // 3) 经 overlay 读 lower 文件
+                let fd2 = syscall3(SYS_OPEN, b"/mnt/ovl/base.txt\0".as_ptr() as u64, 0, 0);
+                if (fd2 as i64) >= 0 {
+                    let mut rb = [0u8; 32];
+                    let n = syscall3(SYS_READ, fd2, rb.as_mut_ptr() as u64, 32);
+                    syscall3(SYS_CLOSE, fd2, 0, 0);
+                    print("ovltest: overlay read: ");
+                    print(unsafe { core::str::from_utf8_unchecked(&rb[..n as usize]) });
+                    print("\n");
+                } else {
+                    print("ovltest: overlay open failed\n");
+                }
+                // 4) copy-up 写：打开 overlay 视图写 "overlay-write"
+                let fd3 = syscall3(SYS_OPEN, b"/mnt/ovl/base.txt\0".as_ptr() as u64, 1 | O_TRUNC, 0);
+                let m2 = b"overlay-write";
+                let w = syscall3(SYS_WRITE, fd3, m2.as_ptr() as u64, m2.len() as u64);
+                syscall3(SYS_CLOSE, fd3, 0, 0);
+                print("ovltest: copy-up write ");
+                print_u64(w);
+                print("B\n");
+                // 5) 读回 overlay 视图
+                let fd4 = syscall3(SYS_OPEN, b"/mnt/ovl/base.txt\0".as_ptr() as u64, 0, 0);
+                let mut rb2 = [0u8; 32];
+                let n2 = syscall3(SYS_READ, fd4, rb2.as_mut_ptr() as u64, 32);
+                syscall3(SYS_CLOSE, fd4, 0, 0);
+                print("ovltest: overlay read: ");
+                print(unsafe { core::str::from_utf8_unchecked(&rb2[..n2 as usize]) });
+                print("\n");
+                // 6) lower 不变
+                let fd5 = syscall3(SYS_OPEN, b"/lower/base.txt\0".as_ptr() as u64, 0, 0);
+                let mut rb3 = [0u8; 32];
+                let n3 = syscall3(SYS_READ, fd5, rb3.as_mut_ptr() as u64, 32);
+                syscall3(SYS_CLOSE, fd5, 0, 0);
+                print("ovltest: lower unchanged: ");
+                print(unsafe { core::str::from_utf8_unchecked(&rb3[..n3 as usize]) });
+                print("\n");
+                // 7) upper 新建文件（lower 无对应）
+                let fd6 = syscall3(SYS_OPEN, b"/mnt/ovl/new.txt\0".as_ptr() as u64, O_CREAT | 1, 0o644);
+                if (fd6 as i64) >= 0 {
+                    let m3 = b"upper-new";
+                    syscall3(SYS_WRITE, fd6, m3.as_ptr() as u64, m3.len() as u64);
+                    syscall3(SYS_CLOSE, fd6, 0, 0);
+                    print("ovltest: upper new file ok\n");
+                } else {
+                    print("ovltest: upper new failed\n");
+                }
             }
         }
         b"exit" => {

@@ -90,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -217,7 +217,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -255,7 +255,13 @@ if ($Mode -eq "boot") {
         "utstest: parent hostname after=novos", # M6-切片2：父 hostname 不受子影响
         "cgtest: root pids=1 mem=0",        # M6-切片3：根 cgroup 基线
         "cgtest: child pids=2 mem=65536",   # M6-切片3：fork 后 pids+1、mem+64KB
-        "cgtest: after reap pids=1 mem=0"   # M6-切片3：回收后回到基线（无泄漏）
+        "cgtest: after reap pids=1 mem=0",  # M6-切片3：回收后回到基线（无泄漏）
+        "ovltest: overlay mounted",          # M7-切片1：overlay 挂载成功
+        "ovltest: overlay read: lower-data", # M7-切片1：经 overlay 读到 lower 内容
+        "ovltest: copy-up write 13B",        # M7-切片1：copy-up 后写入 upper
+        "ovltest: overlay read: overlay-write", # M7-切片1：overlay 视图读到 upper 新内容
+        "ovltest: lower unchanged: lower-data", # M7-切片1：写后 lower 不变
+        "ovltest: upper new file ok"         # M7-切片1：upper 新建文件
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
