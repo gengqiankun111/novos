@@ -563,6 +563,29 @@ pub fn tasks_in_ns(pid_ns: u32) -> alloc::vec::Vec<u32> {
     }
 }
 
+/// 容器数：非根 pid ns 且有存活任务（M9-切片1：/proc/health）。
+pub fn container_count() -> u32 {
+    let mut seen = [false; 16];
+    let mut n = 0u32;
+    // SAFETY: 单核读。
+    unsafe {
+        for i in 1..MAX_TASKS {
+            let ns = TASKS[i].pid_ns as usize;
+            if ns != 0 && TASKS[i].state != TaskState::Idle && !seen[ns] {
+                seen[ns] = true;
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// 所有任务累计运行 tick 总和（M9-切片1：/proc/health CPU 负载近似）。
+pub fn busy_ticks() -> u64 {
+    // SAFETY: 单核读。
+    unsafe { (1..MAX_TASKS).map(|i| TASKS[i].run_ticks).sum() }
+}
+
 /// 登记当前任务的下次恢复帧（fork 子先执行时父帧）。
 pub fn save_ctx(frame: usize) {
     // SAFETY: 单核。

@@ -265,6 +265,56 @@ pub fn mount_fs_proc(target: &str) -> Result<(), i64> {
     Ok(())
 }
 
+// ---- M9-切片1：/proc/health + /proc/cpuinfo（健康指标 + 多核报告）----
+
+/// 打开 fd 数（/proc/health 用）。
+pub fn open_fd_count() -> usize {
+    FD_TABLE.lock().slots.iter().filter(|s| s.is_some()).count()
+}
+
+/// /proc/health：JSON 健康指标（内存 used/free、fd 数、容器数、CPU 负载）。
+pub fn health_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    let st = crate::mm::mem_stats();
+    let total = 64 * 1024 * 1024usize;
+    let used = st.kernel_used_bytes;
+    let fds = open_fd_count();
+    let containers = crate::task::container_count();
+    // CPU 负载近似：所有任务累计运行 tick / 总 tick（忙占比）
+    let busy = crate::task::busy_ticks();
+    let total_ticks = crate::task::ticks().max(1);
+    let load = (busy as u64 * 100 / total_ticks) as u64;
+    let body = alloc::format!(
+        "{{\"mem_used\":{},\"mem_free\":{},\"fds\":{},\"containers\":{},\"cpu_load\":{}}}\n",
+        used,
+        total.saturating_sub(used),
+        fds,
+        containers,
+        load
+    );
+    *ino.data.lock() = body.into_bytes();
+    ino
+}
+
+/// /proc/cpuinfo：多核报告（SMP 前 online 只显示 1，避免误判，DESIGN §21.5）。
+pub fn cpuinfo_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    let body = alloc::format!(
+        "processor\t: 0\nvendor_id\t: Novos\nmodel name\t: Novos-OS virtual CPU\ncpu MHz\t\t: 100\ncores\t\t: 1\nphysical id\t: 0\ncpu cores\t: 1\nonline\t\t: 1\n"
+    );
+    *ino.data.lock() = body.into_bytes();
+    ino
+}
+
+/// 判断 proc 子文件（health/cpuinfo）——resolve 用。
+fn proc_special_file(name: &str) -> Option<Arc<Inode>> {
+    match name {
+        "health" => Some(health_inode()),
+        "cpuinfo" => Some(cpuinfo_inode()),
+        _ => None,
+    }
+}
+
 /// 挂载 overlay：lower = source 目录（只读），upper = 新建可写层。
 pub fn mount_overlay(source: &str, target: &str) -> Result<(), i64> {
     if target == "/" || target.is_empty() {
@@ -312,6 +362,8 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     let mut cur = ROOT.clone();
     // overlay 遍历状态：(upper 当前目录(可 None), lower 当前目录(可 None))
     let mut ov: Option<(Option<Arc<Inode>>, Option<Arc<Inode>>)> = None;
+    // proc 挂载内标记（M9-切片1：health/cpuinfo 特殊文件）
+    let mut proc_active = false;
     let mut acc = String::from("/"); // 累积路径（挂载点匹配）
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     for (i, comp) in comps.iter().enumerate() {
@@ -337,9 +389,18 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
                 MountKind::Proc(root) => {
                     cur = root;
                     ov = None;
+                    proc_active = true;
                 }
             }
             continue;
+        }
+        // M9-切片1：/proc 特殊文件（health/cpuinfo）
+        if proc_active {
+            if let Some(ino) = proc_special_file(comp) {
+                cur = ino;
+                proc_active = false; // 文件不再有子组件
+                continue;
+            }
         }
         // overlay 内：upper 优先，其次 lower；.wh.* 白标记视为已删除（M7-切片2）
         if let Some((up, low)) = ov.take() {
@@ -762,13 +823,17 @@ fn visible_children(ino: &Inode) -> Vec<Dentry> {
     // M8-切片4：/proc = 当前 pid ns 的任务视图（动态合成）
     if ino as *const Inode as usize == Arc::as_ptr(&PROC_ROOT) as usize {
         let ns = crate::task::current_pid_ns();
-        return crate::task::tasks_in_ns(ns)
+        let mut kids: Vec<Dentry> = crate::task::tasks_in_ns(ns)
             .iter()
             .map(|p| Dentry {
                 name: alloc::format!("{}", p),
                 inode: Inode::dir(), // /proc/<pid> 均为目录
             })
             .collect();
+        // M9-切片1：/proc/health + /proc/cpuinfo（只读文件）
+        kids.push(Dentry { name: String::from("health"), inode: Inode::file() });
+        kids.push(Dentry { name: String::from("cpuinfo"), inode: Inode::file() });
+        return kids;
     }
     if let Some(merged) = overlay_merged_children(ino) {
         return merged;
