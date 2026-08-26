@@ -39,6 +39,7 @@ const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
+const SYS_FUTEX: u64 = 202;
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
 const SYS_FW_ADD: u64 = 503;
@@ -259,7 +260,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1376,6 +1377,51 @@ fn exec(cmd: &[u8]) {
             print("ext4test: list after unlink: ");
             print(unsafe { core::str::from_utf8_unchecked(&lb2[..ln2 as usize]) });
             print("\n");
+        }
+        b"futtest" => {
+            // M11-切片1：futex——父子进程共享内存同步（WAIT/WAKE）。
+            // fork 共享用户地址空间，栈上 flag 对父子可见。
+            let mut flag = 0u32;
+            let addr = (&mut flag as *mut u32) as u64;
+            let r = syscall3(SYS_FORK, 0, 0, 0);
+            if r == 0 {
+                // 子：等 flag 变为 1（futex WAIT 阻塞，父改值后 WAKE 唤醒）
+                print("futtest: child waiting\n");
+                let rc = syscall3(SYS_FUTEX, addr, 0, 0); // WAIT(addr, 0)
+                print("futtest: child futex rc=");
+                print_u64(rc);
+                print(" flag=");
+                print_u64(flag as u64);
+                print("\n");
+                if rc == 0 && flag == 1 {
+                    print("futtest: child woke ok\n");
+                }
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                // 父：子先执行已阻塞在 WAIT，改共享值 + WAKE 唤醒
+                let mut spin = 0u32;
+                while spin < 5_000_000 {
+                    spin += 1;
+                }
+                flag = 1;
+                let wr = syscall3(SYS_FUTEX, addr, 1, 1); // WAKE(addr, 1)
+                print("futtest: parent wake rc=");
+                print_u64(wr);
+                print("\n");
+                let mut w = 0u64;
+                let mut n = 0u32;
+                while w == 0 && n < 200000 {
+                    w = syscall3(SYS_WAITPID, r, 0, 0);
+                    n += 1;
+                    let mut s = 0u32;
+                    while s < 50000 {
+                        s += 1;
+                    }
+                }
+                print("futtest: reaped=");
+                print_u64(w);
+                print("\n");
+            }
         }
         b"exit" => {
             print("bye\n");
