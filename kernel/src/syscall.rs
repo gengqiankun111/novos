@@ -50,6 +50,12 @@ pub const SYS_CHDIR: u64 = 80;
 pub const SYS_NAT_ADD: u64 = 501;
 /// Novos 扩展：读 conntrack 统计 { 条目数, 命中数 }。
 pub const SYS_CT_STAT: u64 = 502;
+/// Novos 扩展：添加防火墙规则（proto, dport, action）。
+pub const SYS_FW_ADD: u64 = 503;
+/// Novos 扩展：删除防火墙规则（proto, dport）。
+pub const SYS_FW_DEL: u64 = 504;
+/// Novos 扩展：读防火墙统计 { 规则数, 丢弃包数 }。
+pub const SYS_FW_STAT: u64 = 505;
 
 /// boot.asm 导出的 syscall 入口。
 extern "C" {
@@ -170,6 +176,9 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_CHDIR => sys_chdir(a1),
         SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
         SYS_CT_STAT => sys_ct_stat(a1),
+        SYS_FW_ADD => sys_fw_add(a1, a2, a3),
+        SYS_FW_DEL => sys_fw_del(a1, a2),
+        SYS_FW_STAT => sys_fw_stat(a1),
         SYS_MOUNT => sys_mount(a1, a2, a3, a4, a5),
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
@@ -598,6 +607,27 @@ fn sys_ct_stat(buf: u64) -> u64 {
     let mut tmp = [0u8; 16];
     tmp[0..8].copy_from_slice(&entries.to_le_bytes());
     tmp[8..16].copy_from_slice(&hits.to_le_bytes());
+    // SAFETY: buf 为用户态地址（16 字节可写）。
+    unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, 16) };
+    0
+}
+
+/// fw_add(proto, dport, action)：添加防火墙规则（M8-切片3）。
+fn sys_fw_add(proto: u64, dport: u64, action: u64) -> u64 {
+    crate::net::fw_add(proto as u8, dport as u16, action as u8) as u64
+}
+
+/// fw_del(proto, dport)：删除防火墙规则。
+fn sys_fw_del(proto: u64, dport: u64) -> u64 {
+    crate::net::fw_del(proto as u8, dport as u16) as u64
+}
+
+/// 防火墙统计：向 buf 写 { rules: u64, drops: u64 }。
+fn sys_fw_stat(buf: u64) -> u64 {
+    let (rules, drops) = crate::net::fw_stats();
+    let mut tmp = [0u8; 16];
+    tmp[0..8].copy_from_slice(&rules.to_le_bytes());
+    tmp[8..16].copy_from_slice(&drops.to_le_bytes());
     // SAFETY: buf 为用户态地址（16 字节可写）。
     unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, 16) };
     0

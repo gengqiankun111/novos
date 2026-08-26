@@ -269,6 +269,10 @@ impl VirtioNet {
         if calc != csum {
             return; // 校验失败丢弃
         }
+        // M8-切片3：基础防火墙——DROP 规则命中则丢弃
+        if !fw_filter(6, dst_port) {
+            return;
+        }
         // M8-切片2：DNAT——网关监听端口 → 容器端口（命中登记 conntrack）
         let dst_port = dnat(6, dst_port);
         let data = &tcp[core::cmp::min(doff, tcp.len())..];
@@ -303,6 +307,10 @@ impl VirtioNet {
             return;
         }
         let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+        // M8-切片3：基础防火墙——DROP 规则命中则丢弃
+        if !fw_filter(17, dst_port) {
+            return;
+        }
         let ulen = u16::from_be_bytes([udp[4], udp[5]]) as usize;
         let data = &udp[8..core::cmp::min(ulen, udp.len())];
         crate::socket::udp_deliver(dst_port, data);
@@ -802,6 +810,75 @@ fn ct_age() {
     for e in ct.iter_mut() {
         e.ticks = e.ticks.saturating_sub(1);
     }
+}
+
+// ---- M8-切片3：基础防火墙（线性规则表）----
+
+pub const FW_ACTION_DROP: u8 = 0;
+pub const FW_ACTION_ACCEPT: u8 = 1;
+
+/// 防火墙规则：{ 协议, 目的端口(0=全部), 动作 }（第一版线性表，规则少）。
+struct FwRule {
+    proto: u8,
+    dport: u16,
+    action: u8,
+}
+
+static FW_RULES: spin::Lazy<spin::Mutex<alloc::vec::Vec<FwRule>>> =
+    spin::Lazy::new(|| spin::Mutex::new(alloc::vec::Vec::new()));
+static FW_DROPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// 添加防火墙规则（网关控制面）。
+pub fn fw_add(proto: u8, dport: u16, action: u8) -> i64 {
+    if action != FW_ACTION_DROP && action != FW_ACTION_ACCEPT {
+        return -22; // EINVAL
+    }
+    let mut r = FW_RULES.lock();
+    if r.iter().any(|x| x.proto == proto && x.dport == dport) {
+        return -98; // EADDRINUSE（同键重复）
+    }
+    r.push(FwRule { proto, dport, action });
+    0
+}
+
+/// 删除防火墙规则（首个匹配项）。
+pub fn fw_del(proto: u8, dport: u16) -> i64 {
+    let mut r = FW_RULES.lock();
+    match r.iter().position(|x| x.proto == proto && x.dport == dport) {
+        Some(i) => {
+            r.remove(i);
+            0
+        }
+        None => -2, // ENOENT
+    }
+}
+
+/// 防火墙判定：首个匹配规则决定；无匹配默认接受。
+fn fw_accept(proto: u8, dport: u16) -> bool {
+    let r = FW_RULES.lock();
+    for rule in r.iter() {
+        if rule.proto == proto && (rule.dport == 0 || rule.dport == dport) {
+            return rule.action == FW_ACTION_ACCEPT;
+        }
+    }
+    true
+}
+
+/// 防火墙统计（{ 规则数, 累计丢弃包数 }）。
+pub fn fw_stats() -> (u64, u64) {
+    (
+        FW_RULES.lock().len() as u64,
+        FW_DROPS.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// 入向过滤：不通过则计丢弃并返回 false。
+fn fw_filter(proto: u8, dport: u16) -> bool {
+    if fw_accept(proto, dport) {
+        return true;
+    }
+    FW_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    false
 }
 
 /// 发送 UDP 数据报（M5-切片3：组 UDP 头 + IPv4 发送；校验和 0 = IPv4 允许）。
