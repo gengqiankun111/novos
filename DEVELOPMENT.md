@@ -44,6 +44,7 @@
 - [ ] **PlatformInfo 抽象**：启动信息（内存布局/中断基址/MMIO/时钟频率）统一结构，x86 在 boot 层填充、ARM 后续用 dtb_parse() 填充（勘误③，DESIGN §1.3）。
 - [ ] 8250 UART 驱动：`print!`/`println!` 宏。
 - [ ] 中断/异常处理：IDT + GDT 骨架，`panic` 落串口。
+- [ ] 内核命令行解析：支持 `log=debug`、`console=ttyS0` 等参数。
 
 **验收标准**：
 - QEMU 启动后串口打印 `Novos-OS: boot ok` 与内存映射信息。
@@ -59,6 +60,7 @@
 - [ ] Slab 分配器（固定 size 阶梯，**侵入式空闲链表**）。
 - [ ] 接入 `GlobalAlloc`，使 `Vec`/`Arc` 可用。
 - [ ] **可移动页标记**（`MIGRATE_MOVABLE`）用于后续碎片整理。
+- [ ] 内存统计初始化：`MemStat` 结构，记录 `total_pages`、`free_pages`、`slab_used`。
 
 **验收标准**：
 - 单元测试：buddy 分配/释放无泄漏、无重叠；slab 对象复用正确。
@@ -96,6 +98,7 @@
 - [ ] `/etc/motd` 登录提示："本设备不包含编译器，请使用宿主机交叉编译（docs/nosos-sdk.md）"；`PATH` 不放置 go/rustc/g++（DESIGN §21.4）。
 - [ ] **PID 1 崩溃自愈**：内核检测到 PID 1 退出时，尝试执行 `rescue_init`（.rodata 内嵌），带**60 秒反跳计时器**（3 次崩溃后强制 Watchdog 复位）。
 - [ ] 文件描述符表（**`Vec<Option<Arc<File>>>` + 低 64 位空闲位图**，评审定案：fd 稠密整数数组 O(1)，非 BTreeMap）、`/dev/uart` 设备文件。
+- [ ] 首次内存基线记录：`docs/bench/m3-baseline.txt` 记录 `.text` 大小 + 空闲 `used`。
 
 **验收标准**：
 - `make run` 后进入 shell，能执行 `ls`/`cat`/`echo` 等命令。
@@ -108,6 +111,7 @@
 
 - [ ] VFS 层：`SuperBlock/Inode/Dentry/File`（§3.6）。
 - [ ] dcache：hash 查找 + LRU 可回收 + shrink_target（哈希键用 **FNV-1a**——热路径哈希表禁 SipHash，见 DESIGN §3.6）。
+- [ ] **dcache shrink 阈值**：`entries > shrink_target` 时触发回收，目标 `shrink_target * 0.8`；`entries > shrink_watermark` 时强制立即回收（DESIGN §3.6 新增）。
 - [ ] ramfs（initramfs 挂载） + tmpfs（页缓存文件）。
 - [ ] 系统调用：`open/read/write/close/stat/mkdir/rmdir/unlink/readdir/mount`。
 - [ ] 路径解析（§4.3）+ 挂载点遍历。
@@ -115,6 +119,7 @@
 **验收标准**：
 - 在 tmpfs 上完整读写/建目录/枚举目录。
 - 删除文件后内存回落（回收路径生效）。
+- **dcache shrink 测试**：创建 1000 个文件，读取后触发 shrink，entries 回落。
 
 ---
 
@@ -144,6 +149,7 @@
 - [ ] pid namespace：ns 内 pid=1，跨 ns 可见性。
 - [ ] Cgroup v2 树 + memory/pids 控制器。
 - [ ] `memory.max` 触发回收 / OOM‑kill（仅杀容器内进程）。
+- [ ] **Cgroup 记账测试**：`page_charge`/`page_uncharge` 配对，无泄漏。
 
 **验收标准**：
 - `clone` 新进程在不同 pid/uts/net ns，隔离生效。
@@ -172,6 +178,7 @@
 - [ ] 容器 rootfs 用 OverlayFS 组装；`pivot_root`。
 - [ ] 容器内挂 `/proc`（pid ns 视图）、设 cgroup。
 - [ ] 网关：IP 转发 + conntrack + MASQUERADE + 端口映射。
+- [ ] **conntrack 老化策略**：`ESTABLISHED` 120s、`NEW` 30s、`ICMP` 10s；到期自动删除（DESIGN §3.8 新增）。
 - [ ] 基础防火墙（线性规则表）。
 
 **验收标准**：
@@ -193,6 +200,8 @@
 - [ ] 编译期瘦身终检：`opt-level=s/z` + LTO + strip，回填实测 .text 大小。
 - [ ] 稳定性：长跑 7 天无泄漏（used 不单调爬升）。
 - [ ] 看门狗 + 掉电保护（日志原子写 / FS 一致性）。
+- [ ] **环形日志落盘**：内核日志异步写 `/var/log/kernel.log`，内存缓冲 → 批量写 Ext4（§10.1→§19.2 衔接）。
+- [ ] **健康指标暴露**：`/proc/health` 输出 JSON：内存 used/free、fd 数、容器数、CPU 负载。
 - [ ] 可观测性：环形日志 + 落盘 + 健康指标（内存/fd/CPU）。
 
 **验收标准**：
@@ -210,7 +219,7 @@
 **目标**：支持磁盘文件系统。
 
 - [ ] `BlockDevice` trait + virtio-blk 驱动。
-- [ ] BIO 层（简单队列 + 同步 I/O）。
+- [ ] BIO 层（简单队列 + 同步 I/O + **错误重试：读失败返回 EIO，写失败重试 3 次（间隔 10ms），超时 5s**）。
 - [ ] Page Cache（`AddressSpace`：文件偏移 → 物理页，可 shrink）。
 - [ ] ext4 驱动：`data=journal` 完整模式（防掉电损坏）。
 - [ ] `mmap MAP_SHARED` 文件映射（多进程共享物理页）。
@@ -255,7 +264,7 @@
 ### M13：完整 /proc + 信号扩展 + 事件 fd
 **目标**：动态链接程序可观测性 + 完整信号。
 
-- [ ] /proc 扩展：`/proc/self/maps`、`/proc/self/status`、`/proc/self/exe`、`/proc/self/fd/`。
+- [ ] /proc 扩展：`/proc/self/maps`、`/proc/self/status`、`/proc/self/exe`、`/proc/self/fd/`、`/proc/net/conntrack`（纯文本：协议/剩余秒/状态/五元组，DESIGN §10.2 新增）。
 - [ ] 信号扩展：`sigaction`（SA_SIGINFO + SA_ONSTACK）、`sigprocmask`、`sigaltstack`。
 - [ ] timerfd：`timerfd_create` + `timerfd_settime` + epoll 可监听。
 - [ ] **网络调试开关**：`/proc/sys/net/novos/packet_trace`——开启后环形日志打印每包五元组 + 丢弃原因（性能降 ~50%，替代 tcpdump，DESIGN §21.8）。
@@ -283,6 +292,41 @@
 - `novos run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问。
 - **OTA 演示**：更新镜像层 → 增量拉取 → 重启生效；回滚旧层可恢复。
 - **内存基线**：≤40MB（full 模式最终断言）。
+
+---
+
+### M15：发布准备与用户支持体系（v1.0 发布前）
+
+**目标**：构建完整的用户入门与支持体系，确保第一批用户能在 30 分钟内从零开始运行第一个容器（DESIGN §24）。
+
+- [ ] **预构建环境**：
+  - 生成 QEMU 镜像（`make qemu-image`）并上传至官方下载站点；
+  - 编写一键启动脚本 `novos-run.sh`，支持 QEMU 参数自动适配；
+  - 测试镜像在至少两种 QEMU 配置（`-machine pc` 和 `-machine virt`）下可启动。
+- [ ] **核心文档**：
+  - 编写 `docs/quickstart.md`（5 分钟快速开始）；
+  - 编写 `docs/first-container.md`（运行 busybox 容器）；
+  - 编写 `docs/migration-guide.md`（从 Linux 迁移避坑指南）。
+- [ ] **开发者工具链**：
+  - 提供交叉编译 SDK 的 Dockerfile（`docker/Dockerfile.sdk`），包含 musl-cross、crt1 等；
+  - 提供示例应用仓库 `novos-examples`，包含 C/Rust 的 Hello World 及 `Makefile`/`build.rs`；
+  - 确保 `novos-build` 命令已集成到 `novos` CLI（或作为独立脚本），并完成 `novos-check` 集成。
+- [ ] **调试与反馈**：
+  - 配置串口日志输出（默认开启，可收集）；
+  - 在 GitHub 创建 Issue 模板（`.github/ISSUE_TEMPLATE/bug_report.md`），引导用户填写必要信息；
+  - 创建社区沟通群组（Discord 或 Telegram），并在 README 中公布加入链接。
+- [ ] **路线图与更新机制**：
+  - 在 README 中增加 `ROADMAP.md` 链接，展示当前版本与下一版本目标；
+  - 建立社区更新发布流程（如每两周发布一次 `CHANGELOG.md` 更新）。
+
+**验收标准**：
+- 一位从未接触过 Novos-OS 的开发者，按照 `docs/quickstart.md` 的指引，能在 15 分钟内下载镜像并启动 shell。
+- 该开发者按照 `docs/first-container.md`，能在 5 分钟内成功运行 `novos run busybox echo hello` 并看到输出。
+- 该开发者能使用 SDK 在宿主机上交叉编译示例程序，并部署到 QEMU 中运行。
+- 该开发者在遇到问题时，能通过 Issue 模板在 10 分钟内提交一份包含完整日志的报告。
+- 社区沟通渠道至少有一名核心开发者在 24 小时内响应。
+
+**内存影响**：无（均为用户态工具和文档，不计入内核预算）。
 
 ---
 
@@ -355,6 +399,8 @@ jobs:
       - name: Memory regression
         run: make test-memory
 ```
+
+**跳过策略**：纯文档变更 → 跳过 QEMU 和内存测试（提交标记 `[ci skip-build]`）。
 
 ---
 

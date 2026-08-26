@@ -513,12 +513,16 @@ pub struct Mount {
 pub struct DCache {
     pub hash: HashMap<(u64, &'static str), Arc<Dentry>>, // parent_ino+name -> dentry
     pub lru: LruList<Arc<Dentry>>,   // 未引用条目，LRU 淘汰
-    pub shrink_target: usize,        // 预算内上限
+    pub shrink_target: usize,        // 软上限，超过后 shrink
+    pub shrink_watermark: usize,     // 硬上限，触发强制 shrink
+    pub shrink_batch: usize,         // 每次回收批次大小
 }
 ```
 
 设计要点：
 - **dentry 是路径解析的缓存单元**，`dcache.hash` 命中可跳过磁盘/下层查找；`lru` 提供 shrink 路径（§5.4 预算兑现点）。
+- **shrink 触发规则**：`entries > shrink_target` 时在 `path_walk` 返回前收缩至 `shrink_target * 0.8`；
+  `entries > shrink_watermark` 时强制立即回收（`shrink_batch` 一批）。
 - 挂载通过 `Dentry.mount` 跳转：路径解析到挂载点时换 `SuperBlock`。
 - `Arc<Inode>` + `Weak<Dentry>` 关系，防止 inode 因 dentry 环泄漏。
 
@@ -644,6 +648,22 @@ pub struct EpollItem {
 - **socket 与协议分离**：`Socket` 面向 fd 层，`Tcb` 是 TCP 专用状态，UDP 只有 `Socket`。
 - **epoll 用就绪队列 + 等待队列**实现 O(1) 就绪获取；`Skb.allocated` 让网络缓冲可记账、可回收（预算控制点）。
 - **conntrack** 为网关 NAT 服务，条目带老化定时器（§5.7）。
+
+**conntrack 老化策略（2026-08 补充）**：
+
+```rust
+pub struct ConntrackEntry {
+    pub tuple: FiveTuple,
+    pub state: CtState,      // NEW/ESTABLISHED/RELATED
+    pub expires: u64,        // tick 计数，到期自动回收
+    pub last_seen: u64,
+}
+// 老化规则：ESTABLISHED 默认 120s；NEW 默认 30s；ICMP 默认 10s
+// 每次访问更新 last_seen，到期后从哈希表删除
+```
+
+- 老化规则：`ESTABLISHED` 120s / `NEW` 30s / `ICMP` 10s；每次访问刷新 `last_seen`，
+  到期后从哈希表删除（无需显式清理，惰性回收）。
 
 **网络/内核表数据结构选型（2026-08 评审定案，写入各实现章节）**：
 
@@ -1322,6 +1342,9 @@ pub static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 - 日志输出到串口（UART），第一版不做日志文件（省内存）；
 - 可通过内核命令行参数 `log=debug` 调整级别；
 - 日志带时间戳（tick 计数），便于排序和关联。
+- **M9 升级（与 §19.2 可观测性衔接）**：环形日志支持**异步落盘**至 `/var/log/kernel.log`
+  （内存缓冲 → 批量写 Ext4），并暴露健康指标（内存/fd/CPU）到 `/proc/health`，
+  供 Web 管理界面读取。
 
 ### 10.2 /proc 只读视图
 
@@ -1341,6 +1364,17 @@ pub static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
 - `/proc` 完全只读（减少攻击面），不支持 `echo > /proc/...`；
 - 预算监控数据从内核原子计数器直接读取，无额外内存开销。
+
+**`/proc/net/conntrack` 输出格式**（简化为纯文本，每行一个连接）：
+
+```
+tcp 6 100 ESTABLISHED src=10.0.0.1 dst=10.0.0.2 sport=12345 dport=80
+udp 17 60 NEW      src=10.0.0.3 dst=8.8.8.8 sport=5353 dport=53
+icmp 1 10 RELATED  src=10.0.0.4 dst=10.0.0.5
+```
+
+> 格式：`协议 协议号 剩余秒 状态 src=.. dst=.. sport=.. dport=..`；
+> 供网关排障（连接是否建立、老化剩余时间）与 Web 管理界面展示。
 
 ### 10.3 内存预算看板
 
@@ -1422,6 +1456,7 @@ UP 稳定 (M9)
 | Rust 所有权模型与 per-CPU 数据所有权难调和 | `Arc` + per-CPU 变量宏（`#[per_cpu]`），明确规则："仅当在本核心上时才可获取可变引用" |
 | 中断处理程序可重入性 | 中断处理设计为纯函数式，或仅操作 per-CPU 中断屏蔽标志 |
 | SMP 内存增量突破 32MB | 阶段门禁：每阶段实测增量，超出则退回（§11.2 预算 1–2MB 为上限） |
+| 任务迁移导致 L1/L2 缓存失效，性能下降 | 负载均衡优先选择"最近运行过该任务"的核心（缓存亲和性），`last_cpu` 字段记录上次运行核心 |
 
 ---
 
@@ -1617,6 +1652,10 @@ pub struct BlockLayer {
 设计要点：
 - **无 I/O 调度器**（cfq/deadline/mq）——virtio-blk 单队列 + FIFO 即可；
 - **同步优先 + 异步回调**——内核自身 I/O 同步等；用户态 page cache 回调填充；
+- **错误处理与重试（2026-08 补充）**：
+  - 读失败：返回 `EIO`，向上层传播；
+  - 写失败：重试 3 次（间隔 10ms），仍失败则报错并标记设备为 **ReadOnly**；
+  - 超时：BIO 超时 5s，超时后重试或报错。
 - Block 层代码量目标 ~500 行（Linux ~2 万行）。
 
 #### ext4 写路径（data=journal 完整模式）
@@ -2563,6 +2602,8 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 - 所有入口（Web/CLI）明示：
   `"Novos 容器运行时遵循 OCI 镜像规范，管理方式为 novos 命令，非 Docker CLI 兼容（不支持 docker-compose）。"`
+- **`novos run` 语义对齐 OCI runtime-spec**，但命令行参数是 `novos run <image> <cmd>`，
+  而非 docker run 的 `-d`/`-p` 等（通过 `config.json` 或环境变量配置）。
 
 ### 21.7 实时性需求（RT 调度）
 
@@ -2671,6 +2712,53 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 2. **默认禁用**：新增功能默认不启用，用户通过配置文件或命令行显式开启；
 3. **模块化**：所有扩展均为独立二进制或内核模块（第一版不实现动态模块加载，通过 feature flag 编译时裁剪）；
 4. **只增不减**：本节为 roadmap"定心丸"——让早期用户敢于用 Novos 接真实项目，他们最怕的不是"功能没有"，而是"功能永远不会有"。
+
+---
+
+## 24. 首批用户支持策略（Early Adopter Support）
+
+> 第一批用户（Early Adopters）是项目最宝贵的资产。本章定义 Novos-OS 在 v1.0 发布时，
+> 为用户提供的**开箱即用体验、文档、工具链、调试支持和社区反馈闭环**。这些不是内核代码，
+> 而是围绕内核的交付物和服务，旨在将用户从"下载"到"运行第一个容器"的时间压缩到 **30 分钟以内**。
+
+### 24.1 开箱即用的预构建环境
+
+- **预构建 QEMU 镜像**：提供可直接启动的完整镜像（内核 + initramfs + 基础工具），用户无需编译即可体验。
+- **一键启动脚本**：`./novos-run.sh`，自动调用 QEMU 并加载镜像，屏蔽复杂参数。
+- **硬件/虚拟机支持矩阵**：明确列出当前支持的平台（QEMU/KVM、特定 x86_64 工控板），避免用户在不支持的硬件上浪费时间。
+
+### 24.2 清晰的分层文档
+
+- **5 分钟快速开始指南**：从下载镜像到进入 shell 的完整步骤，附截图和命令示例。
+- **第一个容器指南**：手把手教用户用 `novos run` 启动 busybox 容器并执行命令。
+- **《从 Linux 迁移避坑指南》**：集中说明 glibc vs musl、Ext4 data=journal、设备端不编译等常见误区，给出明确解决方案（对应 §21）。
+
+### 24.3 完善的开发者工具链
+
+- **预配置的交叉编译工具链**：提供 Docker 镜像或 SDK 包，支持 `x86_64-musl` 和 `aarch64-musl` 一键交叉编译。
+- **应用模板与示例**：提供 C / Rust 的 "Hello, World" 应用模板，附 `Makefile` 或 `build.rs`。
+- **`novos-build` 命令行工具**：实现从源码到 OCI 镜像的一键构建，构建时自动运行 `novos-check` 验证兼容性（见 §15.3）。
+
+### 24.4 调试与问题反馈机制
+
+- **串口日志持久化**：确保所有内核/容器日志可通过串口完整捕获，方便用户保存并反馈。
+- **清晰的 Issue 模板**：在 GitHub 上提供结构化 Issue 模板，引导用户提供版本、硬件/QEMU 参数、完整日志等关键信息。
+- **活跃的社区沟通渠道**：建立 Discord / Telegram / Slack 群组，供用户即时交流，并承诺核心开发者在线响应时间（如 24 小时内）。
+
+### 24.5 透明的演进路线图与反馈闭环
+
+- **公开 Roadmap**：在 README 中展示当前版本（v0.1）功能和下一个版本（v0.2 / v1.0）目标，让用户了解项目方向。
+- **明确的反馈渠道**：除 Issue 外，设立公开的反馈表单或 `#feedback` 频道，收集功能请求和使用体验。
+- **定期的社区更新**：以周报或月报形式向社区同步开发进展、重要决策和未来计划，让用户感知项目活力。
+
+### 24.6 交付物清单（v1.0 发布时）
+
+- 预构建 QEMU 镜像（.qcow2）和启动脚本
+- 快速开始指南（README + 在线文档）
+- 交叉编译 SDK（Dockerfile 或 tar 包）
+- 示例应用仓库（`novos-examples`）
+- GitHub Issue 模板 + 社区沟通渠道信息
+- 官方软件仓库的"推荐清单"页面（阶段一，见 §22.3）
 
 ---
 

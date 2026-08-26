@@ -9,43 +9,57 @@
 
 ## 主线一：契约式交付体系（致命 Bug → 免疫）
 
-| 任务 | 设计依据 | 依赖 | 产出 |
-|---|---|---|---|
-| `novos` 应用仓库 + 镜像签名（预审核上架、拉取校验） | DESIGN_EXT §1.1 / DESIGN §22 | M14 `novos-pull` | 官方仓库 + `novos pull` 强制校验 |
-| **阶段一：官方推荐软件清单 + `novos-build`**（软件/功能/官网地址/官方 musl 静态二进制链接） | DESIGN §22.3 | M11 工具链 | 清单页 + `novos-build` 工具 |
-| **阶段二：社区软件仓库**（`novos repo-add`/`novos install`；核心包：musl-gcc 静态编译 + 私钥签名） | DESIGN §22.3 | 阶段一 | 软件仓库服务器 + 包维护流程 |
-| **阶段三：云端应用商店**（`novos deploy redis`） | DESIGN §22.3 | 云端构建（主线二） | 云端原生应用商店 |
-| **立即行动：Redis 构建指南**（Redis 7.2.4+，musl-gcc 静态编译） | DESIGN §22.4 | 无 | 《为 Novos-OS 构建 Redis》 |
-| `novos-check` 升级适配器（glibc 沙盒 / syscall 翻译层评估） | DESIGN_EXT §1.1 | M11 `novos-check` | 兼容性沙盒原型 |
-| Ext4 自适应挂载（后台 data=ordered → journal 转换） | DESIGN_EXT §1.2 | M10 ext4 | 挂载不拒绝、自动转换 |
-| F2FS 支持评估（SD/eMMC 断电恢复 + 磨损均衡） | DESIGN_EXT §1.2 | M10 Block I/O | F2FS 可行性报告 |
-| Cgroup 内核级进程识别安全策略（redis-server 自动限额） | DESIGN_EXT §1.3 | M6 cgroup | 内核强制限额，无视用户传参 |
+**触发条件（任一满足即启动）**：
+- `novos-check` 拦截日志中非 musl 二进制占比 > 5%；
+- 用户反馈"安装软件困难"频次超过 3 次/月；
+- 社区请求添加第三方软件源。
+
+| 阶段 | 任务 | 设计依据 | 依赖 | 产出 | 验收标准 |
+|---|---|---|---|---|---|
+| 阶段一（MVP） | 官方推荐软件清单 + `novos-build`（软件/功能/官网地址/官方 musl 静态二进制链接，core/runtime/service/net-tools 四类） | DESIGN §22.3 | M11 工具链 | 清单页 + `novos-build` 工具 | 用户能按清单用 `novos-build redis` 一键编译出可运行二进制 |
+| 阶段一（立即可行） | 《为 Novos-OS 构建 Redis》指南（Redis 7.2.4+，musl-gcc 静态编译） | DESIGN §22.4 | 无 | 指南文档 | 用户按指南 15 分钟内编译出可运行的 redis-server |
+| 阶段二 | 社区软件仓库（`novos repo-add`/`novos install`；核心包：官网稳定源码 → musl-gcc 静态编译 → 打包 + 私钥签名 → 上传） | DESIGN §22.3 | 阶段一 | 软件仓库服务器 + 包维护流程 | `novos install redis` 从官方源下载、验签、安装成功 |
+| 阶段三 | 云端应用商店（`novos deploy redis` 自动拉取最新最安全镜像部署） | DESIGN §22.3 | 云端构建（主线二） | 云端原生应用商店 | 浏览器点"部署 Redis"，设备自动拉取运行 |
+| 并行 | `novos-check` 升级适配器（glibc→musl syscall 翻译层 / 容器化沙盒评估） | DESIGN_EXT §1.1 | M11 `novos-check` | 兼容性沙盒原型 | glibc 编译的 hello world 在沙盒内运行成功 |
+| 并行 | Ext4 自适应挂载（检测 data=ordered，后台自动转 data=journal，不拒绝挂载） | DESIGN_EXT §1.2 | M10 ext4 | 挂载不拒绝、自动转换 | 现有 Ext4 盘直接挂载成功，转换进度可见 |
+| 并行 | F2FS 支持评估（SD/eMMC 断电恢复 + 磨损均衡） | DESIGN_EXT §1.2 | M10 Block I/O | F2FS 可行性报告 | 在 SD 卡上 F2FS 读写测试通过，断电后 fsck 通过 |
+| 并行 | Cgroup 内核级进程识别（内核识别 redis-server，自动应用安全策略） | DESIGN_EXT §1.3 | M6 cgroup | 内核强制限额，无视用户传参 | `redis-server --maxmemory 999gb` 在容器内仍被 Cgroup 限额截断 |
 
 ---
 
 ## 主线二：透明化体验（核心困惑 → 透明）
 
-| 任务 | 设计依据 | 依赖 | 产出 |
-|---|---|---|---|
-| 云端构建服务（浏览器写码 → 交叉编译 → OCI → OTA） | DESIGN_EXT §2.1 | M11 工具链 + M14 OTA | 云端 IDE/CI-CD 流水线 |
-| `novos-build` 一条命令源码 → 镜像 + `novos-check` | DESIGN_EXT §2.1 | M11 工具链 | CLI 构建工具 |
-| SMP 透明调度（默认跨核负载均衡） | DESIGN_EXT §2.2 | DESIGN §11 SMP | v2.0 多核调度 |
-| Cgroup CPU 亲和性（容器绑定核心） | DESIGN_EXT §2.2 | M6 cgroup + SMP | 延迟敏感场景绑定 |
-| Balena 等平台集成（设备管理/OTA） | DESIGN_EXT §2.3 | M14 OCI/OTA | 企业级设备管理适配 |
-| `novos` CLI 标准化（事实标准构建工具） | DESIGN_EXT §2.3 | 全部 CLI 能力 | 统一命令行规范 |
+**触发条件（任一满足即启动）**：
+- 用户反馈"交叉编译环境搭建困难"频次超过 5 次/月；
+- `/etc/motd` 提示后仍有用户在设备上执行 `go build`；
+- SMP v2.0 发布后，用户不知道如何利用多核。
+
+| 阶段 | 任务 | 设计依据 | 依赖 | 产出 | 验收标准 |
+|---|---|---|---|---|---|
+| 阶段一 | 云端构建服务（浏览器写码 → 交叉编译 → OCI → OTA） | DESIGN_EXT §2.1 | M11 工具链 + M14 OTA | 云端 IDE/CI-CD 流水线 | 用户在浏览器提交代码，5 分钟内设备收到新容器 |
+| 阶段一（并行） | `novos-build` 一条命令源码 → 镜像 + 自动 `novos-check` 验证 | DESIGN_EXT §2.1 | M11 工具链 | CLI 构建工具 | `novos-build ./myapp` 输出 .novos.tar，OTA 推设备运行 |
+| 阶段二 | SMP 透明调度（默认跨核负载均衡） | DESIGN_EXT §2.2 | DESIGN §11 SMP | v2.0 多核调度 | 压测显示 2 核利用率 > 150%（相对 UP） |
+| 阶段二（并行） | Cgroup CPU 亲和性（`novos run --cpuset 0-1` 容器绑定核心） | DESIGN_EXT §2.2 | M6 cgroup + SMP | 延迟敏感场景绑定 | 工业 Modbus 容器绑定 CPU0，延迟抖动 < 5% |
+| 阶段三 | Balena 等平台集成（设备管理/OTA） | DESIGN_EXT §2.3 | M14 OCI/OTA | 企业级设备管理适配 | Balena 仪表板显示 Novos 设备在线，可远程部署容器 |
+| 阶段三（并行） | `novos` CLI 标准化（事实标准构建工具） | DESIGN_EXT §2.3 | 全部 CLI 能力 | 统一命令行规范 | 社区项目主动提供 novos-build 配置模板 |
 
 ---
 
 ## 主线三：深度定制（高频需求 → 好用）
 
-| 任务 | 设计依据 | 依赖 | 产出 |
-|---|---|---|---|
-| SCHED_FIFO/RR 完整实现（POSIX 实时调度类） | DESIGN_EXT §3.1 | M2 RT 预留 + M9 | 硬实时任务调度 |
-| 中断线程化（Threaded Interrupts） | DESIGN_EXT §3.1 | SMP | 减少关中断时间 |
-| 极简 eBPF 子集（动态探针 + 性能计数） | DESIGN_EXT §3.2 | M13 packet_trace | 动态追踪替代日志 |
-| 结构化日志（JSON，对接 ELK） | DESIGN_EXT §3.2 | M9 可观测性 | 远程聚合分析 |
-| A/B 根文件系统分区（系统层原子升级） | DESIGN_EXT §3.3 | M14 OTA | 内核升级断电不变砖 |
-| 系统配置不可变性（只读镜像 + `/var`/`/data` 可写） | DESIGN_EXT §3.3 | M14 OTA + overlayfs | Ubuntu Core 式定制 |
+**触发条件（任一满足即启动）**：
+- 工业用户明确提出 Modbus 响应延迟 > 100ms；
+- 运维团队反馈排查问题需重启设备查看日志；
+- 用户要求系统升级支持断电安全。
+
+| 阶段 | 任务 | 设计依据 | 依赖 | 产出 | 验收标准 |
+|---|---|---|---|---|---|
+| 阶段一 | SCHED_FIFO/RR 完整实现（POSIX 实时调度类） | DESIGN_EXT §3.1 | M2 RT 预留 + M9 | 硬实时任务调度 | Modbus 采集任务 100 次响应，最大抖动 < 2ms |
+| 阶段一（并行） | 中断线程化（Threaded Interrupts） | DESIGN_EXT §3.1 | SMP | 减少关中断时间 | 中断关闭时间从 50μs 降至 10μs |
+| 阶段二 | 极简 eBPF 子集（动态探针 + 性能计数） | DESIGN_EXT §3.2 | M13 packet_trace | 动态追踪替代日志 | `novos trace --func tcp_rcv` 输出实时调用，不重启内核 |
+| 阶段二（并行） | 结构化日志（JSON，对接 ELK） | DESIGN_EXT §3.2 | M9 可观测性 | 远程聚合分析 | `/var/log/kernel.json` 可被 Filebeat 采集，Kibana 展示 |
+| 阶段三 | A/B 根文件系统分区（系统层原子升级） | DESIGN_EXT §3.3 | M14 OTA | 内核升级断电不变砖 | 内核升级过程中随机断电，重启后自动回滚或继续完成升级 |
+| 阶段三（并行） | 系统配置不可变性（只读镜像 + `/var`/`/data` 可写） | DESIGN_EXT §3.3 | M14 OTA + overlayfs | Ubuntu Core 式定制 | `echo "test" > /etc/hostname` 失败（只读），`echo "test" > /var/conf/hostname` 成功覆盖 |
 
 ---
 
