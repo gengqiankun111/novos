@@ -81,7 +81,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | echo <text> | version | fdtest | exit\n");
+            print("commands: help | echo <text> | version | fdtest | fstest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -101,6 +101,31 @@ fn exec(cmd: &[u8]) {
                 print("fdtest: close rc=");
                 print_u64(r);
                 print("\n");
+            }
+        }
+        b"fstest" => {
+            // M4 切片1：ramfs 创建文件 → 写入 → 读回验证
+            const O_CREAT: u64 = 0o100;
+            const O_TRUNC: u64 = 0o1000;
+            let path = b"/etc/motd\0";
+            let fd = syscall3(SYS_OPEN, path.as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+            if (fd as i64) < 0 {
+                print("fstest: create failed rc=");
+                print_u64(fd);
+                print("\n");
+            } else {
+                let msg = b"hello from ramfs\n";
+                syscall3(SYS_WRITE, fd, msg.as_ptr() as u64, msg.len() as u64);
+                syscall3(SYS_CLOSE, fd, 0, 0);
+                // 读回
+                let fd2 = syscall3(SYS_OPEN, path.as_ptr() as u64, 0, 0);
+                let mut buf = [0u8; 64];
+                let n = syscall3(SYS_READ, fd2, buf.as_mut_ptr() as u64, 64);
+                print("fstest: read ");
+                print_u64(n);
+                print("B: ");
+                print(unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) });
+                syscall3(SYS_CLOSE, fd2, 0, 0);
             }
         }
         b"exit" => {

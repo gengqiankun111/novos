@@ -1,24 +1,118 @@
-//! M3 收尾：文件描述符表 + /dev/uart 设备文件（M4 VFS 前置）。
+//! M4 切片1：VFS 核心 + ramfs 根文件系统 + 路径解析。
 //!
-//! 设计（DESIGN §3.6 / 数据结构评审定案）：
-//! - fd 表 = `Vec<Option<Arc<File>>>` + 低 64 位空闲位图（稠密整数数组 O(1) 分配，
-//!   非 BTreeMap）；
-//! - `File` 为枚举抽象（M3 仅 Uart；M4 扩展 inode 文件/管道/目录）；
-//! - 0/1/2 = stdin/stdout/stderr 均指向 /dev/uart。
+//! 结构（DESIGN §3.6，务实最小版：独立 dcache 层留 M4-切片3）：
+//! - `Inode`：mode / 内容 / 目录子项（Arc 共享，目录即子项表）；
+//! - 根 "/" = ramfs 目录；仅支持绝对路径；
+//! - `File` 扩展：Reg 文件（inode + 读写偏移）、Uart（fd 0/1/2）。
+//! - fd 表沿用 M3 收尾（Vec<Option<Arc<File>>> + 低 64 位空闲位图）。
 
 use crate::serial;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// 文件类型（M3 仅 /dev/uart）。
+// ---- 文件类型位（Linux S_IF*）----
+pub const S_IFREG: u32 = 0o100000;
+pub const S_IFDIR: u32 = 0o040000;
+
+// ---- open flags（Linux O_*）----
+pub const O_RDONLY: u64 = 0;
+pub const O_WRONLY: u64 = 1;
+pub const O_RDWR: u64 = 2;
+pub const O_CREAT: u64 = 0o100;
+pub const O_TRUNC: u64 = 0o1000;
+pub const O_APPEND: u64 = 0o2000;
+
+/// 目录项：名字 + inode（M4-切片3 抽出独立 dcache 前暂存于父目录）。
+pub struct Dentry {
+    pub name: String,
+    pub inode: Arc<Inode>,
+}
+
+/// inode：ramfs 文件/目录统一结构。
+pub struct Inode {
+    /// 类型位（S_IFREG/S_IFDIR）| 权限（M3 简化全 0644/0755）。
+    pub mode: u32,
+    /// 链接计数（M3 简化：目录 2，文件 1）。
+    pub nlink: u32,
+    /// 文件内容（size 即 data.len()）。
+    pub data: Mutex<Vec<u8>>,
+    /// 目录子项。
+    pub children: Mutex<Vec<Dentry>>,
+}
+
+impl Inode {
+    fn new(mode: u32, nlink: u32) -> Arc<Inode> {
+        Arc::new(Inode {
+            mode,
+            nlink,
+            data: Mutex::new(Vec::new()),
+            children: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// 常规文件 inode。
+    fn file() -> Arc<Inode> {
+        Self::new(S_IFREG | 0o644, 1)
+    }
+
+    /// 目录 inode。
+    fn dir() -> Arc<Inode> {
+        Self::new(S_IFDIR | 0o755, 2)
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.mode & S_IFDIR != 0
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.mode & S_IFREG != 0
+    }
+
+    pub fn size(&self) -> usize {
+        self.data.lock().len()
+    }
+
+    /// 在当前目录 inode 中按名字查找子项。
+    fn lookup(&self, name: &str) -> Option<Arc<Inode>> {
+        self.children
+            .lock()
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.inode.clone())
+    }
+
+    /// 添加子项。
+    fn insert_child(&self, name: &str, ino: Arc<Inode>) {
+        self.children.lock().push(Dentry {
+            name: String::from(name),
+            inode: ino,
+        });
+    }
+}
+
+/// 根文件系统（ramfs，挂载于 "/"）。预置 /etc 目录（M3: /etc/motd 登录提示）。
+pub static ROOT: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| {
+    let root = Inode::dir();
+    let etc = Inode::dir();
+    root.insert_child("etc", etc);
+    root
+});
+
+/// 文件句柄（fd 表元素）。
 pub enum File {
-    /// UART 设备：read = 非阻塞串口读，write = 串口输出（镜像 VGA）。
+    /// /dev/uart：read = 非阻塞串口读，write = 串口输出（镜像 VGA）。
     Uart,
+    /// 常规文件（ramfs）：inode + 当前读写偏移。
+    Reg {
+        inode: Arc<Inode>,
+        offset: Mutex<u64>,
+    },
 }
 
 impl File {
-    /// 读：返回写入 buf 的字节数（非阻塞，无数据返回 0）。
+    /// 读：返回写入 buf 的字节数（非阻塞；文件 EOF 返回 0）。
     pub fn read(&self, buf: &mut [u8]) -> usize {
         match self {
             File::Uart => {
@@ -33,10 +127,19 @@ impl File {
                     0
                 }
             }
+            File::Reg { inode, offset } => {
+                let data = inode.data.lock();
+                let mut off = offset.lock();
+                let start = *off as usize;
+                let n = core::cmp::min(buf.len(), data.len().saturating_sub(start));
+                buf[..n].copy_from_slice(&data[start..start + n]);
+                *off = (start + n) as u64;
+                n
+            }
         }
     }
 
-    /// 写：返回已写字节数（UART 无缓冲，全量写出）。
+    /// 写：返回已写字节数（文件在偏移处写入并扩展）。
     pub fn write(&self, data: &[u8]) -> usize {
         match self {
             File::Uart => {
@@ -44,8 +147,71 @@ impl File {
                 crate::print!("{}", s);
                 data.len()
             }
+            File::Reg { inode, offset } => {
+                let mut off = offset.lock();
+                let start = *off as usize;
+                let mut d = inode.data.lock();
+                let end = start + data.len();
+                if d.len() < end {
+                    d.resize(end, 0);
+                }
+                d[start..end].copy_from_slice(data);
+                *off = end as u64;
+                data.len()
+            }
         }
     }
+}
+
+/// 路径解析：从根逐组件查找（仅绝对路径；"." 跳过，".." 简化不支持）。
+/// `create_last`：末组件不存在时创建文件（仅当父目录存在）。
+fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
+    if !path.starts_with('/') {
+        return Err(());
+    }
+    let mut cur = ROOT.clone();
+    let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+    for (i, comp) in comps.iter().enumerate() {
+        let last = i == comps.len() - 1;
+        match cur.lookup(comp) {
+            Some(ino) => cur = ino,
+            None => {
+                if last && create_last {
+                    let ino = Inode::file();
+                    cur.insert_child(comp, ino.clone());
+                    cur = ino;
+                } else {
+                    return Err(());
+                }
+            }
+        }
+    }
+    Ok(cur)
+}
+
+/// 打开路径。M3 兼容 "/dev/uart"；其余走 ramfs（O_CREAT 创建文件）。
+/// 成功返回 File，失败返回负 errno。
+pub fn open_path(name: &str, flags: u64) -> Result<Arc<File>, i64> {
+    if name == "/dev/uart" {
+        return Ok(Arc::new(File::Uart));
+    }
+    let create = flags & O_CREAT != 0;
+    let inode = resolve(name, create).map_err(|_| -2i64)?; // ENOENT
+    if inode.is_dir() {
+        return Err(-21i64); // EISDIR（目录打开留 M4-切片2）
+    }
+    if flags & O_TRUNC != 0 {
+        inode.data.lock().clear();
+    }
+    let offset = if flags & O_APPEND != 0 {
+        inode.data.lock().len() as u64
+    } else {
+        0
+    };
+    Ok(Arc::new(File::Reg {
+        inode,
+        offset: Mutex::new(offset),
+    }))
 }
 
 /// 文件描述符表。
@@ -107,7 +273,7 @@ impl FdTable {
     }
 }
 
-/// 全局 fd 表（spin::Lazy 惰性初始化；单进程 init，M4 进程模型后随任务迁移）。
+/// 全局 fd 表（spin::Lazy 惰性初始化；单进程 init，进程模型后随任务迁移）。
 static FD_TABLE: spin::Lazy<Mutex<FdTable>> = spin::Lazy::new(|| Mutex::new(FdTable::new()));
 
 /// 分配 fd。
@@ -123,12 +289,4 @@ pub fn fd_close(fd: usize) -> bool {
 /// 取 fd 对应文件。
 pub fn fd_get(fd: usize) -> Option<Arc<File>> {
     FD_TABLE.lock().get(fd)
-}
-
-/// 打开路径（M3 仅支持 "/dev/uart"）；失败返回 None。
-pub fn open_path(name: &str) -> Option<Arc<File>> {
-    match name {
-        "/dev/uart" => Some(Arc::new(File::Uart)),
-        _ => None,
-    }
 }

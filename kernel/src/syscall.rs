@@ -138,31 +138,33 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
 }
 
 /// read(fd, buf, len)：经 fd 表路由到文件；非阻塞，无数据返回 0。
+/// 临时缓冲 512B 上限（文件按 len 读；uart 逐字节）。
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
-    let mut slot = [0u8; 1];
+    let mut tmp = [0u8; 512];
+    let want = core::cmp::min(len as usize, tmp.len());
     match crate::fs::fd_get(fd as usize) {
-        Some(f) if len >= 1 => {
-            let n = f.read(&mut slot);
+        Some(f) => {
+            let n = f.read(&mut tmp[..want]);
             if n > 0 {
-                // SAFETY: buf 为用户态地址且 len≥1；用户页已映射，恒等映射下可写。
-                unsafe { *(buf as *mut u8) = slot[0] };
+                // SAFETY: buf 为用户态地址且 len ≥ n；用户页已映射，恒等映射下可写。
+                unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n) };
             }
             n as u64
         }
-        _ => (-1i64) as u64, // EBADF
+        None => (-1i64) as u64, // EBADF
     }
 }
 
-/// open(path, flags, mode)：M3 仅支持 "/dev/uart"；成功返回新 fd。
-fn sys_open(path: u64, _flags: u64, _mode: u64) -> u64 {
+/// open(path, flags, mode)："/dev/uart" 或 ramfs 文件（O_CREAT 创建）；成功返回新 fd。
+fn sys_open(path: u64, flags: u64, _mode: u64) -> u64 {
     let mut pbuf = [0u8; 256];
     // SAFETY: path 为用户态 NUL 结尾字符串。
     let n = unsafe { copy_cstr_from_user(path, &mut pbuf) };
     // SAFETY: pbuf[..n] 为合法 UTF-8（ASCII 路径）。
     let name = unsafe { core::str::from_utf8_unchecked(&pbuf[..n]) };
-    match crate::fs::open_path(name) {
-        Some(f) => crate::fs::fd_alloc(f) as u64,
-        None => (-1i64) as u64, // ENOENT
+    match crate::fs::open_path(name, flags) {
+        Ok(f) => crate::fs::fd_alloc(f) as u64,
+        Err(e) => e as u64, // 负 errno（按 Linux ABI 返回 -errno）
     }
 }
 
