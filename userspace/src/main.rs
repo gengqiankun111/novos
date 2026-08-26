@@ -34,6 +34,7 @@ const SYS_GETPID: u64 = 39;
 const SYS_WAITPID: u64 = 61;
 const SYS_UNAME: u64 = 63;
 const SYS_SETHOSTNAME: u64 = 170;
+const SYS_CGROUP_STAT: u64 = 500;
 const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 
@@ -230,12 +231,26 @@ fn print_hostname() {
     print(unsafe { core::str::from_utf8_unchecked(&u[65..i]) });
 }
 
+/// 打印当前 cgroup 统计 { pids, mem }。
+fn print_cg(label: &str) {
+    let mut st = [0u8; 16];
+    syscall3(SYS_CGROUP_STAT, st.as_mut_ptr() as u64, 0, 0);
+    let pids = u64::from_le_bytes([st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7]]);
+    let mem = u64::from_le_bytes([st[8], st[9], st[10], st[11], st[12], st[13], st[14], st[15]]);
+    print(label);
+    print("pids=");
+    print_u64(pids);
+    print(" mem=");
+    print_u64(mem);
+    print("\n");
+}
+
 /// 内建命令执行。
 fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -585,6 +600,29 @@ fn exec(cmd: &[u8]) {
                 print("utstest: parent hostname after=");
                 print_hostname();
                 print("\n");
+            }
+        }
+        b"cgtest" => {
+            // M6-切片3：cgroup pids + 内存记账——fork 子进程后统计配对无泄漏。
+            print_cg("cgtest: root ");
+            let r = syscall3(SYS_FORK, 0, 0, 0);
+            if r == 0 {
+                // 子：pids +1，mem +64KB（子内核栈记账）
+                print_cg("cgtest: child ");
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                // 父：等子退出回收，统计应回到基线（无泄漏）
+                let mut w = 0u64;
+                let mut n = 0u32;
+                while w == 0 && n < 200000 {
+                    w = syscall3(SYS_WAITPID, r, 0, 0);
+                    n += 1;
+                    let mut s = 0u32;
+                    while s < 50000 {
+                        s += 1;
+                    }
+                }
+                print_cg("cgtest: after reap ");
             }
         }
         b"exit" => {

@@ -45,7 +45,7 @@ try {
     $s.ReadTimeout = 300
     # drain boot-time output already arrived
     while ($s.DataAvailable) { [void]$s.ReadByte() }
-    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`nls`nversion`n"
+    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`nls`nversion`n"
     $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
     $s.Write($bytes, 0, $bytes.Length)
     $s.Flush()

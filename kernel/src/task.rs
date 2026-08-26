@@ -65,6 +65,8 @@ pub struct Task {
     pub pid_ns: u32,
     /// uts namespace id（0 = 根）。
     pub uts_ns: u32,
+    /// cgroup id（0 = 根；pids/内存记账用）。
+    pub cgroup: u32,
 }
 
 impl Task {
@@ -84,6 +86,7 @@ impl Task {
             pid: 0,
             pid_ns: 0,
             uts_ns: 0,
+            cgroup: 0,
         }
     }
 }
@@ -224,6 +227,7 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             pid: 0,
             pid_ns: 0,
             uts_ns: 0,
+            cgroup: 0,
         };
         // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
         // SAFETY: 单核；cli 保护树操作。
@@ -476,6 +480,7 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         pid: 0,
         pid_ns: 0,
         uts_ns: 0,
+        cgroup: 0,
     };
     // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -614,6 +619,45 @@ pub fn gethostname() -> &'static [u8] {
     }
 }
 
+// ---- cgroup v2 简化（M6-切片3）----
+
+/// cgroup 表：每项 { pids, 记账内存 }（0 号根）。
+static mut CGROUP_TASKS: [u32; 8] = [1, 0, 0, 0, 0, 0, 0, 0];
+static mut CGROUP_MEM: [u64; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+
+/// 当前任务 cgroup id。
+pub fn current_cgroup() -> u32 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[CURRENT].cgroup }
+}
+
+/// 读 cgroup 统计（{ pids, mem }，供 syscall 填回用户缓冲）。
+pub fn cgroup_stat(cg: u32) -> (u64, u64) {
+    let cg = (cg as usize) & 7;
+    // SAFETY: 单核读。
+    unsafe { (CGROUP_TASKS[cg] as u64, CGROUP_MEM[cg]) }
+}
+
+/// fork 记账：子入父 cgroup，pids+1，子内核栈 64KB 计入 cgroup 内存。
+fn cgroup_charge(cg: u32) {
+    let cg = (cg as usize) & 7;
+    // SAFETY: 单核写。
+    unsafe {
+        CGROUP_TASKS[cg] += 1;
+        CGROUP_MEM[cg] += STACK_SIZE as u64;
+    }
+}
+
+/// 回收记账：pids-1，内存-64KB（与 charge 配对，无泄漏）。
+fn cgroup_uncharge(cg: u32) {
+    let cg = (cg as usize) & 7;
+    // SAFETY: 单核写。
+    unsafe {
+        CGROUP_TASKS[cg] = CGROUP_TASKS[cg].saturating_sub(1);
+        CGROUP_MEM[cg] = CGROUP_MEM[cg].saturating_sub(STACK_SIZE as u64);
+    }
+}
+
 /// 分配一个空闲任务槽（优先复用已回收槽，其次追加）。
 fn alloc_task_slot() -> Option<usize> {
     // SAFETY: 单核。
@@ -678,6 +722,10 @@ pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: 
         TASKS[cur].uts_ns
     };
 
+    // cgroup：子继承父 cgroup（Linux 语义），pids/内存记账
+    let cg = TASKS[cur].cgroup;
+    cgroup_charge(cg);
+
     TASKS[cid] = Task {
         name: "user-child",
         state: TaskState::Ready,
@@ -693,6 +741,7 @@ pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: 
         pid,
         pid_ns,
         uts_ns,
+        cgroup: cg,
     };
     // 子任务入 CFS 就绪树（同 vruntime 起点）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -708,13 +757,14 @@ pub fn waitpid_nb(pid: usize) -> i64 {
     // SAFETY: 单核。
     unsafe {
         if TASKS[pid].state == TaskState::Exited {
-            // 释放子内核栈（槽可复用）
+            // 释放子内核栈（槽可复用）并归还 cgroup 记账
             if !TASKS[pid].stack.is_null() {
                 let layout =
                     core::alloc::Layout::from_size_align(STACK_SIZE, 4096).unwrap();
                 alloc::alloc::dealloc(TASKS[pid].stack, layout);
                 TASKS[pid].stack = ptr::null_mut();
             }
+            cgroup_uncharge(TASKS[pid].cgroup);
             TASKS[pid].state = TaskState::Idle;
             pid as i64
         } else {
