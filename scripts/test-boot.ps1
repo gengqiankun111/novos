@@ -90,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -217,7 +217,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -244,7 +244,12 @@ if ($Mode -eq "boot") {
         "httptest: accepted fd=",      # M5-切片5：accept 取到连接
         "httptest: epoll wake",        # M5-切片5：epoll_wait 就绪
         "httptest: got request",       # M5-切片5：收到 HTTP 请求
-        "httptest: served"             # M5-切片5：回发响应成功
+        "httptest: served",            # M5-切片5：回发响应成功
+        "forktest: parent getpid=1",   # M6-切片1：根 ns init pid=1
+        "forktest: child A getpid=2",  # M6-切片1：fork 子进程根 ns pid=2
+        "forktest: waitpid A reaped=", # M6-切片1：waitpid 回收子 A
+        "forktest: child B getpid=1 (new pid ns)", # M6-切片1：CLONE_NEWPID 子进程 pid=1
+        "forktest: waitpid B reaped="  # M6-切片1：waitpid 回收子 B
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )

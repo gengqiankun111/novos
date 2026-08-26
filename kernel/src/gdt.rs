@@ -58,3 +58,22 @@ pub fn init() {
 pub fn info() -> &'static str {
     "gdt(user/tss)/ltr ready"
 }
+
+/// 更新 TSS.RSP0（用户态中断/异常切内核时的栈顶）。
+///
+/// M6-切片1：多用户任务各自内核栈，任务切换时更新。
+///
+/// # Safety
+/// 单核写 TSS 字段。
+pub fn set_rsp0(v: usize) {
+    // SAFETY: 单核写静态 TSS 字段。
+    unsafe {
+        let p = core::ptr::addr_of!(tss_rsp0) as *mut u64;
+        core::ptr::write_volatile(p, v as u64);
+    }
+}
+
+/// task 0（init/shell）使用的内核栈顶（固定 syscall 栈）。
+pub fn init_rsp0() -> usize {
+    core::ptr::addr_of!(syscall_stack_top) as usize
+}

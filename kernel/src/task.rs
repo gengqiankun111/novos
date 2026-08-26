@@ -57,6 +57,12 @@ pub struct Task {
     pub run_ticks: u64,
     /// 是否在 runqueue 红黑树中。
     pub in_rq: bool,
+    /// 用户页表根（CR3 值；用户任务有效，0 = 内核任务）。
+    pub cr3: usize,
+    /// pid（ns 内编号）。
+    pub pid: u32,
+    /// pid namespace id（0 = 根）。
+    pub pid_ns: u32,
 }
 
 impl Task {
@@ -72,6 +78,9 @@ impl Task {
             vruntime: 0,
             run_ticks: 0,
             in_rq: false,
+            cr3: 0,
+            pid: 0,
+            pid_ns: 0,
         }
     }
 }
@@ -208,6 +217,9 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             vruntime: 0,
             run_ticks: 0,
             in_rq: false,
+            cr3: 0,
+            pid: 0,
+            pid_ns: 0,
         };
         // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
         // SAFETY: 单核；cli 保护树操作。
@@ -290,6 +302,21 @@ pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
     CURRENT = next;
     if next != 0 {
         TASKS[next].state = TaskState::Running;
+    }
+    // M6-切片1：切到不同任务时更新 TSS.RSP0（用户态中断入口栈）与 CR3（用户页表）。
+    // task 0（init/shell）用固定 syscall 栈；fork 出的用户任务用各自内核栈。
+    if next != cur {
+        let rsp0 = if next == 0 {
+            crate::gdt::init_rsp0()
+        } else {
+            TASKS[next].stack as usize + STACK_SIZE
+        };
+        crate::gdt::set_rsp0(rsp0);
+        let cr3 = TASKS[next].cr3;
+        if cr3 != 0 {
+            // SAFETY: CR3 切换为特权指令；目标为用户进程页表（含内核恒等映射）。
+            core::arch::asm!("mov cr3, {0}", in(reg) cr3, options(nostack, nomem));
+        }
     }
     TASKS[next].ctx_rsp as *mut ExceptionFrame
 }
@@ -441,6 +468,9 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         vruntime: TASKS[cur].vruntime,
         run_ticks: 0,
         in_rq: false,
+        cr3: 0,
+        pid: 0,
+        pid_ns: 0,
     };
     // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -459,6 +489,9 @@ pub fn exit() {
         let cur = CURRENT;
         crate::vmm::release_as(cur);
         TASKS[cur].state = TaskState::Exited;
+        // M6-切片1：用户子进程从 syscall（IF=0）退出，须先开中断，
+        // 否则 hlt 不会被 PIT 唤醒，系统卡死。
+        crate::sync::sti();
         // 永不返回；不再被调度
         loop {
             core::arch::asm!("hlt", options(nomem, nostack));
@@ -475,5 +508,157 @@ pub fn waitpid(pid: usize) {
             return;
         }
         sleep_ticks(1);
+    }
+}
+
+// ---- 用户态 fork / pid namespace（M6-切片1）----
+
+/// 当前任务的 pid（ns 内编号）。
+pub fn current_pid() -> u32 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[CURRENT].pid }
+}
+
+/// 登记当前任务的下次恢复帧（fork 子先执行时父帧）。
+pub fn save_ctx(frame: usize) {
+    // SAFETY: 单核。
+    unsafe { TASKS[CURRENT].ctx_rsp = frame }
+}
+
+/// 设置当前运行任务（fork 子先执行时切到子任务）。
+pub fn set_current(id: usize) {
+    // SAFETY: 单核。
+    unsafe { CURRENT = id }
+}
+
+/// 任务 ctx_rsp（fork 返回子帧用）。
+pub fn task_ctx(id: usize) -> usize {
+    // SAFETY: 单核读。
+    unsafe { TASKS[id].ctx_rsp }
+}
+
+/// 任务内核栈顶（fork 子先执行时切换 tss_rsp0 用）。
+pub fn task_kstack_top(id: usize) -> usize {
+    // SAFETY: 单核读。
+    unsafe {
+        if id == 0 {
+            crate::gdt::init_rsp0()
+        } else {
+            TASKS[id].stack as usize + STACK_SIZE
+        }
+    }
+}
+
+/// 注册用户 shell 的 CR3 与根 pid（task 0 进入 ring3 前调用）。
+pub fn register_user_task(cr3: usize) {
+    // SAFETY: 单核。
+    unsafe {
+        TASKS[0].cr3 = cr3;
+        TASKS[0].pid = 1; // 根 ns 的 init（pid 1）
+        TASKS[0].pid_ns = 0;
+    }
+}
+
+/// pid namespace 表：ns id → 下一个可分配 pid（0 号固定根 ns）。
+static mut NS_NEXT_PID: [u32; 16] = [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+static mut NEXT_NS: u32 = 1;
+
+/// 分配一个空闲任务槽（优先复用已回收槽，其次追加）。
+fn alloc_task_slot() -> Option<usize> {
+    // SAFETY: 单核。
+    unsafe {
+        for i in 1..MAX_TASKS {
+            if TASKS[i].state == TaskState::Idle {
+                return Some(i);
+            }
+        }
+        if TASK_COUNT < MAX_TASKS {
+            let cid = TASK_COUNT;
+            TASK_COUNT += 1;
+            return Some(cid);
+        }
+        None
+    }
+}
+
+/// 用户态 fork/clone：复制当前用户上下文到新任务（子返回 0），
+/// 子任务经调度器（PIT 抢占）随后在用户态继续执行。
+///
+/// `flags` 支持 CLONE_NEWPID（0x20000000）：子进入新 pid ns，pid = 1。
+///
+/// # Safety
+/// 由 syscall 处理器调用；`frame` 为当前 syscall 的用户上下文（固定 syscall 栈上）。
+pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: u32) -> i64 {
+    let cur = CURRENT;
+    let cid = match alloc_task_slot() {
+        Some(c) => c,
+        None => return -1,
+    };
+    // 子内核栈：PIT 在用户态抢占时经 TSS.RSP0 使用
+    let layout = core::alloc::Layout::from_size_align(STACK_SIZE, 4096).unwrap();
+    let cstack = alloc::alloc::alloc(layout);
+    if cstack.is_null() {
+        return -1;
+    }
+    // 子初始帧 = 父 syscall 帧拷贝（用户上下文一致，rax 置 0 = 子侧 fork 返回 0）
+    let frame_ptr = (cstack as usize + STACK_SIZE - core::mem::size_of::<crate::interrupts::ExceptionFrame>())
+        & !15usize;
+    let dst = &mut *(frame_ptr as *mut crate::interrupts::ExceptionFrame);
+    *dst = *frame;
+    dst.rax = 0;
+
+    // pid namespace：CLONE_NEWPID → 新 ns 且子 pid=1；否则沿用父 ns 顺序号
+    let (pid, pid_ns) = if flags & 0x2000_0000 != 0 {
+        let ns = NEXT_NS;
+        NEXT_NS = NEXT_NS.wrapping_add(1) & 0xF;
+        (1u32, ns)
+    } else {
+        let ns = TASKS[cur].pid_ns;
+        let pid = NS_NEXT_PID[ns as usize];
+        NS_NEXT_PID[ns as usize] = pid.wrapping_add(1);
+        (pid, ns)
+    };
+
+    TASKS[cid] = Task {
+        name: "user-child",
+        state: TaskState::Ready,
+        ctx_rsp: frame_ptr,
+        stack: cstack,
+        sleep_until: 0,
+        base_prio: TASKS[cur].base_prio,
+        effective_prio: TASKS[cur].effective_prio,
+        vruntime: TASKS[cur].vruntime,
+        run_ticks: 0,
+        in_rq: false,
+        cr3: TASKS[cur].cr3, // 与父共享用户页表（内存隔离留后续切片）
+        pid,
+        pid_ns,
+    };
+    // 子任务入 CFS 就绪树（同 vruntime 起点）
+    crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
+    TASKS[cid].in_rq = true;
+    cid as i64 // 父侧返回子任务 id
+}
+
+/// 非阻塞 waitpid：子已 Exited 则回收槽并返回 pid；否则返回 0。
+pub fn waitpid_nb(pid: usize) -> i64 {
+    if pid == 0 || pid >= MAX_TASKS {
+        return -1;
+    }
+    // SAFETY: 单核。
+    unsafe {
+        if TASKS[pid].state == TaskState::Exited {
+            // 释放子内核栈（槽可复用）
+            if !TASKS[pid].stack.is_null() {
+                let layout =
+                    core::alloc::Layout::from_size_align(STACK_SIZE, 4096).unwrap();
+                alloc::alloc::dealloc(TASKS[pid].stack, layout);
+                TASKS[pid].stack = ptr::null_mut();
+            }
+            TASKS[pid].state = TaskState::Idle;
+            pid as i64
+        } else {
+            0
+        }
     }
 }

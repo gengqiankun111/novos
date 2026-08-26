@@ -142,7 +142,7 @@ pub fn enter_user(pml4: usize, entry: u64, rsp: u64) -> ! {
             ds = in(reg) USER_DATA_SEL as u64,
             ss = in(reg) USER_DATA_SEL as u64,
             rsp = in(reg) rsp,
-            rflags = in(reg) 0x2u64, // IF=0：关中断，避免 PIT tick 抢占用户态
+            rflags = in(reg) 0x202u64, // IF=1：允许 PIT 抢占用户态（M6 多任务调度）
             cs = in(reg) USER_CODE_SEL as u64,
             rip = in(reg) entry,
             options(noreturn)
