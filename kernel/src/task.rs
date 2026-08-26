@@ -541,6 +541,28 @@ pub fn current_pid() -> u32 {
     unsafe { TASKS[CURRENT].pid }
 }
 
+/// 当前任务的 pid namespace id。
+pub fn current_pid_ns() -> u32 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[CURRENT].pid_ns }
+}
+
+/// 指定 pid ns 内所有任务 pid（M8-切片4：/proc 视图）。
+/// 说明：task 0（init/shell）state 恒为 Idle，但始终存活，需显式包含；
+/// 槽位经 waitpid 回收后复用（TASK_COUNT 不随之增长），故遍历全表。
+pub fn tasks_in_ns(pid_ns: u32) -> alloc::vec::Vec<u32> {
+    // SAFETY: 单核读。
+    unsafe {
+        (0..MAX_TASKS)
+            .filter(|&i| {
+                TASKS[i].pid_ns == pid_ns
+                    && (TASKS[i].state != TaskState::Idle || i == 0)
+            })
+            .map(|i| TASKS[i].pid)
+            .collect()
+    }
+}
+
 /// 登记当前任务的下次恢复帧（fork 子先执行时父帧）。
 pub fn save_ctx(frame: usize) {
     // SAFETY: 单核。

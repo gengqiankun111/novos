@@ -180,6 +180,8 @@ pub enum MountKind {
         lower: Arc<Inode>,
         upper: Arc<Inode>,
     },
+    /// proc（M8-切片4）：pid ns 视图——按当前任务 ns 动态列任务。
+    Proc(Arc<Inode>),
 }
 
 pub struct Mount {
@@ -204,6 +206,7 @@ fn mount_entry(path: &str) -> Option<Mount> {
                 lower: lower.clone(),
                 upper: upper.clone(),
             },
+            MountKind::Proc(r) => MountKind::Proc(r.clone()),
         };
         Mount {
             path: m.path.clone(),
@@ -217,6 +220,7 @@ pub fn mount_lookup(path: &str) -> Option<Arc<Inode>> {
     mount_entry(path).map(|m| match m.kind {
         MountKind::Tmpfs(r) => r,
         MountKind::Overlay { upper, .. } => upper,
+        MountKind::Proc(r) => r,
     })
 }
 
@@ -235,6 +239,28 @@ pub fn mount_fs(target: &str) -> Result<(), i64> {
     MOUNTS.lock().push(Mount {
         path: String::from(target),
         kind: MountKind::Tmpfs(Inode::dir()),
+    });
+    Ok(())
+}
+
+/// /proc 挂载根（M8-切片4：pid ns 视图；按指针相等判定）。
+pub static PROC_ROOT: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| Inode::dir());
+
+/// 挂载 proc 到 target 目录（pid ns 视图）。
+pub fn mount_fs_proc(target: &str) -> Result<(), i64> {
+    if target == "/" || target.is_empty() {
+        return Err(-16i64);
+    }
+    let tgt = resolve(target, false).map_err(|_| -2i64)?;
+    if !tgt.is_dir() {
+        return Err(-20i64);
+    }
+    if mount_entry(target).is_some() {
+        return Err(-16i64);
+    }
+    MOUNTS.lock().push(Mount {
+        path: String::from(target),
+        kind: MountKind::Proc(PROC_ROOT.clone()),
     });
     Ok(())
 }
@@ -307,6 +333,10 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
                 MountKind::Overlay { lower, upper } => {
                     cur = upper.clone();
                     ov = Some((Some(upper), Some(lower)));
+                }
+                MountKind::Proc(root) => {
+                    cur = root;
+                    ov = None;
                 }
             }
             continue;
@@ -727,8 +757,19 @@ fn overlay_merged_children(ino: &Inode) -> Option<Vec<Dentry>> {
     Some(out)
 }
 
-/// 目录可见子项：overlay 走合并视图，否则直接子项。
+/// 目录可见子项：proc 按 pid ns 动态合成；overlay 走合并视图；否则直接子项。
 fn visible_children(ino: &Inode) -> Vec<Dentry> {
+    // M8-切片4：/proc = 当前 pid ns 的任务视图（动态合成）
+    if ino as *const Inode as usize == Arc::as_ptr(&PROC_ROOT) as usize {
+        let ns = crate::task::current_pid_ns();
+        return crate::task::tasks_in_ns(ns)
+            .iter()
+            .map(|p| Dentry {
+                name: alloc::format!("{}", p),
+                inode: Inode::dir(), // /proc/<pid> 均为目录
+            })
+            .collect();
+    }
     if let Some(merged) = overlay_merged_children(ino) {
         return merged;
     }

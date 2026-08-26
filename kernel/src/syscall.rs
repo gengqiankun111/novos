@@ -540,6 +540,8 @@ fn sys_mount(source: u64, target: u64, fstype: u64, _flags: u64, _data: u64) -> 
         .unwrap_or("");
     let r = if fstype_str == "overlay" {
         crate::fs::mount_overlay(&src, &tgt)
+    } else if fstype_str == "proc" {
+        crate::fs::mount_fs_proc(&tgt)
     } else {
         crate::fs::mount_fs(&tgt)
     };
