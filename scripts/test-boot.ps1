@@ -44,7 +44,8 @@ if ($Mode -eq "boot") {
         "Novos-OS M3 userspace shell (init)",
         "virtio-net: io=",                    # M5-切片1：virtio-net 驱动初始化
         "net: arp who-has 10.0.2.2",          # tx：ARP 请求发出
-        "arp: got reply from 10.0.2.2"        # rx：收到网关 ARP 应答（收发回路）
+        "arp: gateway 10.0.2.2",              # rx：学得网关 MAC
+        "icmp: echo reply from 10.0.2.2"      # M5-切片2：IP+ICMP 回路（ping 通）
     )
 } else {
     # shell 模式：socket chardev（无客户端时丢弃输出，须尽早连接）
@@ -129,6 +130,8 @@ if ($Mode -eq "boot") {
         "stat: mode=33188 size=17",  # M4-切片4：tmpfs 文件 stat（0o100644 + 17B）
         "a.txt",                     # ls /mnt：tmpfs 挂载后写入的文件
         "sub/"                       # ls /mnt：tmpfs 内 mkdir
+        # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
+        # 会在客户端连接前丢弃启动早期日志。
     )
 }
 

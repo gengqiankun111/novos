@@ -157,6 +157,8 @@ pub struct VirtioNet {
     txq: Virtq,
     rx_pages: [usize; RX_BUFS],
     tx_next: u16,
+    /// ARP 缓存（M5-切片2：固定 8 项，够网关 + 少量邻居）。
+    arp: [Option<([u8; 4], [u8; 6])>; 8],
 }
 
 // 单核轮询驱动：vring 裸指针仅本 CPU 使用，无跨线程共享。
@@ -201,7 +203,7 @@ impl VirtioNet {
         }
     }
 
-    /// 处理收到的帧（ARP 应答/请求）。
+    /// 处理收到的帧（IPv4 / ARP）。
     fn handle_frame(&mut self, buf: &[u8]) {
         if buf.len() < 14 {
             return;
@@ -213,16 +215,137 @@ impl VirtioNet {
                     self.handle_arp(&buf[14..14 + 28]);
                 }
             }
-            _ => {} // IPv4 解析留 M5-切片2
+            ETH_TYPE_IP => self.handle_ipv4(buf),
+            _ => {}
         }
     }
 
-    /// ARP：请求（op=1）目标为本机 → 回应答；应答（op=2）→ 打印（验证 rx 路径）。
+    /// IPv4：仅处理发给本机的 ICMP。
+    fn handle_ipv4(&mut self, frame: &[u8]) {
+        if frame.len() < 14 + 20 {
+            return;
+        }
+        let ip = &frame[14..];
+        let vhl = ip[0];
+        if vhl >> 4 != 4 {
+            return; // 仅 IPv4
+        }
+        let ihl = ((vhl & 0xF) as usize) * 4;
+        let total_len = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+        if total_len < ihl {
+            return;
+        }
+        let proto = ip[9];
+        let src = [ip[12], ip[13], ip[14], ip[15]];
+        let dst = [ip[16], ip[17], ip[18], ip[19]];
+        if dst != OUR_IP {
+            return;
+        }
+        let payload = &ip[ihl..core::cmp::min(total_len, ip.len())];
+        match proto {
+            1 => self.handle_icmp(payload, src), // ICMP
+            _ => {}
+        }
+    }
+
+    /// ICMP：echo request → reply；echo reply → 打印（验证回路）。
+    fn handle_icmp(&mut self, icmp: &[u8], src_ip: [u8; 4]) {
+        if icmp.len() < 8 {
+            return;
+        }
+        let typ = icmp[0];
+        if typ == 8 {
+            // echo request：回 echo reply
+            let id = u16::from_be_bytes([icmp[4], icmp[5]]);
+            let seq = u16::from_be_bytes([icmp[6], icmp[7]]);
+            let dlen = core::cmp::min(icmp.len() - 8, 64);
+            let mut reply = [0u8; 8 + 64];
+            reply[0] = 0; // echo reply
+            reply[4..6].copy_from_slice(&id.to_be_bytes());
+            reply[6..8].copy_from_slice(&seq.to_be_bytes());
+            reply[8..8 + dlen].copy_from_slice(&icmp[8..8 + dlen]);
+            let cs = checksum(&reply[..8 + dlen]);
+            reply[2..4].copy_from_slice(&cs.to_be_bytes());
+            self.send_ipv4(src_ip, 1, &reply[..8 + dlen]);
+            crate::println!(
+                "icmp: echo req {} -> reply (id={id} seq={seq})",
+                fmt_ip(&src_ip)
+            );
+        } else if typ == 0 {
+            let id = u16::from_be_bytes([icmp[4], icmp[5]]);
+            let seq = u16::from_be_bytes([icmp[6], icmp[7]]);
+            crate::println!(
+                "icmp: echo reply from {} (id={id} seq={seq})",
+                fmt_ip(&src_ip)
+            );
+        }
+    }
+
+    /// 发送 IPv4 包（查 ARP 缓存取目标 MAC）。
+    fn send_ipv4(&mut self, dst_ip: [u8; 4], proto: u8, payload: &[u8]) {
+        let dst_mac = match self.find_arp(&dst_ip) {
+            Some(m) => m,
+            None => {
+                crate::println!("ip: no arp for {}", fmt_ip(&dst_ip));
+                return;
+            }
+        };
+        let mut pkt = [0u8; 20 + 1472];
+        pkt[0] = 0x45; // IPv4, IHL=5
+        let total = 20 + payload.len();
+        pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes()); // total length
+        pkt[8] = 64; // TTL
+        pkt[9] = proto;
+        pkt[12..16].copy_from_slice(&OUR_IP);
+        pkt[16..20].copy_from_slice(&dst_ip);
+        let cs = checksum(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&cs.to_be_bytes()); // header checksum
+        pkt[20..20 + payload.len()].copy_from_slice(payload);
+        self.send_frame(dst_mac, ETH_TYPE_IP, &pkt[..total]);
+    }
+
+    /// 发送 ICMP echo request。
+    fn send_icmp_echo(&mut self, dst_ip: [u8; 4]) {
+        let mut req = [0u8; 8 + 4];
+        req[0] = 8; // echo request
+        req[4..6].copy_from_slice(&0x1234u16.to_be_bytes()); // id
+        req[6..8].copy_from_slice(&1u16.to_be_bytes()); // seq
+        req[8..12].copy_from_slice(b"ping");
+        let cs = checksum(&req);
+        req[2..4].copy_from_slice(&cs.to_be_bytes());
+        self.send_ipv4(dst_ip, 1, &req);
+    }
+
+    // ---- ARP 缓存 ----
+
+    fn find_arp(&self, ip: &[u8; 4]) -> Option<[u8; 6]> {
+        self.arp.iter().find(|e| e.map_or(false, |(i, _)| i == *ip)).and_then(|e| *e).map(|(_, m)| m)
+    }
+
+    fn insert_arp(&mut self, ip: [u8; 4], mac: [u8; 6]) {
+        for e in self.arp.iter_mut() {
+            if e.map_or(false, |(i, _)| i == ip) {
+                *e = Some((ip, mac));
+                return;
+            }
+        }
+        // 空位插入，全满则覆盖第一个
+        if let Some(slot) = self.arp.iter_mut().find(|e| e.is_none()) {
+            *slot = Some((ip, mac));
+        } else {
+            self.arp[0] = Some((ip, mac));
+        }
+    }
+
+    /// ARP：请求（op=1）目标为本机 → 回应答；应答（op=2）→ 缓存 MAC，
+    /// 若是网关则触发 ICMP echo（链式验证 IP 层回路）。
     fn handle_arp(&mut self, arp: &[u8]) {
         let op = u16::from_be_bytes([arp[6], arp[7]]);
         let sender_mac = [arp[8], arp[9], arp[10], arp[11], arp[12], arp[13]];
         let sender_ip = [arp[14], arp[15], arp[16], arp[17]];
         let target_ip = [arp[24], arp[25], arp[26], arp[27]];
+        // 学习 sender（请求与应答都能学到）
+        self.insert_arp(sender_ip, sender_mac);
         if op == 1 && target_ip == OUR_IP {
             let mut reply = [0u8; 28];
             reply[0..2].copy_from_slice(&1u16.to_be_bytes()); // htype 以太网
@@ -242,10 +365,14 @@ impl VirtioNet {
             );
         } else if op == 2 && target_ip == OUR_IP {
             crate::println!(
-                "arp: got reply from {}@{}",
+                "arp: gateway {}@{}",
                 fmt_ip(&sender_ip),
                 fmt_mac(&sender_mac)
             );
+            // 学得网关 MAC → 发 ICMP echo（验证 IP 层）
+            if sender_ip == GATEWAY_IP {
+                self.send_icmp_echo(GATEWAY_IP);
+            }
         }
     }
 
@@ -357,6 +484,23 @@ fn fmt_ip(ip: &[u8; 4]) -> alloc::string::String {
     alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
 }
 
+/// RFC 1071 Internet 校验和（IP/ICMP）。
+fn checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 // ---- 全局设备与初始化 ----
 
 static NET: spin::Lazy<spin::Mutex<VirtioNet>> = spin::Lazy::new(|| {
@@ -403,6 +547,7 @@ unsafe fn init_driver() -> VirtioNet {
         txq,
         rx_pages: [0; RX_BUFS],
         tx_next: RX_BUFS as u16,
+        arp: [None; 8],
     };
     // 预填 rx 描述符（固定 index 0..RX_BUFS）
     for i in 0..RX_BUFS {
