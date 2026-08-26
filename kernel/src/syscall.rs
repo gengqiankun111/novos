@@ -131,7 +131,7 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
     // 子退出后调度器经父帧恢复父进程（父返回子任务 id）。
     if nr == SYS_FORK {
         // SAFETY: f 为当前 syscall 帧（用户上下文），user_fork 仅拷贝不修改。
-        let cid = unsafe { crate::task::user_fork(f, 0) };
+        let cid = unsafe { crate::task::user_fork(f, 0, 0, 0) };
         f.rax = cid as u64; // 父侧返回值
         if cid > 0 {
             // 父帧登记为 ctx_rsp（父 syscall 未完成，保留在其内核栈上）；
@@ -142,8 +142,9 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
             return crate::task::task_ctx(cid as usize) as *mut ExceptionFrame;
         }
     } else if nr == SYS_CLONE {
-        // SAFETY: f 为当前 syscall 帧；flags 取 rdi（Linux clone 第 1 参数）。
-        let cid = unsafe { crate::task::user_fork(f, f.rdi as u32) };
+        // SAFETY: f 为当前 syscall 帧；Linux clone：rdi=flags, rsi=stack,
+        // rdx=parent_tidptr, r10=child_tidptr, r8=tls（M11-切片3）。
+        let cid = unsafe { crate::task::user_fork(f, f.rdi as u32, f.r10, f.r8) };
         f.rax = cid as u64;
         if cid > 0 {
             crate::task::save_ctx(f as *const _ as usize);

@@ -58,6 +58,12 @@ const O_TRUNC: u64 = 0o1000;
 static mut TLS_BUF_A: [u8; 32] = [0; 32];
 static mut TLS_BUF_B: [u8; 32] = [0; 32];
 
+// M11-切片3：clone 测试（CLONE_SETTLS + CLONE_CHILD_CLEARTID）资源
+static mut CLONE_STACK: [u8; 8192] = [0; 8192];
+static mut CLONE_TID: u32 = 0;
+static mut CLONE_TLS: [u8; 32] = [0; 32];
+static mut CLONE_GO: u32 = 0;
+
 /// 通用 syscall（3 参数，Linux x86_64 约定：rax=nr, rdi/rsi/rdx=arg1-3）。
 fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
@@ -266,7 +272,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1486,11 +1492,7 @@ fn exec(cmd: &[u8]) {
                 if rc3 == 0 && cback == cmarker {
                     print("tlstest: child own fs ok\n");
                 }
-                // 忙等若干拍：强制发生 PIT 调度切换，锻炼恢复父 FS base 的路径
-                let mut spin = 0u32;
-                while spin < 2_000_000 {
-                    spin += 1;
-                }
+                // 子退出；父随调度器恢复自己的 FS base（restore_fs_base 路径）
                 syscall3(SYS_EXIT, 0, 0, 0);
             } else {
                 let mut w = 0u64;
@@ -1515,6 +1517,86 @@ fn exec(cmd: &[u8]) {
                     print("tlstest: ctx switch fs restore ok\n");
                 }
                 print("tlstest: reaped=");
+                print_u64(w);
+                print("\n");
+            }
+        }
+        b"clonetest" => {
+            // M11-切片3：clone CLONE_SETTLS + CLONE_CHILD_CLEARTID——pthread 原语。
+            // CLONE_SETTLS：子 FS base 直接取 clone 的 tls 参数；
+            // CLONE_CHILD_CLEARTID：子退出时内核清零 tid。
+            // 调度约束：shell(task 0) 仅在就绪树为空时运行，故子须先阻塞
+            // （futex WAIT(go)）让出 CPU，父唤醒它后再登记自己的等待。
+            let stack_top = unsafe { (core::ptr::addr_of_mut!(CLONE_STACK) as usize + 8192) as u64 };
+            let tid_addr = unsafe { core::ptr::addr_of_mut!(CLONE_TID) as u64 };
+            let tls_addr = unsafe { core::ptr::addr_of_mut!(CLONE_TLS) as u64 };
+            let go_addr = unsafe { core::ptr::addr_of_mut!(CLONE_GO) as u64 };
+            // SAFETY: 单核测试环境，写初值。
+            unsafe {
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(CLONE_TID) as *mut u32, 0xDEAD_0001);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(CLONE_GO) as *mut u32, 0);
+            }
+            let flags: u64 = 0x0008_0000 | 0x0020_0000; // CLONE_SETTLS | CLONE_CHILD_CLEARTID
+            // clone(flags, stack, parent_tidptr=0, child_tidptr=tid, tls)
+            let r = syscall6(SYS_CLONE, flags, stack_top, 0, tid_addr, tls_addr, 0);
+            if r == 0 {
+                // 子：先 futex WAIT(go) 阻塞（让出 CPU），父唤醒后继续
+                syscall3(SYS_FUTEX, go_addr, 0, 0); // WAIT(go, 0)
+                // FS base 应已被 CLONE_SETTLS 设为 tls_addr（不经 ARCH_SET_FS）
+                let mut got: u64 = 0;
+                syscall3(SYS_ARCH_PRCTL, 0x1003, &mut got as *mut u64 as u64, 0);
+                print("clonetest: child get fs=");
+                print_u64(got);
+                print("\n");
+                if got == tls_addr {
+                    print("clonetest: child settls ok\n");
+                }
+                // 经 %fs 写子自己的 TLS 并读回（调度切换时已恢复子 FS base 到 MSR）
+                let m: u64 = 0xCAFE_0000_0000_0001;
+                // SAFETY: FS base 已由调度器恢复为 tls_addr（CLONE_SETTLS）。
+                unsafe {
+                    core::arch::asm!("mov qword ptr fs:[0], {0}", in(reg) m, options(nostack));
+                }
+                let mut b: u64 = 0;
+                // SAFETY: 同上。
+                unsafe {
+                    core::arch::asm!("mov {0}, qword ptr fs:[0]", out(reg) b, options(nostack));
+                }
+                print("clonetest: child fs back=");
+                print_u64(b);
+                print("\n");
+                if b == m {
+                    print("clonetest: child tls rw ok\n");
+                }
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                // 父：子已阻塞在 WAIT(go) → 置 go 并 WAKE，让子做 TLS 验证
+                // SAFETY: 单核测试环境。
+                unsafe {
+                    core::ptr::write_volatile(core::ptr::addr_of_mut!(CLONE_GO) as *mut u32, 1);
+                }
+                syscall3(SYS_FUTEX, go_addr, 1, 1); // WAKE(go, 1)
+                // 等子退出（waitpid 轮询）；退出时内核清零 tid（CLONE_CHILD_CLEARTID）
+                let mut w = 0u64;
+                let mut n = 0u32;
+                while w == 0 && n < 200000 {
+                    w = syscall3(SYS_WAITPID, r, 0, 0);
+                    n += 1;
+                    let mut s = 0u32;
+                    while s < 50000 {
+                        s += 1;
+                    }
+                }
+                // SAFETY: 读清零后的 tid。
+                let cleared =
+                    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CLONE_TID) as *const u32) };
+                print("clonetest: tid after child exit=");
+                print_u64(cleared as u64);
+                print("\n");
+                if cleared == 0 {
+                    print("clonetest: child cleartid ok\n");
+                }
+                print("clonetest: reaped=");
                 print_u64(w);
                 print("\n");
             }

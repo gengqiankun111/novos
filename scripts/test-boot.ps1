@@ -103,7 +103,7 @@ if ($Mode -eq "boot") {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
         # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
         # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`n"
         foreach ($one in ($cmd -split "`n")) {
             if ($one.Length -eq 0) { continue }
             $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
@@ -277,7 +277,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -378,7 +378,12 @@ if ($Mode -eq "boot") {
         "tlstest: get fs ok",                 # M11-切片2：回读 base 一致
         "tlstest: child own fs ok",           # M11-切片2：子任务自己的 TLS 可用
         "tlstest: ctx switch fs restore ok",  # M11-切片2：调度切换恢复父 FS base
-        "tlstest: reaped="                    # M11-切片2：子进程回收
+        "tlstest: reaped=",                   # M11-切片2：子进程回收
+        "clonetest: child settls ok",         # M11-切片3：CLONE_SETTLS 生效（子 FS base = tls 参数）
+        "clonetest: child tls rw ok",         # M11-切片3：子经 %fs 访问自己的 TLS
+        "clonetest: tid after child exit=0",  # M11-切片3：CLONE_CHILD_CLEARTID 清零 tid
+        "clonetest: child cleartid ok",       # M11-切片3：tid 清零校验通过
+        "clonetest: reaped="                  # M11-切片3：子任务回收
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
