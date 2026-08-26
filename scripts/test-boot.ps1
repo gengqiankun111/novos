@@ -55,7 +55,8 @@ if ($Mode -eq "boot") {
         "net: arp who-has 10.0.2.2",          # tx：ARP 请求发出
         "arp: gateway 10.0.2.2",              # rx：学得网关 MAC
         "icmp: echo reply from 10.0.2.2",      # M5-切片2：IP+ICMP 回路（ping 通）
-        "block: virtio-blk up"                 # M10-切片1：virtio-blk 驱动探测成功
+        "block: virtio-blk up",                 # M10-切片1：virtio-blk 驱动探测成功
+        "ext4: "                                # M10-切片2：ext4-lite 初始化（格式化/超块）
     )
 } else {
     # shell 模式：socket chardev（无客户端时丢弃输出，须尽早连接）
@@ -100,7 +101,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -270,7 +271,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -351,7 +352,14 @@ if ($Mode -eq "boot") {
         "blktest: write rc=0",                # M10-切片1：BIO 写扇区成功
         "blktest: read rc=0 data=blk-hello-novos", # M10-切片1：读回一致
         "blktest: sector roundtrip ok",       # M10-切片1：扇区往返验证
-        "blktest: fresh sector zero ok"       # M10-切片1：未写扇区全零（真实介质）
+        "blktest: fresh sector zero ok",      # M10-切片1：未写扇区全零（真实介质）
+        "ext4test: create rc=0",              # M10-切片2：ext4-lite 创建文件
+        "ext4test: write rc=0",               # M10-切片2：写入 Page Cache
+        "ext4test: read rc=12 data=disk-forever", # M10-切片2：读回一致
+        "ext4test: sync rc=0",                # M10-切片2：脏块落盘
+        "ext4test: persisted across reboot",  # M10-切片2：清缓存（模拟重启）后仍读回
+        "ext4test: unlink rc=0",              # M10-切片2：删除文件
+        "ext4test: list after unlink: persist.txt 12" # M10-切片2：删除后列表只剩 persist.txt
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )

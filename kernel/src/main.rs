@@ -92,6 +92,8 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
     novos_kernel::net::init();
     // M10 切片1：virtio-blk 驱动 + BIO（同步 I/O + 错误重试）
     novos_kernel::block::init();
+    // M10 切片2：ext4-lite 持久化文件系统 + Page Cache（写回/清缓存模拟重启）
+    novos_kernel::ext4::init();
     // M4 切片1/2：ELF 加载器 → 进入用户态 init/shell（不返回）。
     println!("m3: loading embedded userspace init (ELF)...");
     elf::load_and_run();

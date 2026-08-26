@@ -12,6 +12,7 @@ core::arch::global_asm!(include_str!("boot.asm"), options(att_syntax));
 pub mod dcache;
 pub mod block;
 pub mod elf;
+pub mod ext4;
 pub mod fs;
 pub mod gdt;
 pub mod interrupts;
