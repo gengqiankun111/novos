@@ -170,17 +170,79 @@ impl File {
     }
 }
 
+/// 挂载点：挂载路径 → 独立文件系统根（M4-切片4：tmpfs 简化实现）。
+pub struct Mount {
+    pub path: String,
+    pub root: Arc<Inode>,
+}
+
+/// 挂载表（根 ramfs 之外挂载的 tmpfs）。
+static MOUNTS: spin::Lazy<Mutex<Vec<Mount>>> = spin::Lazy::new(|| Mutex::new(Vec::new()));
+
+/// 查找挂载点根 inode（精确路径匹配）。
+pub fn mount_lookup(path: &str) -> Option<Arc<Inode>> {
+    MOUNTS
+        .lock()
+        .iter()
+        .find(|m| m.path == path)
+        .map(|m| m.root.clone())
+}
+
+/// 挂载新 tmpfs 根到 target 目录（简化：source/fstype 忽略）。
+pub fn mount_fs(target: &str) -> Result<(), i64> {
+    if target == "/" || target.is_empty() {
+        return Err(-16i64); // EBUSY：根目录不可挂
+    }
+    let tgt = resolve(target, false).map_err(|_| -2i64)?; // ENOENT
+    if !tgt.is_dir() {
+        return Err(-20i64); // ENOTDIR
+    }
+    if mount_lookup(target).is_some() {
+        return Err(-16i64); // EBUSY：已挂载
+    }
+    MOUNTS.lock().push(Mount {
+        path: String::from(target),
+        root: Inode::dir(),
+    });
+    Ok(())
+}
+
+/// 取路径 inode 元数据：(inode号, mode, nlink, size)。
+pub fn stat_path(path: &str) -> Result<(u64, u32, u64, u64), i64> {
+    let ino = resolve(path, false).map_err(|_| -2i64)?; // ENOENT
+    Ok((
+        Arc::as_ptr(&ino) as usize as u64,
+        ino.mode,
+        ino.nlink as u64,
+        ino.size() as u64,
+    ))
+}
+
 /// 路径解析：从根逐组件查找（仅绝对路径；"." 跳过，".." 简化不支持）。
 /// 先查 dcache（FNV-1a 哈希，M4-切片3），miss 再扫父目录子项并回填。
+/// 每深入一层检查挂载点（M4-切片4），命中则切换到挂载根子树。
 /// `create_last`：末组件不存在时创建文件（仅当父目录存在）。
 fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     if !path.starts_with('/') {
         return Err(());
     }
     let mut cur = ROOT.clone();
+    let mut acc = String::from("/"); // 累积路径（挂载点匹配）
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     for (i, comp) in comps.iter().enumerate() {
         let last = i == comps.len() - 1;
+        // 累积路径
+        if acc == "/" {
+            acc = String::from(*comp);
+        } else {
+            acc.push('/');
+            acc.push_str(comp);
+        }
+        // 挂载点：命中则切换到挂载根，后续组件在挂载子树内解析
+        if let Some(root) = mount_lookup(&acc) {
+            cur = root;
+            continue;
+        }
         let parent_ptr = Arc::as_ptr(&cur) as usize;
         // dcache 快查
         if let Some(ino) = crate::dcache::dcache_lookup(parent_ptr, comp) {

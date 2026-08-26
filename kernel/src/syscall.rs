@@ -19,11 +19,13 @@ pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
+pub const SYS_STAT: u64 = 4;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_MOUNT: u64 = 165;
 pub const SYS_GETDENTS64: u64 = 217;
 
 /// boot.asm 导出的 syscall 入口。
@@ -98,9 +100,11 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_READ => sys_read(a1, a2, a3),
         SYS_OPEN => sys_open(a1, a2, a3),
         SYS_CLOSE => sys_close(a1),
+        SYS_STAT => sys_stat(a1, a2),
         SYS_MKDIR => sys_mkdir(a1, a2),
         SYS_RMDIR => sys_rmdir(a1),
         SYS_UNLINK => sys_unlink(a1),
+        SYS_MOUNT => sys_mount(a1, a2, a3, a4, a5),
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
         SYS_EXIT => sys_exit(a1),
@@ -248,6 +252,43 @@ fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
             _ => (-1i64) as u64, // ENOTDIR
         },
         None => (-1i64) as u64, // EBADF
+    }
+}
+
+/// stat(path, buf)：填 Linux x86_64 stat 关键字段（st_ino/nlink/mode/size）。
+fn sys_stat(path: u64, buf: u64) -> u64 {
+    let name = match copy_path(path) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let (ino, mode, nlink, size) = match crate::fs::stat_path(&name) {
+        Ok(v) => v,
+        Err(e) => return e as u64,
+    };
+    let mut tmp = [0u8; 144];
+    tmp[8..16].copy_from_slice(&ino.to_le_bytes()); // st_ino
+    tmp[16..24].copy_from_slice(&nlink.to_le_bytes()); // st_nlink
+    tmp[24..28].copy_from_slice(&(mode as u32).to_le_bytes()); // st_mode
+    tmp[48..56].copy_from_slice(&(size as i64).to_le_bytes()); // st_size
+    // SAFETY: buf 为用户态地址（144 字节可写）。
+    unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, 144) };
+    0
+}
+
+/// mount(source, target, fstype, flags, data)：M4-切片4 简化——忽略 source/fstype，
+/// 挂载新 tmpfs 根到 target。
+fn sys_mount(source: u64, target: u64, _fstype: u64, _flags: u64, _data: u64) -> u64 {
+    let _src = match copy_path(source) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let tgt = match copy_path(target) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match crate::fs::mount_fs(&tgt) {
+        Ok(()) => 0,
+        Err(e) => e as u64,
     }
 }
 

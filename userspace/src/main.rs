@@ -13,10 +13,12 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_STAT: u64 = 4;
 const SYS_MKDIR: u64 = 83;
 const SYS_RMDIR: u64 = 84;
 const SYS_UNLINK: u64 = 87;
 const SYS_EXIT: u64 = 60;
+const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 
 // open flags（Linux O_*）
@@ -34,6 +36,27 @@ fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
             in("rdi") a1,
             in("rsi") a2,
             in("rdx") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    ret
+}
+
+/// 通用 syscall（5 参数，arg4/arg5 走 r10/r8）。
+fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    let ret: u64;
+    // SAFETY: syscall 指令为 x86_64 标准接口；rcx/r11 被 CPU 覆盖。
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack)
@@ -96,6 +119,28 @@ fn path_arg(cmd: &[u8], start: usize) -> [u8; 128] {
     p
 }
 
+/// 文件写读往返（M4-切片1/4 验收）：创建 → 写入 → 读回验证。
+fn file_roundtrip(p: &[u8]) {
+    let fd = syscall3(SYS_OPEN, p.as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+    if (fd as i64) < 0 {
+        print("fstest: create failed rc=");
+        print_u64(fd);
+        print("\n");
+        return;
+    }
+    let msg = b"hello from ramfs\n";
+    syscall3(SYS_WRITE, fd, msg.as_ptr() as u64, msg.len() as u64);
+    syscall3(SYS_CLOSE, fd, 0, 0);
+    let fd2 = syscall3(SYS_OPEN, p.as_ptr() as u64, 0, 0);
+    let mut buf = [0u8; 64];
+    let n = syscall3(SYS_READ, fd2, buf.as_mut_ptr() as u64, 64);
+    print("fstest: read ");
+    print_u64(n);
+    print("B: ");
+    print(unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) });
+    syscall3(SYS_CLOSE, fd2, 0, 0);
+}
+
 /// 枚举目录并打印（Linux dirent64 格式，目录加 "/" 后缀；循环读至 EOF）。
 fn list_dir(p: &[u8]) {
     let fd = syscall3(SYS_OPEN, p.as_ptr() as u64, 0, 0);
@@ -140,7 +185,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | version | fdtest | fstest | dtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -163,27 +208,11 @@ fn exec(cmd: &[u8]) {
             }
         }
         b"fstest" => {
-            // M4 切片1：ramfs 创建文件 → 写入 → 读回验证
-            let path = b"/etc/motd\0";
-            let fd = syscall3(SYS_OPEN, path.as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
-            if (fd as i64) < 0 {
-                print("fstest: create failed rc=");
-                print_u64(fd);
-                print("\n");
-            } else {
-                let msg = b"hello from ramfs\n";
-                syscall3(SYS_WRITE, fd, msg.as_ptr() as u64, msg.len() as u64);
-                syscall3(SYS_CLOSE, fd, 0, 0);
-                // 读回
-                let fd2 = syscall3(SYS_OPEN, path.as_ptr() as u64, 0, 0);
-                let mut buf = [0u8; 64];
-                let n = syscall3(SYS_READ, fd2, buf.as_mut_ptr() as u64, 64);
-                print("fstest: read ");
-                print_u64(n);
-                print("B: ");
-                print(unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) });
-                syscall3(SYS_CLOSE, fd2, 0, 0);
-            }
+            file_roundtrip(b"/etc/motd\0");
+        }
+        _ if cmd.starts_with(b"fstest ") => {
+            let p = path_arg(cmd, 7);
+            file_roundtrip(&p);
         }
         b"dtest" => {
             // M4-切片3：dcache shrink 验收——创建 1000 个文件触发回收
@@ -248,6 +277,36 @@ fn exec(cmd: &[u8]) {
             if rc != 0 {
                 print("mkdir: rc=");
                 print_u64(rc);
+                print("\n");
+            }
+        }
+        _ if cmd.starts_with(b"mount ") => {
+            // mount tmpfs 到目标目录（M4-切片4）
+            let p = path_arg(cmd, 6);
+            let rc = syscall5(SYS_MOUNT, b"tmpfs\0".as_ptr() as u64, p.as_ptr() as u64, 0, 0, 0);
+            if rc != 0 {
+                print("mount: rc=");
+                print_u64(rc);
+                print("\n");
+            }
+        }
+        _ if cmd.starts_with(b"stat ") => {
+            let p = path_arg(cmd, 5);
+            let mut buf = [0u8; 144];
+            let rc = syscall3(SYS_STAT, p.as_ptr() as u64, buf.as_mut_ptr() as u64, 0);
+            if rc != 0 {
+                print("stat: rc=");
+                print_u64(rc);
+                print("\n");
+            } else {
+                let mode = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+                let size = i64::from_le_bytes([
+                    buf[48], buf[49], buf[50], buf[51], buf[52], buf[53], buf[54], buf[55],
+                ]);
+                print("stat: mode=");
+                print_u64(mode as u64);
+                print(" size=");
+                print_u64(size as u64);
                 print("\n");
             }
         }

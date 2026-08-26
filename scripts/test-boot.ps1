@@ -74,14 +74,14 @@ if ($Mode -eq "boot") {
     $output = ""
     try {
         $s = $c.GetStream()
-        $s.ReadTimeout = 300
+        $s.ReadTimeout = 500
         $sb = New-Object System.Text.StringBuilder
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
-        Start-Sleep -Milliseconds 1500
+        Start-Sleep -Milliseconds 2500
         while ($true) {
             try { $b = $s.ReadByte() } catch { break }
             if ($b -lt 0) { break }
@@ -107,7 +107,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | version | fdtest | fstest | dtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -118,7 +118,10 @@ if ($Mode -eq "boot") {
         "hello from ramfs",          # cat /etc/motd 输出
         "dcache: shrink",            # M4-切片3：1000 文件触发回收
         "dtest: created 1000 files", # dtest 完成
-        "f999"                       # ls /dtest 输出（完整枚举到末项）
+        "f999",                      # ls /dtest 输出（完整枚举到末项）
+        "stat: mode=33188 size=17",  # M4-切片4：tmpfs 文件 stat（0o100644 + 17B）
+        "a.txt",                     # ls /mnt：tmpfs 挂载后写入的文件
+        "sub/"                       # ls /mnt：tmpfs 内 mkdir
     )
 }
 
