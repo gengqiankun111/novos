@@ -25,6 +25,9 @@ const SYS_SENDTO: u64 = 44;
 const SYS_RECVFROM: u64 = 45;
 const SYS_BIND: u64 = 49;
 const SYS_LISTEN: u64 = 50;
+const SYS_EPOLL_CREATE: u64 = 213;
+const SYS_EPOLL_WAIT: u64 = 232;
+const SYS_EPOLL_CTL: u64 = 233;
 const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 
@@ -214,7 +217,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -395,6 +398,77 @@ fn exec(cmd: &[u8]) {
                 print_u64(n);
                 print("\n");
                 syscall3(SYS_CLOSE, afd, 0, 0);
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        b"httptest" => {
+            // M5-切片5：HTTP 服务——hostfwd(tcp:80) 下宿主 GET 请求，
+            // epoll 等连接可读后读请求并回 HTTP 200。
+            let fd = syscall3(SYS_SOCKET, 2, 1, 0); // AF_INET, SOCK_STREAM
+            if (fd as i64) < 0 {
+                print("httptest: socket failed\n");
+            } else {
+                let mut sa = [0u8; 16];
+                sa[0..2].copy_from_slice(&2u16.to_le_bytes());
+                sa[2..4].copy_from_slice(&80u16.to_be_bytes());
+                syscall3(SYS_BIND, fd, sa.as_ptr() as u64, 16);
+                syscall3(SYS_LISTEN, fd, 4, 0);
+                print("httptest: listening on 80\n");
+                // accept：非阻塞自旋等宿主连接
+                let mut afd: u64 = 0;
+                while afd == 0 {
+                    afd = syscall3(SYS_ACCEPT, fd, 0, 0);
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                }
+                print("httptest: accepted fd=");
+                print_u64(afd);
+                print("\n");
+                // epoll：注册 afd 的 EPOLLIN，轮询等数据
+                let epfd = syscall3(SYS_EPOLL_CREATE, 0, 0, 0);
+                let mut ev = [0u8; 12];
+                ev[0..4].copy_from_slice(&1u32.to_le_bytes()); // EPOLLIN=1
+                syscall5(SYS_EPOLL_CTL, epfd, 1, afd, ev.as_ptr() as u64, 0); // ADD
+                print("httptest: epoll waiting\n");
+                let mut evout = [0u8; 12];
+                let mut woke: u64 = 0;
+                while woke == 0 {
+                    woke = syscall5(SYS_EPOLL_WAIT, epfd, evout.as_mut_ptr() as u64, 1, 0, 0);
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                }
+                print("httptest: epoll wake\n");
+                // 读请求
+                let mut rb = [0u8; 256];
+                let mut rn: u64 = 0;
+                let mut rtries = 0u32;
+                while rn == 0 {
+                    rn = syscall6(SYS_RECVFROM, afd, rb.as_mut_ptr() as u64, 256, 0, 0, 0);
+                    rtries += 1;
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                    if rtries > 200 {
+                        break;
+                    }
+                }
+                print("httptest: got request ");
+                print_u64(rn);
+                print("B\n");
+                // 响应 HTTP 200（body 25B "<h1>Novos-OS HTTP OK</h1>"）
+                let resp =
+                    b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 25\r\nConnection: close\r\n\r\n<h1>Novos-OS HTTP OK</h1>";
+                let sn = syscall6(SYS_SENDTO, afd, resp.as_ptr() as u64, resp.len() as u64, 0, 0, 0);
+                print("httptest: served ");
+                print_u64(sn);
+                print("B\n");
+                syscall3(SYS_CLOSE, afd, 0, 0);
+                syscall3(SYS_CLOSE, epfd, 0, 0);
                 syscall3(SYS_CLOSE, fd, 0, 0);
             }
         }

@@ -27,6 +27,9 @@ pub const SYS_SENDTO: u64 = 44;
 pub const SYS_RECVFROM: u64 = 45;
 pub const SYS_BIND: u64 = 49;
 pub const SYS_LISTEN: u64 = 50;
+pub const SYS_EPOLL_CREATE: u64 = 213;
+pub const SYS_EPOLL_WAIT: u64 = 232;
+pub const SYS_EPOLL_CTL: u64 = 233;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
@@ -117,6 +120,9 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_BIND => sys_bind(a1, a2, a3),
         SYS_SENDTO => sys_sendto(a1, a2, a3, a4, a5, a6),
         SYS_RECVFROM => sys_recvfrom(a1, a2, a3, a4, a5, a6),
+        SYS_EPOLL_CREATE => sys_epoll_create(a1),
+        SYS_EPOLL_CTL => sys_epoll_ctl(a1, a2, a3, a4),
+        SYS_EPOLL_WAIT => sys_epoll_wait(a1, a2, a3, a4),
         SYS_MKDIR => sys_mkdir(a1, a2),
         SYS_RMDIR => sys_rmdir(a1),
         SYS_UNLINK => sys_unlink(a1),
@@ -198,7 +204,9 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> u64 {
 
 /// close(fd)：关闭并回收 fd；成功返回 0。
 fn sys_close(fd: u64) -> u64 {
-    if fd >= crate::socket::TCP_FD_BASE as u64 {
+    if fd >= crate::socket::EPOLL_FD_BASE as u64 {
+        crate::socket::epoll_close(fd as usize) as u64
+    } else if fd >= crate::socket::TCP_FD_BASE as u64 {
         crate::socket::tcp_close(fd as usize) as u64
     } else if fd >= 100 {
         crate::socket::udp_close(fd as usize) as u64
@@ -347,6 +355,31 @@ fn sys_recvfrom(fd: u64, buf: u64, len: u64, _flags: u64, _src: u64, _slen: u64)
     } else {
         crate::socket::udp_recvfrom(fd as usize, buf as *mut u8, n) as u64
     }
+}
+
+/// epoll_create(size)：创建 epoll 实例（M5-切片5）。
+fn sys_epoll_create(size: u64) -> u64 {
+    crate::socket::epoll_create(size as usize) as u64
+}
+
+/// epoll_ctl(epfd, op, fd, event)：ADD/DEL/MOD。
+fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, event: u64) -> u64 {
+    let mut ev = [0u8; 12];
+    if event != 0 {
+        // SAFETY: event 为用户态 epoll_event（12 字节可读）。
+        unsafe { core::ptr::copy_nonoverlapping(event as *const u8, ev.as_mut_ptr(), 12) };
+    }
+    let events = u32::from_le_bytes([ev[0], ev[1], ev[2], ev[3]]);
+    crate::socket::epoll_ctl(epfd as usize, op as u32, fd as usize, events) as u64
+}
+
+/// epoll_wait(epfd, events, maxevents, timeout)：非阻塞轮询就绪项。
+fn sys_epoll_wait(epfd: u64, events: u64, maxevents: u64, _timeout: u64) -> u64 {
+    crate::socket::epoll_wait(
+        epfd as usize,
+        events as *mut u8,
+        core::cmp::min(maxevents, 64) as usize,
+    ) as u64
 }
 
 /// stat(path, buf)：填 Linux x86_64 stat 关键字段（st_ino/nlink/mode/size）。

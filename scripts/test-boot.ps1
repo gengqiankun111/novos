@@ -56,11 +56,10 @@ if ($Mode -eq "boot") {
         "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
         "-serial", "chardev:com1",
         "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
-        # M5-切片3/4：hostfwd 规则
-        #   udp 12345/12344→19999：guest 发往 10.0.2.2:port 经 slirp 宿主侧回环（QEMU/Windows 上
-        #   宿主主动发 UDP 无法进 guest，故用双规则自环验证 UDP 收发）
-        #   tcp 20000→20000：宿主连接 guest echo 服务（三次握手 + 数据回环）
-        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000",
+        # M5-切片3/4/5：hostfwd 规则
+        #   udp 12345/12344→19999：guest 发往 10.0.2.2:port 经 slirp 宿主侧回环
+        #   tcp 20000：宿主连 guest echo 服务；tcp 80：宿主 HTTP GET guest 服务
+        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
         "-display", "none", "-no-reboot",
         "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
     )
@@ -91,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -139,7 +138,58 @@ if ($Mode -eq "boot") {
                 $script:hostTcp = "<connect timeout>"
             }
         }
-        # 排空串口输出（guest 依次执行命令，udptest 回环 + tcptest echo 后自行结束）
+        # M5-切片5：等 guest 进入 httptest 监听后，宿主发 HTTP GET 并校验响应
+        $script:hostHttp = ""
+        $httpReady = $false
+        $hdeadline = (Get-Date).AddMilliseconds(15000)
+        while ((Get-Date) -lt $hdeadline -and -not $httpReady) {
+            while ($s.DataAvailable) {
+                [void]$sb.Append([char]$s.ReadByte())
+                if ($sb.ToString().Contains("httptest: listening on 80")) { $httpReady = $true }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($httpReady) {
+            $httpClient = $null
+            $h2 = (Get-Date).AddMilliseconds(10000)
+            while ((Get-Date) -lt $h2 -and $null -eq $httpClient) {
+                try {
+                    $httpClient = New-Object Net.Sockets.TcpClient
+                    $httpClient.Connect("127.0.0.1", 80)
+                } catch {
+                    $httpClient = $null
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+            if ($null -ne $httpClient) {
+                try {
+                    Start-Sleep -Milliseconds 1500
+                    $ns = $httpClient.GetStream()
+                    $req = [Text.Encoding]::ASCII.GetBytes("GET / HTTP/1.0`r`n`r`n")
+                    $ns.Write($req, 0, $req.Length)
+                    $ns.Flush()
+                    $httpClient.Client.ReceiveTimeout = 5000
+                    $hb = New-Object System.Text.StringBuilder
+                    $rrb = New-Object byte[] 256
+                    $hdone = (Get-Date).AddMilliseconds(4000)
+                    while ((Get-Date) -lt $hdone -and $hb.Length -lt 400) {
+                        try {
+                            $rn = $ns.Read($rrb, 0, 256)
+                            if ($rn -le 0) { break }
+                            [void]$hb.Append([Text.Encoding]::ASCII.GetString($rrb, 0, $rn))
+                            if ($hb.ToString().Contains("</h1>")) { break }
+                        } catch { break }
+                    }
+                    $script:hostHttp = $hb.ToString()
+                } catch {
+                    $script:hostHttp = "<io>"
+                }
+                $httpClient.Close()
+            } else {
+                $script:hostHttp = "<connect timeout>"
+            }
+        }
+        # 排空串口输出（guest 依次执行命令，udptest 回环 + tcptest echo + httptest 服务后自行结束）
         Start-Sleep -Milliseconds 4000
         $s.ReadTimeout = 1500
         while ($true) {
@@ -167,7 +217,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -189,7 +239,12 @@ if ($Mode -eq "boot") {
         "tcptest: listening on 20000", # M5-切片4：TCP 监听
         "tcptest: accepted fd=",       # M5-切片4：accept 取到连接
         "tcptest: recv 19B: hello tcp from host", # M5-切片4：收到宿主数据
-        "tcptest: echoed 19"           # M5-切片4：echo 回发成功
+        "tcptest: echoed 19",          # M5-切片4：echo 回发成功
+        "httptest: listening on 80",   # M5-切片5：HTTP 服务监听
+        "httptest: accepted fd=",      # M5-切片5：accept 取到连接
+        "httptest: epoll wake",        # M5-切片5：epoll_wait 就绪
+        "httptest: got request",       # M5-切片5：收到 HTTP 请求
+        "httptest: served"             # M5-切片5：回发响应成功
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
@@ -199,6 +254,10 @@ if ($Mode -eq "boot") {
 $ok = $true
 if ($Mode -eq "shell" -and $script:hostTcp -ne "hello tcp from host") {
     Write-Host "FAIL: host TCP echo mismatch (got '$($script:hostTcp)')"
+    $ok = $false
+}
+if ($Mode -eq "shell" -and ($script:hostHttp -notmatch "HTTP/1.0 200 OK" -or $script:hostHttp -notmatch "Novos-OS HTTP OK")) {
+    Write-Host "FAIL: host HTTP response mismatch (got '$($script:hostHttp)')"
     $ok = $false
 }
 foreach ($needle in $needles) {
