@@ -19,6 +19,10 @@ const SYS_UNLINK: u64 = 87;
 const SYS_EXIT: u64 = 60;
 const SYS_GETDENTS64: u64 = 217;
 
+// open flags（Linux O_*）
+const O_CREAT: u64 = 0o100;
+const O_TRUNC: u64 = 0o1000;
+
 /// 通用 syscall（3 参数，Linux x86_64 约定：rax=nr, rdi/rsi/rdx=arg1-3）。
 fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
@@ -92,12 +96,51 @@ fn path_arg(cmd: &[u8], start: usize) -> [u8; 128] {
     p
 }
 
+/// 枚举目录并打印（Linux dirent64 格式，目录加 "/" 后缀；循环读至 EOF）。
+fn list_dir(p: &[u8]) {
+    let fd = syscall3(SYS_OPEN, p.as_ptr() as u64, 0, 0);
+    if (fd as i64) < 0 {
+        print("ls: open failed\n");
+        return;
+    }
+    loop {
+        let mut buf = [0u8; 1024];
+        let n = syscall3(SYS_GETDENTS64, fd, buf.as_mut_ptr() as u64, 1024);
+        if n == 0 {
+            break;
+        }
+        let mut off = 0usize;
+        while off + 19 <= n as usize {
+            let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+            let typ = buf[off + 18];
+            let mut nl = 0usize;
+            while off + 19 + nl < buf.len() && buf[off + 19 + nl] != 0 {
+                nl += 1;
+            }
+            if nl > 0 {
+                // SAFETY: 目录项名称为 ASCII。
+                let nm =
+                    unsafe { core::str::from_utf8_unchecked(&buf[off + 19..off + 19 + nl]) };
+                print(nm);
+                if typ == 4 {
+                    print("/ ");
+                } else {
+                    print("  ");
+                }
+            }
+            off += reclen;
+        }
+    }
+    print("\n");
+    syscall3(SYS_CLOSE, fd, 0, 0);
+}
+
 /// 内建命令执行。
 fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | version | fdtest | fstest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | version | fdtest | fstest | dtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -121,8 +164,6 @@ fn exec(cmd: &[u8]) {
         }
         b"fstest" => {
             // M4 切片1：ramfs 创建文件 → 写入 → 读回验证
-            const O_CREAT: u64 = 0o100;
-            const O_TRUNC: u64 = 0o1000;
             let path = b"/etc/motd\0";
             let fd = syscall3(SYS_OPEN, path.as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
             if (fd as i64) < 0 {
@@ -144,44 +185,44 @@ fn exec(cmd: &[u8]) {
                 syscall3(SYS_CLOSE, fd2, 0, 0);
             }
         }
+        b"dtest" => {
+            // M4-切片3：dcache shrink 验收——创建 1000 个文件触发回收
+            let dir = b"/dtest\0";
+            syscall3(SYS_MKDIR, dir.as_ptr() as u64, 0o755, 0); // 已存在 EEXIST，忽略
+            let prefix = b"/dtest/f";
+            for i in 0..1000u32 {
+                let mut p = [0u8; 24];
+                p[..8].copy_from_slice(prefix);
+                let mut n = i;
+                let mut digits = [0u8; 4];
+                let mut dlen = 0usize;
+                loop {
+                    digits[dlen] = b'0' + (n % 10) as u8;
+                    dlen += 1;
+                    n /= 10;
+                    if n == 0 {
+                        break;
+                    }
+                }
+                for k in 0..dlen {
+                    p[8 + k] = digits[dlen - 1 - k];
+                }
+                p[8 + dlen] = 0;
+                let fd = syscall3(SYS_OPEN, p.as_ptr() as u64, O_CREAT | 1, 0o644);
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+            print("dtest: created 1000 files under /dtest\n");
+        }
         b"exit" => {
             print("bye\n");
             syscall3(SYS_EXIT, 0, 0, 0);
         }
         b"ls" => {
-            // 枚举根目录（Linux dirent64 格式）
-            let fd = syscall3(SYS_OPEN, b"/\0".as_ptr() as u64, 0, 0);
-            if (fd as i64) < 0 {
-                print("ls: open / failed\n");
-            } else {
-                let mut buf = [0u8; 1024];
-                let n = syscall3(SYS_GETDENTS64, fd, buf.as_mut_ptr() as u64, 1024);
-                let mut off = 0usize;
-                while off + 19 <= n as usize {
-                    let reclen =
-                        u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
-                    let typ = buf[off + 18];
-                    let mut nl = 0usize;
-                    while off + 19 + nl < buf.len() && buf[off + 19 + nl] != 0 {
-                        nl += 1;
-                    }
-                    if nl > 0 {
-                        // SAFETY: 目录项名称为 ASCII。
-                        let nm = unsafe {
-                            core::str::from_utf8_unchecked(&buf[off + 19..off + 19 + nl])
-                        };
-                        print(nm);
-                        if typ == 4 {
-                            print("/ ");
-                        } else {
-                            print("  ");
-                        }
-                    }
-                    off += reclen;
-                }
-                print("\n");
-                syscall3(SYS_CLOSE, fd, 0, 0);
-            }
+            list_dir(b"/\0");
+        }
+        _ if cmd.starts_with(b"ls ") => {
+            let p = path_arg(cmd, 3);
+            list_dir(&p);
         }
         _ if cmd.starts_with(b"cat ") => {
             let p = path_arg(cmd, 4);

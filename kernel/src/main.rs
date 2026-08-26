@@ -82,7 +82,13 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         mm::free_page_count()
     );
 
-    // M3 切片4：ELF 加载器 → 进入用户态 init/shell（不返回）。
+    // M4 切片3：dcache（FNV-1a + LRU + shrink）
+    println!(
+        "dcache: fnv1a buckets=256 target={} watermark={}",
+        novos_kernel::dcache::SHRINK_TARGET,
+        novos_kernel::dcache::SHRINK_WATERMARK
+    );
+    // M4 切片1/2：ELF 加载器 → 进入用户态 init/shell（不返回）。
     println!("m3: loading embedded userspace init (ELF)...");
     elf::load_and_run();
 

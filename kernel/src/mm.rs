@@ -26,7 +26,9 @@ pub const MEM_PAGES: usize = (MEM_END - MEM_START) / PAGE_SIZE;
 /// Slab size 阶梯：64B..4096B（幂次）。
 const SLAB_SIZES: [usize; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 /// 每个 cache 最多 slab 页（16 × 4K = 64KB/类，够 M1 测试）。
-const SLAB_MAX_PAGES: usize = 16;
+/// 每 size 类的 slab 页上限（M4-切片3 起 16→64：dcache/inode 场景需容纳
+/// 数千对象；满配 7 类 × 64 页 ≈ 1.75MB，仍在 32MB 预算与 18MB 锚点内）。
+const SLAB_MAX_PAGES: usize = 64;
 
 // ---- PageFrame（DESIGN §3.1）----
 

@@ -233,10 +233,13 @@ fn sys_unlink(path: u64) -> u64 {
 fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     match crate::fs::fd_get(fd as usize) {
         Some(f) => match f.as_ref() {
-            crate::fs::File::Dir { inode } => {
+            crate::fs::File::Dir { inode, pos } => {
                 // SAFETY: buf 为用户态地址且 len 由用户保证；内核侧枚举到临时缓冲。
                 let mut tmp = [0u8; 1024];
-                let n = crate::fs::read_dir(inode.as_ref(), &mut tmp).unwrap_or(0);
+                let start = *pos.lock();
+                let (n, items) =
+                    crate::fs::read_dir(inode.as_ref(), start, &mut tmp).unwrap_or((0, 0));
+                *pos.lock() = start + items; // 游标前进
                 let want = core::cmp::min(n, len as usize);
                 // SAFETY: 拷贝 tmp[..want] 到用户 buf（len ≥ want）。
                 unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, want) };

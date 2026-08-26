@@ -109,8 +109,11 @@ pub enum File {
         inode: Arc<Inode>,
         offset: Mutex<u64>,
     },
-    /// 目录（ramfs）：供 getdents64 枚举。
-    Dir { inode: Arc<Inode> },
+    /// 目录（ramfs）：供 getdents64 枚举（pos = 已返回项数游标）。
+    Dir {
+        inode: Arc<Inode>,
+        pos: Mutex<usize>,
+    },
 }
 
 impl File {
@@ -168,6 +171,7 @@ impl File {
 }
 
 /// 路径解析：从根逐组件查找（仅绝对路径；"." 跳过，".." 简化不支持）。
+/// 先查 dcache（FNV-1a 哈希，M4-切片3），miss 再扫父目录子项并回填。
 /// `create_last`：末组件不存在时创建文件（仅当父目录存在）。
 fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     if !path.starts_with('/') {
@@ -177,12 +181,22 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     for (i, comp) in comps.iter().enumerate() {
         let last = i == comps.len() - 1;
+        let parent_ptr = Arc::as_ptr(&cur) as usize;
+        // dcache 快查
+        if let Some(ino) = crate::dcache::dcache_lookup(parent_ptr, comp) {
+            cur = ino;
+            continue;
+        }
         match cur.lookup(comp) {
-            Some(ino) => cur = ino,
+            Some(ino) => {
+                crate::dcache::dcache_insert(parent_ptr, comp, ino.clone());
+                cur = ino;
+            }
             None => {
                 if last && create_last {
                     let ino = Inode::file();
                     cur.insert_child(comp, ino.clone());
+                    crate::dcache::dcache_insert(parent_ptr, comp, ino.clone());
                     cur = ino;
                 } else {
                     return Err(());
@@ -219,7 +233,9 @@ pub fn create_dir(path: &str) -> Result<(), i64> {
     if p.lookup(&leaf).is_some() {
         return Err(-17i64); // EEXIST
     }
-    p.insert_child(&leaf, Inode::dir());
+    let ino = Inode::dir();
+    p.insert_child(&leaf, ino.clone());
+    crate::dcache::dcache_insert(Arc::as_ptr(&p) as usize, &leaf, ino);
     Ok(())
 }
 
@@ -247,18 +263,23 @@ pub fn remove(path: &str, is_dir: bool) -> Result<(), i64> {
         return Err(-21i64); // EISDIR
     }
     kids.remove(idx);
+    drop(kids);
+    // 同步失效 dcache 缓存项
+    crate::dcache::dcache_remove(Arc::as_ptr(&p) as usize, &leaf);
     Ok(())
 }
 
-/// 枚举目录 inode，按 Linux dirent64 格式写入 buf，返回字节数。
+/// 枚举目录 inode（跳过前 skip 项），按 Linux dirent64 格式写入 buf。
+/// 返回 (填充字节数, 写入项数)。
 /// 布局：u64 d_ino | u64 d_off | u16 d_reclen | u8 d_type | char d_name[]（NUL 结尾）。
-pub fn read_dir(ino: &Inode, buf: &mut [u8]) -> Result<usize, i64> {
+pub fn read_dir(ino: &Inode, skip: usize, buf: &mut [u8]) -> Result<(usize, usize), i64> {
     if !ino.is_dir() {
         return Err(-20i64); // ENOTDIR
     }
     let kids = ino.children.lock();
     let mut off = 0usize;
-    for d in kids.iter() {
+    let mut items = 0usize;
+    for d in kids.iter().skip(skip) {
         let name_len = d.name.len() + 1; // + NUL
         let reclen = 19 + name_len;
         if off + reclen > buf.len() {
@@ -278,8 +299,9 @@ pub fn read_dir(ino: &Inode, buf: &mut [u8]) -> Result<usize, i64> {
         // d_name
         rec[19..19 + d.name.len()].copy_from_slice(d.name.as_bytes());
         off += reclen;
+        items += 1;
     }
-    Ok(off)
+    Ok((off, items))
 }
 
 /// 打开路径。"/dev/uart" 走设备；目录返回 Dir；文件返回 Reg（O_CREAT 创建）。
@@ -291,7 +313,10 @@ pub fn open_path(name: &str, flags: u64) -> Result<Arc<File>, i64> {
     let create = flags & O_CREAT != 0;
     let inode = resolve(name, create).map_err(|_| -2i64)?; // ENOENT
     if inode.is_dir() {
-        return Ok(Arc::new(File::Dir { inode }));
+        return Ok(Arc::new(File::Dir {
+            inode,
+            pos: Mutex::new(0),
+        }));
     }
     if flags & O_TRUNC != 0 {
         inode.data.lock().clear();
