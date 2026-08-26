@@ -56,6 +56,8 @@ pub const SYS_FW_ADD: u64 = 503;
 pub const SYS_FW_DEL: u64 = 504;
 /// Novos 扩展：读防火墙统计 { 规则数, 丢弃包数 }。
 pub const SYS_FW_STAT: u64 = 505;
+/// Novos 扩展：BIO 扇区读写（lba, buf, len, is_write）。
+pub const SYS_BLK_RW: u64 = 506;
 
 /// boot.asm 导出的 syscall 入口。
 extern "C" {
@@ -179,6 +181,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_FW_ADD => sys_fw_add(a1, a2, a3),
         SYS_FW_DEL => sys_fw_del(a1, a2),
         SYS_FW_STAT => sys_fw_stat(a1),
+        SYS_BLK_RW => sys_blk_rw(a1, a2, a3, a4),
         SYS_MOUNT => sys_mount(a1, a2, a3, a4, a5),
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
@@ -633,6 +636,22 @@ fn sys_fw_stat(buf: u64) -> u64 {
     // SAFETY: buf 为用户态地址（16 字节可写）。
     unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, 16) };
     0
+}
+
+/// blk_rw(lba, buf, len, is_write)：BIO 扇区读写（M10-切片1）。
+fn sys_blk_rw(lba: u64, buf: u64, len: u64, is_write: u64) -> u64 {
+    if len as usize > crate::block::SECTOR_SIZE {
+        return (-22i64) as u64; // EINVAL
+    }
+    if is_write != 0 {
+        // SAFETY: buf 为用户态可读 len 字节（syscall 路径用户页已映射）。
+        let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
+        crate::block::bio_write(lba, data) as u64
+    } else {
+        // SAFETY: buf 为用户态可写 len 字节。
+        let dst = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+        crate::block::bio_read(lba, dst) as u64
+    }
 }
 
 /// exit(code)：用户态进程退出——M3 切片先打印并停机（真正的 exit 待进程模型完善）。

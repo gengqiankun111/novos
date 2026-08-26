@@ -44,6 +44,7 @@ const SYS_CT_STAT: u64 = 502;
 const SYS_FW_ADD: u64 = 503;
 const SYS_FW_DEL: u64 = 504;
 const SYS_FW_STAT: u64 = 505;
+const SYS_BLK_RW: u64 = 506;
 
 // open flags（Linux O_*）
 const O_CREAT: u64 = 0o100;
@@ -257,7 +258,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1279,6 +1280,39 @@ fn exec(cmd: &[u8]) {
                 print("healthtest: reaped=");
                 print_u64(w);
                 print("\n");
+            }
+        }
+        b"blktest" => {
+            // M10-切片1：virtio-blk + BIO——写扇区 → 读回验证（真实块设备介质）。
+            let mut wbuf = [0u8; 512];
+            let msg = b"blk-hello-novos";
+            wbuf[..msg.len()].copy_from_slice(msg);
+            // 写 sector 2（0/1 留给后续文件系统）
+            let wr = syscall6(SYS_BLK_RW, 2, wbuf.as_mut_ptr() as u64, msg.len() as u64, 1, 0, 0);
+            print("blktest: write rc=");
+            print_u64(wr);
+            print("\n");
+            let mut rbuf = [0u8; 512];
+            let rd = syscall6(SYS_BLK_RW, 2, rbuf.as_mut_ptr() as u64, msg.len() as u64, 0, 0, 0);
+            print("blktest: read rc=");
+            print_u64(rd);
+            print(" data=");
+            print(unsafe { core::str::from_utf8_unchecked(&rbuf[..msg.len()]) });
+            print("\n");
+            if wr == 0 && rd == 0 && &rbuf[..msg.len()] == msg {
+                print("blktest: sector roundtrip ok\n");
+            } else {
+                print("blktest: FAILED\n");
+            }
+            // 未写扇区（sector 9）应为全零（证明读到真实介质而非残留）
+            let mut zbuf = [0u8; 512];
+            let rz = syscall6(SYS_BLK_RW, 9, zbuf.as_mut_ptr() as u64, 16, 0, 0, 0);
+            let all_zero = rz == 0 && zbuf[..16].iter().all(|&b| b == 0);
+            print("blktest: zero-sector check=");
+            print_u64(all_zero as u64);
+            print("\n");
+            if all_zero {
+                print("blktest: fresh sector zero ok\n");
             }
         }
         b"exit" => {

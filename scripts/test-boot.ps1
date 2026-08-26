@@ -15,6 +15,11 @@ $ErrorActionPreference = "Stop"
 # 清理残留 QEMU（失败退出时会遗留，导致下次 hostfwd 端口占用）
 Get-Process qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Remove-Item -Force $LogFile -ErrorAction SilentlyContinue
+# M10-切片1：准备虚拟磁盘镜像（1MB 全零 raw，挂 virtio-blk）
+$BlkImg = "target/blk.img"
+Remove-Item -Force $BlkImg -ErrorAction SilentlyContinue
+$blkData = New-Object byte[] (1024 * 1024)
+[IO.File]::WriteAllBytes($BlkImg, $blkData)
 $qemu = "C:/Program Files/qemu/qemu-system-x86_64.exe"
 
 if ($Mode -eq "boot") {
@@ -22,6 +27,8 @@ if ($Mode -eq "boot") {
                   "-serial", "file:$LogFile", "-display", "none", "-no-reboot",
                   "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
                   "-netdev", "user,id=net0",
+                  "-drive", "if=none,id=blk0,file=$BlkImg,format=raw,cache=unsafe",
+                  "-device", "virtio-blk-pci,drive=blk0",
                   "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait")
     $p = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -WindowStyle Hidden
     Start-Sleep -Seconds $WaitSec
@@ -47,7 +54,8 @@ if ($Mode -eq "boot") {
         "virtio-net: io=",                    # M5-切片1：virtio-net 驱动初始化
         "net: arp who-has 10.0.2.2",          # tx：ARP 请求发出
         "arp: gateway 10.0.2.2",              # rx：学得网关 MAC
-        "icmp: echo reply from 10.0.2.2"      # M5-切片2：IP+ICMP 回路（ping 通）
+        "icmp: echo reply from 10.0.2.2",      # M5-切片2：IP+ICMP 回路（ping 通）
+        "block: virtio-blk up"                 # M10-切片1：virtio-blk 驱动探测成功
     )
 } else {
     # shell 模式：socket chardev（无客户端时丢弃输出，须尽早连接）
@@ -60,6 +68,8 @@ if ($Mode -eq "boot") {
         #   udp 12345/12344→19999：guest 发往 10.0.2.2:port 经 slirp 宿主侧回环
         #   tcp 20000：宿主连 guest echo 服务；tcp 80：宿主 HTTP GET guest 服务
         "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12343-10.0.2.15:19998,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:20001-10.0.2.15:20001,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
+        "-drive", "if=none,id=blk0,file=$BlkImg,format=raw,cache=unsafe",
+        "-device", "virtio-blk-pci,drive=blk0",
         "-display", "none", "-no-reboot",
         "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
     )
@@ -90,7 +100,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -260,7 +270,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -337,7 +347,11 @@ if ($Mode -eq "boot") {
         "healthtest: health json ok",         # M9-切片1：/proc/health JSON 字段齐全
         "healthtest: cpuinfo online=1 ok",    # M9-切片1：/proc/cpuinfo 多核报告
         "healthtest: container counted ok",   # M9-切片1：容器存活期间 containers=1
-        "healthtest: reaped="                 # M9-切片1：容器回收
+        "healthtest: reaped=",                # M9-切片1：容器回收
+        "blktest: write rc=0",                # M10-切片1：BIO 写扇区成功
+        "blktest: read rc=0 data=blk-hello-novos", # M10-切片1：读回一致
+        "blktest: sector roundtrip ok",       # M10-切片1：扇区往返验证
+        "blktest: fresh sector zero ok"       # M10-切片1：未写扇区全零（真实介质）
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
