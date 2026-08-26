@@ -21,7 +21,8 @@ $qemuArgs = @(
     "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
     "-serial", "chardev:com1",
     "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
-    "-netdev", "user,id=net0",
+    # M5-切片3：hostfwd 双规则（guest 发往 10.0.2.2:hostport 的 UDP 经 slirp 宿主侧回环到 guest:19999）
+    "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999",
     "-display", "none", "-no-reboot",
     "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
 )
@@ -44,12 +45,12 @@ try {
     $s.ReadTimeout = 300
     # 先清空启动期间已到达的输出
     while ($s.DataAvailable) { [void]$s.ReadByte() }
-    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nls`nversion`n"
+    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`nls`nversion`n"
     $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
     $s.Write($bytes, 0, $bytes.Length)
     $s.Flush()
     Write-Host "commands injected, draining output..."
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 4000
     $sb = New-Object System.Text.StringBuilder
     while ($true) {
         try { $b = $s.ReadByte() } catch { break }   # 读超时结束

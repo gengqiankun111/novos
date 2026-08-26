@@ -23,6 +23,7 @@ pub mod port;
 pub mod rbtree;
 pub mod serial;
 pub mod smp;
+pub mod socket;
 pub mod sync;
 pub mod syscall;
 pub mod task;

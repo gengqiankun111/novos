@@ -12,6 +12,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# 清理残留 QEMU（失败退出时会遗留，导致下次 hostfwd 端口占用）
+Get-Process qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Remove-Item -Force $LogFile -ErrorAction SilentlyContinue
 $qemu = "C:/Program Files/qemu/qemu-system-x86_64.exe"
 
@@ -54,7 +56,10 @@ if ($Mode -eq "boot") {
         "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
         "-serial", "chardev:com1",
         "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
-        "-netdev", "user,id=net0",
+        # M5-切片3：hostfwd 双规则——slirp 的 UDP hostfwd 会把 guest 发往 10.0.2.2:hostport 的包
+        # 经宿主侧回环到 guest:19999（QEMU/Windows 上宿主主动发 UDP 无法进 guest，故用双规则自环）：
+        #   12345→19999 回环 "hello udp from novos"（20B）；12344→19999 回环 "pong from novos"（15B）
+        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999",
         "-display", "none", "-no-reboot",
         "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
     )
@@ -80,16 +85,18 @@ if ($Mode -eq "boot") {
         exit 1
     }
     $output = ""
+    $s = $c.GetStream()
+    $s.ReadTimeout = 300
+    $sb = New-Object System.Text.StringBuilder
     try {
-        $s = $c.GetStream()
-        $s.ReadTimeout = 500
-        $sb = New-Object System.Text.StringBuilder
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
-        Start-Sleep -Milliseconds 2500
+        # 排空串口输出（guest 依次执行命令，udptest 收满 2 条回环包后自行结束）
+        Start-Sleep -Milliseconds 10000
+        $s.ReadTimeout = 1500
         while ($true) {
             try { $b = $s.ReadByte() } catch { break }
             if ($b -lt 0) { break }
@@ -115,7 +122,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -129,7 +136,11 @@ if ($Mode -eq "boot") {
         "f999",                      # ls /dtest 输出（完整枚举到末项）
         "stat: mode=33188 size=17",  # M4-切片4：tmpfs 文件 stat（0o100644 + 17B）
         "a.txt",                     # ls /mnt：tmpfs 挂载后写入的文件
-        "sub/"                       # ls /mnt：tmpfs 内 mkdir
+        "sub/",                      # ls /mnt：tmpfs 内 mkdir
+        "udptest: sent rc=20",       # M5-切片3：guest UDP 出站 1（20B "hello udp from novos"）
+        "udptest: sent2 rc=15",      # M5-切片3：guest UDP 出站 2（15B "pong from novos"）
+        "udptest: recv 20B: hello udp from novos", # M5-切片3：hostfwd 12345 回环入站
+        "udptest: recv 15B: pong from novos" # M5-切片3：hostfwd 12344 回环入站
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
@@ -144,10 +155,12 @@ foreach ($needle in $needles) {
     }
 }
 if ($ok) {
+    if ($null -ne $p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     Write-Host "M3 $Mode test: PASS"
     exit 0
 }
 Write-Host "--- output ($Mode) ---"
 Write-Host $output
 Write-Host "M3 $Mode test: FAIL"
+if ($null -ne $p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
 exit 1

@@ -54,7 +54,7 @@ const ETH_TYPE_IP: u16 = 0x0800;
 /// 本机 IP（QEMU user 模式默认）。
 pub const OUR_IP: [u8; 4] = [10, 0, 2, 15];
 /// 网关 IP（QEMU user 模式）。
-const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+pub const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 
 /// vring 描述符（传统模式）。
 #[repr(C)]
@@ -244,8 +244,20 @@ impl VirtioNet {
         let payload = &ip[ihl..core::cmp::min(total_len, ip.len())];
         match proto {
             1 => self.handle_icmp(payload, src), // ICMP
+            17 => self.handle_udp(payload),      // UDP（M5-切片3）
             _ => {}
         }
+    }
+
+    /// UDP：投递数据到绑定对应端口的 socket。
+    fn handle_udp(&mut self, udp: &[u8]) {
+        if udp.len() < 8 {
+            return;
+        }
+        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+        let ulen = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+        let data = &udp[8..core::cmp::min(ulen, udp.len())];
+        crate::socket::udp_deliver(dst_port, data);
     }
 
     /// ICMP：echo request → reply；echo reply → 打印（验证回路）。
@@ -622,4 +634,14 @@ pub fn net_poll() {
             None => break,
         }
     }
+}
+
+/// 发送 UDP 数据报（M5-切片3：组 UDP 头 + IPv4 发送；校验和 0 = IPv4 允许）。
+pub fn send_udp(dst_ip: [u8; 4], dst_port: u16, src_port: u16, payload: &[u8]) {
+    let mut udp = [0u8; 8 + 1472];
+    udp[0..2].copy_from_slice(&src_port.to_be_bytes());
+    udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    udp[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    udp[8..8 + payload.len()].copy_from_slice(payload);
+    NET.lock().send_ipv4(dst_ip, 17, &udp[..8 + payload.len()]);
 }

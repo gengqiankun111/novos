@@ -18,6 +18,10 @@ const SYS_MKDIR: u64 = 83;
 const SYS_RMDIR: u64 = 84;
 const SYS_UNLINK: u64 = 87;
 const SYS_EXIT: u64 = 60;
+const SYS_SOCKET: u64 = 41;
+const SYS_SENDTO: u64 = 44;
+const SYS_RECVFROM: u64 = 45;
+const SYS_BIND: u64 = 49;
 const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 
@@ -57,6 +61,28 @@ fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
             in("rdx") a3,
             in("r10") a4,
             in("r8") a5,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    ret
+}
+
+/// 通用 syscall（6 参数，arg4-6 走 r10/r8/r9）。
+fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
+    let ret: u64;
+    // SAFETY: syscall 指令为 x86_64 标准接口；rcx/r11 被 CPU 覆盖。
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
+            in("r9") a6,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack)
@@ -185,7 +211,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -241,6 +267,84 @@ fn exec(cmd: &[u8]) {
                 syscall3(SYS_CLOSE, fd, 0, 0);
             }
             print("dtest: created 1000 files under /dtest\n");
+        }
+        b"udptest" => {
+            // M5-切片3：UDP socket 全链路验证（双 hostfwd 规则自环回）。
+            // 说明：QEMU/Windows 的 slirp UDP hostfwd 只转发 guest 发起方向的包，
+            // 宿主主动发 UDP 无法进 guest；故用两条规则各回环一包验证
+            // create/bind/sendto → virtio TX → slirp(宿主侧) → virtio RX → demux → recvfrom。
+            let fd = syscall3(SYS_SOCKET, 2, 2, 0); // AF_INET, SOCK_DGRAM
+            if (fd as i64) < 0 {
+                print("udptest: socket failed rc=");
+                print_u64(fd);
+                print("\n");
+            } else {
+                // bind 19999（sockaddr_in：family@0, port@2 BE）
+                let mut sa = [0u8; 16];
+                sa[0..2].copy_from_slice(&2u16.to_le_bytes());
+                sa[2..4].copy_from_slice(&19999u16.to_be_bytes());
+                syscall3(SYS_BIND, fd, sa.as_ptr() as u64, 16);
+                // 1) sendto 10.0.2.2:12345（规则 12345→19999 回环，20B）
+                let mut da = [0u8; 16];
+                da[0..2].copy_from_slice(&2u16.to_le_bytes());
+                da[2..4].copy_from_slice(&12345u16.to_be_bytes());
+                da[4..8].copy_from_slice(&[10, 0, 2, 2]);
+                let msg1 = b"hello udp from novos";
+                let rc = syscall6(
+                    SYS_SENDTO,
+                    fd,
+                    msg1.as_ptr() as u64,
+                    msg1.len() as u64,
+                    0,
+                    da.as_ptr() as u64,
+                    16,
+                );
+                print("udptest: sent rc=");
+                print_u64(rc);
+                print("\n");
+                // 2) sendto 10.0.2.2:12344（规则 12344→19999 回环，15B）
+                da[2..4].copy_from_slice(&12344u16.to_be_bytes());
+                let msg2 = b"pong from novos";
+                let rc2 = syscall6(
+                    SYS_SENDTO,
+                    fd,
+                    msg2.as_ptr() as u64,
+                    msg2.len() as u64,
+                    0,
+                    da.as_ptr() as u64,
+                    16,
+                );
+                print("udptest: sent2 rc=");
+                print_u64(rc2);
+                print("\n");
+                // recvfrom 收 2 条（两个 hostfwd 规则的回环包）
+                let mut got = 0u32;
+                let mut tries = 0u32;
+                while got < 2 && tries < 150 {
+                    let mut rb = [0u8; 128];
+                    let n = syscall6(SYS_RECVFROM, fd, rb.as_mut_ptr() as u64, 128, 0, 0, 0);
+                    if (n as i64) > 0 {
+                        print("udptest: recv ");
+                        print_u64(n);
+                        print("B: ");
+                        print(unsafe { core::str::from_utf8_unchecked(&rb[..n as usize]) });
+                        print("\n");
+                        got += 1;
+                    }
+                    tries += 1;
+                    // 空转延时（QEMU 下约数十 ms）
+                    let mut spin = 0u32;
+                    while spin < 4_000_000 {
+                        spin += 1;
+                    }
+                }
+                if got < 2 {
+                    print("udptest: recv timeout (got ");
+                    print_u64(got.into());
+                    print(")\n");
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
         }
         b"exit" => {
             print("bye\n");
