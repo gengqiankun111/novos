@@ -1,0 +1,16 @@
+[workspace]
+# userspace（novos-init）为独立 crate：no_std 裸机 ELF 需独立
+# profile（关闭 LTO 以规避 core 的 kernel code model 与 large model 冲突），
+# 由 Makefile build-userspace 单独构建后嵌入内核镜像。
+members = ["kernel"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
