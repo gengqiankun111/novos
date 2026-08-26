@@ -40,6 +40,7 @@ const SYS_GETDENTS64: u64 = 217;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
 const SYS_FUTEX: u64 = 202;
+const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
 const SYS_FW_ADD: u64 = 503;
@@ -51,6 +52,11 @@ const SYS_BLKFS: u64 = 507;
 // open flags（Linux O_*）
 const O_CREAT: u64 = 0o100;
 const O_TRUNC: u64 = 0o1000;
+
+// M11-切片2：TLS 测试缓冲——arch_prctl 把 FS base 指到这些静态缓冲，
+// 用户态经 `%fs` 段寻址访问（验证 FS base MSR 生效 + 上下文切换恢复）。
+static mut TLS_BUF_A: [u8; 32] = [0; 32];
+static mut TLS_BUF_B: [u8; 32] = [0; 32];
 
 /// 通用 syscall（3 参数，Linux x86_64 约定：rax=nr, rdi/rsi/rdx=arg1-3）。
 fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
@@ -260,7 +266,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1419,6 +1425,96 @@ fn exec(cmd: &[u8]) {
                     }
                 }
                 print("futtest: reaped=");
+                print_u64(w);
+                print("\n");
+            }
+        }
+        b"tlstest" => {
+            // M11-切片2：arch_prctl TLS——FS base 设置/查询 + 上下文切换恢复。
+            // 1) ARCH_SET_FS：FS base 指向 TLS_BUF_A，经 %fs 写入/读回标记
+            let base_a = unsafe { core::ptr::addr_of_mut!(TLS_BUF_A) as u64 };
+            let rc = syscall3(SYS_ARCH_PRCTL, 0x1002, base_a, 0);
+            print("tlstest: set fs rc=");
+            print_u64(rc);
+            print("\n");
+            let marker: u64 = 0x1122_3344_5566_7788;
+            // SAFETY: FS base 已设为 TLS_BUF_A（恒等映射），%fs:0 落于其内。
+            unsafe {
+                core::arch::asm!("mov qword ptr fs:[0], {0}", in(reg) marker, options(nostack));
+            }
+            let mut back: u64 = 0;
+            // SAFETY: 同上；读回同一标记。
+            unsafe {
+                core::arch::asm!("mov {0}, qword ptr fs:[0]", out(reg) back, options(nostack));
+            }
+            print("tlstest: fs read back=");
+            print_u64(back);
+            print("\n");
+            if back == marker {
+                print("tlstest: fs rw ok\n");
+            }
+            // 2) ARCH_GET_FS：回读当前 FS base，应为 TLS_BUF_A
+            let mut got: u64 = 0;
+            let rc2 = syscall3(SYS_ARCH_PRCTL, 0x1003, &mut got as *mut u64 as u64, 0);
+            print("tlstest: get fs rc=");
+            print_u64(rc2);
+            print(" base=");
+            print_u64(got);
+            print("\n");
+            if rc2 == 0 && got == base_a {
+                print("tlstest: get fs ok\n");
+            }
+            // 3) fork：子改 FS base 指向 TLS_BUF_B 并写不同标记；父回收后
+            //    经 %fs 读自己的 TLS——必须仍是原标记（调度切换恢复 FS base）。
+            let r = syscall3(SYS_FORK, 0, 0, 0);
+            if r == 0 {
+                let base_b = unsafe { core::ptr::addr_of_mut!(TLS_BUF_B) as u64 };
+                let rc3 = syscall3(SYS_ARCH_PRCTL, 0x1002, base_b, 0);
+                let cmarker: u64 = 0xDEAD_BEEF_0000_0001;
+                // SAFETY: 子 FS base 已设为 TLS_BUF_B。
+                unsafe {
+                    core::arch::asm!("mov qword ptr fs:[0], {0}", in(reg) cmarker, options(nostack));
+                }
+                let mut cback: u64 = 0;
+                // SAFETY: 同上。
+                unsafe {
+                    core::arch::asm!("mov {0}, qword ptr fs:[0]", out(reg) cback, options(nostack));
+                }
+                print("tlstest: child fs back=");
+                print_u64(cback);
+                print("\n");
+                if rc3 == 0 && cback == cmarker {
+                    print("tlstest: child own fs ok\n");
+                }
+                // 忙等若干拍：强制发生 PIT 调度切换，锻炼恢复父 FS base 的路径
+                let mut spin = 0u32;
+                while spin < 2_000_000 {
+                    spin += 1;
+                }
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                let mut w = 0u64;
+                let mut n = 0u32;
+                while w == 0 && n < 200000 {
+                    w = syscall3(SYS_WAITPID, r, 0, 0);
+                    n += 1;
+                    let mut s = 0u32;
+                    while s < 50000 {
+                        s += 1;
+                    }
+                }
+                let mut pback: u64 = 0;
+                // SAFETY: 父 FS base 应已被调度器恢复为 TLS_BUF_A。
+                unsafe {
+                    core::arch::asm!("mov {0}, qword ptr fs:[0]", out(reg) pback, options(nostack));
+                }
+                print("tlstest: parent fs after child=");
+                print_u64(pback);
+                print("\n");
+                if pback == marker {
+                    print("tlstest: ctx switch fs restore ok\n");
+                }
+                print("tlstest: reaped=");
                 print_u64(w);
                 print("\n");
             }
