@@ -35,6 +35,8 @@ pub const SYS_FORK: u64 = 57;
 pub const SYS_WAITPID: u64 = 61;
 pub const SYS_UNAME: u64 = 63;
 pub const SYS_SETHOSTNAME: u64 = 170;
+/// Novos 扩展：读当前 cgroup 统计 { pids, mem }。
+pub const SYS_CGROUP_STAT: u64 = 500;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
@@ -164,6 +166,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_WAITPID => sys_waitpid(a1, a2, a3),
         SYS_UNAME => sys_uname(a1),
         SYS_SETHOSTNAME => sys_sethostname(a1, a2),
+        SYS_CGROUP_STAT => sys_cgroup_stat(a1),
         SYS_EXIT => sys_exit(a1),
         _ => (-1i64) as u64, // ENOSYS
     }
@@ -488,6 +491,17 @@ fn sys_sethostname(name: u64, len: u64) -> u64 {
     // SAFETY: name 为用户态可读 n 字节。
     let data = unsafe { core::slice::from_raw_parts(name as *const u8, n) };
     crate::task::sethostname(data) as u64
+}
+
+/// cgroup 统计：向 buf 写 { pids: u64, mem: u64 }（当前任务所在 cgroup）。
+fn sys_cgroup_stat(buf: u64) -> u64 {
+    let (pids, mem) = crate::task::cgroup_stat(crate::task::current_cgroup());
+    let mut tmp = [0u8; 16];
+    tmp[0..8].copy_from_slice(&pids.to_le_bytes());
+    tmp[8..16].copy_from_slice(&mem.to_le_bytes());
+    // SAFETY: buf 为用户态地址（16 字节可写）。
+    unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, 16) };
+    0
 }
 
 /// exit(code)：用户态进程退出——M3 切片先打印并停机（真正的 exit 待进程模型完善）。
