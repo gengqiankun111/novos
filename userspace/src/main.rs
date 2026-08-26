@@ -41,6 +41,9 @@ const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
+const SYS_FW_ADD: u64 = 503;
+const SYS_FW_DEL: u64 = 504;
+const SYS_FW_STAT: u64 = 505;
 
 // open flags（Linux O_*）
 const O_CREAT: u64 = 0o100;
@@ -254,7 +257,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -992,6 +995,97 @@ fn exec(cmd: &[u8]) {
                 print_u64(hits);
                 print("\n");
                 syscall3(SYS_CLOSE, afd, 0, 0);
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        b"fwtest" => {
+            // M8-切片3：基础防火墙——线性规则表 DROP/ACCEPT 验证（UDP hostfwd 回环 12343→19998）。
+            let fd = syscall3(SYS_SOCKET, 2, 2, 0); // AF_INET, SOCK_DGRAM
+            if (fd as i64) < 0 {
+                print("fwtest: socket failed\n");
+            } else {
+                let mut sa = [0u8; 16];
+                sa[0..2].copy_from_slice(&2u16.to_le_bytes());
+                sa[2..4].copy_from_slice(&19998u16.to_be_bytes());
+                syscall3(SYS_BIND, fd, sa.as_ptr() as u64, 16);
+                // 1) DROP 规则：udp 19998
+                let ar = syscall3(SYS_FW_ADD, 17, 19998, 0);
+                print("fwtest: add drop rc=");
+                print_u64(ar);
+                print("\n");
+                // 2) 发第 1 包（应被防火墙丢弃，回环不落地）
+                let mut da = [0u8; 16];
+                da[0..2].copy_from_slice(&2u16.to_le_bytes());
+                da[2..4].copy_from_slice(&12343u16.to_be_bytes());
+                da[4..8].copy_from_slice(&[10, 0, 2, 2]);
+                let m1 = b"fw-drop-test";
+                let sr = syscall6(SYS_SENDTO, fd, m1.as_ptr() as u64, m1.len() as u64, 0, da.as_ptr() as u64, 16);
+                print("fwtest: sent1 rc=");
+                print_u64(sr);
+                print("\n");
+                // 3) 轮询：等回环包到达并被防火墙丢弃（drops>=1），同时确认无泄漏
+                let mut got_any = 0u64;
+                let mut drops = 0u64;
+                let mut rules = 0u64;
+                let mut tries = 0u32;
+                while tries < 400 && got_any == 0 && drops == 0 {
+                    let mut rb = [0u8; 128];
+                    let n = syscall6(SYS_RECVFROM, fd, rb.as_mut_ptr() as u64, 128, 0, 0, 0);
+                    if (n as i64) > 0 {
+                        got_any = n;
+                        break;
+                    }
+                    let mut st = [0u8; 16];
+                    syscall3(SYS_FW_STAT, st.as_mut_ptr() as u64, 0, 0);
+                    rules = u64::from_le_bytes([st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7]]);
+                    drops = u64::from_le_bytes([st[8], st[9], st[10], st[11], st[12], st[13], st[14], st[15]]);
+                    tries += 1;
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                }
+                print("fwtest: fw rules=");
+                print_u64(rules);
+                print(" drops=");
+                print_u64(drops);
+                print(" leaked=");
+                print_u64(got_any);
+                print("\n");
+                if got_any == 0 && drops >= 1 {
+                    print("fwtest: DROP works\n");
+                    // 4) 删除规则，第 2 包应通过
+                    let dr = syscall3(SYS_FW_DEL, 17, 19998, 0);
+                    print("fwtest: del rc=");
+                    print_u64(dr);
+                    print("\n");
+                    let m2 = b"fw-ok-data";
+                    syscall6(SYS_SENDTO, fd, m2.as_ptr() as u64, m2.len() as u64, 0, da.as_ptr() as u64, 16);
+                    let mut got2 = 0u64;
+                    let mut t2 = 0u32;
+                    while got2 == 0 && t2 < 300 {
+                        let mut rb2 = [0u8; 128];
+                        let n = syscall6(SYS_RECVFROM, fd, rb2.as_mut_ptr() as u64, 128, 0, 0, 0);
+                        if (n as i64) > 0 {
+                            got2 = n;
+                            print("fwtest: recv after del: ");
+                            print(unsafe { core::str::from_utf8_unchecked(&rb2[..n as usize]) });
+                            print("\n");
+                        }
+                        t2 += 1;
+                        let mut spin = 0u32;
+                        while spin < 2_000_000 {
+                            spin += 1;
+                        }
+                    }
+                    if got2 > 0 {
+                        print("fwtest: ACCEPT works\n");
+                    } else {
+                        print("fwtest: accept FAILED\n");
+                    }
+                } else {
+                    print("fwtest: DROP FAILED\n");
+                }
                 syscall3(SYS_CLOSE, fd, 0, 0);
             }
         }

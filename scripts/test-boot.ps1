@@ -59,7 +59,7 @@ if ($Mode -eq "boot") {
         # M5-切片3/4/5：hostfwd 规则
         #   udp 12345/12344→19999：guest 发往 10.0.2.2:port 经 slirp 宿主侧回环
         #   tcp 20000：宿主连 guest echo 服务；tcp 80：宿主 HTTP GET guest 服务
-        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:20001-10.0.2.15:20001,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
+        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12343-10.0.2.15:19998,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:20001-10.0.2.15:20001,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
         "-display", "none", "-no-reboot",
         "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
     )
@@ -90,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -260,7 +260,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -324,7 +324,12 @@ if ($Mode -eq "boot") {
         "natdemo: accepted via DNAT fd=",     # M8-切片2：经 DNAT 投递到容器端口
         "natdemo: recv 9B: hello nat",        # M8-切片2：容器收到宿主数据
         "natdemo: echoed 9",                  # M8-切片2：回包反向 NAT 还原
-        "natdemo: ct entries=1"               # M8-切片2：conntrack 会话跟踪
+        "natdemo: ct entries=1",              # M8-切片2：conntrack 会话跟踪
+        "fwtest: add drop rc=0",              # M8-切片3：防火墙 DROP 规则添加成功
+        "fwtest: DROP works",                 # M8-切片3：DROP 规则命中丢弃
+        "fwtest: del rc=0",                   # M8-切片3：规则删除成功
+        "fwtest: recv after del: fw-ok-data", # M8-切片3：删除规则后包通过
+        "fwtest: ACCEPT works"                # M8-切片3：默认接受/恢复
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
