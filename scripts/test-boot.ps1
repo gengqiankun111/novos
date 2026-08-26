@@ -90,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -260,7 +260,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -329,7 +329,11 @@ if ($Mode -eq "boot") {
         "fwtest: DROP works",                 # M8-切片3：DROP 规则命中丢弃
         "fwtest: del rc=0",                   # M8-切片3：规则删除成功
         "fwtest: recv after del: fw-ok-data", # M8-切片3：删除规则后包通过
-        "fwtest: ACCEPT works"                # M8-切片3：默认接受/恢复
+        "fwtest: ACCEPT works",               # M8-切片3：默认接受/恢复
+        "proctest: mount rc=0",               # M8-切片4：/proc 挂载成功
+        "proctest: parent sees pid 1",        # M8-切片4：根 ns 视图含 pid 1
+        "proctest: child ns sees only self",  # M8-切片4：新 pid ns 只看自己
+        "proctest: child reaped="             # M8-切片4：子进程回收
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )

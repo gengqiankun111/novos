@@ -257,7 +257,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1087,6 +1087,106 @@ fn exec(cmd: &[u8]) {
                     print("fwtest: DROP FAILED\n");
                 }
                 syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        b"proctest" => {
+            // M8-切片4：容器内 /proc（pid ns 视图）——挂载 proc 后按当前 ns 列任务。
+            syscall3(SYS_MKDIR, b"/proc\0".as_ptr() as u64, 0o755, 0);
+            let rc = syscall5(SYS_MOUNT, b"proc\0".as_ptr() as u64, b"/proc\0".as_ptr() as u64, b"proc\0".as_ptr() as u64, 0, 0);
+            print("proctest: mount rc=");
+            print_u64(rc);
+            print("\n");
+            if rc == 0 {
+                // 宿主视图：根 ns 至少含 pid 1（shell）
+                let mut saw1 = false;
+                let mut total = 0u64;
+                let fd = syscall3(SYS_OPEN, b"/proc\0".as_ptr() as u64, 0, 0);
+                loop {
+                    let mut buf = [0u8; 512];
+                    let n = syscall3(SYS_GETDENTS64, fd, buf.as_mut_ptr() as u64, 512);
+                    if n == 0 {
+                        break;
+                    }
+                    let mut off = 0usize;
+                    while off + 19 <= n as usize {
+                        let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                        let mut nl = 0usize;
+                        while off + 19 + nl < buf.len() && buf[off + 19 + nl] != 0 {
+                            nl += 1;
+                        }
+                        if nl > 0 {
+                            total += 1;
+                            if nl == 1 && buf[off + 19] == b'1' {
+                                saw1 = true;
+                            }
+                        }
+                        off += reclen;
+                    }
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+                print("proctest: parent /proc entries=");
+                print_u64(total);
+                print(" has_pid1=");
+                print_u64(saw1 as u64);
+                print("\n");
+                if saw1 {
+                    print("proctest: parent sees pid 1\n");
+                }
+                // 新 pid ns 子进程：/proc 只看到自己（pid=1）
+                let r = syscall3(SYS_CLONE, 0x2000_0000, 0, 0);
+                if r == 0 {
+                    let fd2 = syscall3(SYS_OPEN, b"/proc\0".as_ptr() as u64, 0, 0);
+                    if (fd2 as i64) >= 0 {
+                        let mut cnt = 0u64;
+                        let mut only1 = true;
+                        loop {
+                            let mut buf = [0u8; 512];
+                            let n = syscall3(SYS_GETDENTS64, fd2, buf.as_mut_ptr() as u64, 512);
+                            if n == 0 {
+                                break;
+                            }
+                            let mut off = 0usize;
+                            while off + 19 <= n as usize {
+                                let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                                let mut nl = 0usize;
+                                while off + 19 + nl < buf.len() && buf[off + 19 + nl] != 0 {
+                                    nl += 1;
+                                }
+                                if nl > 0 {
+                                    cnt += 1;
+                                    if !(nl == 1 && buf[off + 19] == b'1') {
+                                        only1 = false;
+                                    }
+                                }
+                                off += reclen;
+                            }
+                        }
+                        syscall3(SYS_CLOSE, fd2, 0, 0);
+                        print("proctest: child ns /proc entries=");
+                        print_u64(cnt);
+                        print(" only_self=");
+                        print_u64(only1 as u64);
+                        print("\n");
+                        if cnt == 1 && only1 {
+                            print("proctest: child ns sees only self\n");
+                        }
+                    }
+                    syscall3(SYS_EXIT, 0, 0, 0);
+                } else {
+                    let mut w = 0u64;
+                    let mut n = 0u32;
+                    while w == 0 && n < 200000 {
+                        w = syscall3(SYS_WAITPID, r, 0, 0);
+                        n += 1;
+                        let mut s = 0u32;
+                        while s < 50000 {
+                            s += 1;
+                        }
+                    }
+                    print("proctest: child reaped=");
+                    print_u64(w);
+                    print("\n");
+                }
             }
         }
         b"exit" => {
