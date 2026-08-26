@@ -17,6 +17,8 @@ const EFER_SCE: u64 = 1 << 0; // SysCall Enable
 // ---- 系统调用号（Linux x86_64 ABI）----
 pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
+pub const SYS_OPEN: u64 = 2;
+pub const SYS_CLOSE: u64 = 3;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 
@@ -90,6 +92,8 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
     match nr {
         SYS_WRITE => sys_write(a1, a2, a3),
         SYS_READ => sys_read(a1, a2, a3),
+        SYS_OPEN => sys_open(a1, a2, a3),
+        SYS_CLOSE => sys_close(a1),
         SYS_GETPID => sys_getpid(),
         SYS_EXIT => sys_exit(a1),
         _ => (-1i64) as u64, // ENOSYS
@@ -105,29 +109,67 @@ unsafe fn copy_from_user(src: u64, len: usize) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(src as *const u8, len) }
 }
 
-/// write(fd, buf, len)：仅支持 fd=1(stdout)→串口；返回写字节数。
-fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
-    if fd == 1 {
-        // SAFETY: buf 用户态地址，len 由用户保证。
-        let data = unsafe { copy_from_user(buf, len as usize) };
-        let s = core::str::from_utf8(data).unwrap_or("<non-utf8>");
-        crate::print!("{}", s);
-        len
-    } else {
-        (-1i64) as u64 // EBADF
+/// 拷贝用户态 NUL 结尾字符串（最多 dst.len()-1 字节）。
+///
+/// # Safety
+/// src 为用户态地址；dst 长度受调用方约束。
+unsafe fn copy_cstr_from_user(src: u64, dst: &mut [u8]) -> usize {
+    // SAFETY: 逐字节读用户地址直至 NUL 或 dst 满。
+    unsafe {
+        for i in 0..dst.len() {
+            let c = *((src as *const u8).add(i));
+            if c == 0 {
+                return i;
+            }
+            dst[i] = c;
+        }
+        dst.len() // 无 NUL：按满长截断（不报错，M3 简化）
     }
 }
 
-/// read(fd, buf, len)：非阻塞串口读。fd=0 时若有数据写 1 字节并返回 1，否则返回 0。
+/// write(fd, buf, len)：经 fd 表路由到文件（0/1/2 = uart）；返回写字节数。
+fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
+    // SAFETY: buf 用户态地址，len 由用户保证。
+    let data = unsafe { copy_from_user(buf, len as usize) };
+    match crate::fs::fd_get(fd as usize) {
+        Some(f) => f.write(data) as u64,
+        None => (-1i64) as u64, // EBADF
+    }
+}
+
+/// read(fd, buf, len)：经 fd 表路由到文件；非阻塞，无数据返回 0。
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
-    if fd == 0 && len >= 1 {
-        if let Some(b) = crate::serial::read_byte() {
-            // SAFETY: buf 为用户态地址且 len≥1；用户页已映射，恒等映射下可写。
-            unsafe { *(buf as *mut u8) = b };
-            1
-        } else {
-            0
+    let mut slot = [0u8; 1];
+    match crate::fs::fd_get(fd as usize) {
+        Some(f) if len >= 1 => {
+            let n = f.read(&mut slot);
+            if n > 0 {
+                // SAFETY: buf 为用户态地址且 len≥1；用户页已映射，恒等映射下可写。
+                unsafe { *(buf as *mut u8) = slot[0] };
+            }
+            n as u64
         }
+        _ => (-1i64) as u64, // EBADF
+    }
+}
+
+/// open(path, flags, mode)：M3 仅支持 "/dev/uart"；成功返回新 fd。
+fn sys_open(path: u64, _flags: u64, _mode: u64) -> u64 {
+    let mut pbuf = [0u8; 256];
+    // SAFETY: path 为用户态 NUL 结尾字符串。
+    let n = unsafe { copy_cstr_from_user(path, &mut pbuf) };
+    // SAFETY: pbuf[..n] 为合法 UTF-8（ASCII 路径）。
+    let name = unsafe { core::str::from_utf8_unchecked(&pbuf[..n]) };
+    match crate::fs::open_path(name) {
+        Some(f) => crate::fs::fd_alloc(f) as u64,
+        None => (-1i64) as u64, // ENOENT
+    }
+}
+
+/// close(fd)：关闭并回收 fd；成功返回 0。
+fn sys_close(fd: u64) -> u64 {
+    if crate::fs::fd_close(fd as usize) {
+        0
     } else {
         (-1i64) as u64 // EBADF
     }

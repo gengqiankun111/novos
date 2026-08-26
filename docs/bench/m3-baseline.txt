@@ -1,0 +1,31 @@
+# M3 首次内存基线（minimal 对照锚点）
+
+- 日期: 2026-08-26
+- 构建: `make image`（x86_64-unknown-none, release, opt-level=s, LTO）
+- 机器: QEMU -m 64M（多启动 1 扁平镜像）
+
+## 内核镜像尺寸（llvm-size，ELF 段）
+
+| 段 | 大小 | 说明 |
+|----|------|------|
+| .text | 21.3 KB | 代码（含 boot.asm、syscall 入口、异常 stub） |
+| .rodata | 19.7 KB | 常量 + 嵌入的用户态 init ELF（novos-init ~12 KB） |
+| .data | 13.9 KB | 页表（pml4/pdpt/pd）+ TSS + 初始化数据 |
+| .bss | 659 KB | 内核栈 64KB + syscall 栈 16KB + PAGE_FRAMES 台账 + 任务/红黑树池 |
+| 加载段合计 | ~55 KB | .text+.rodata+.data（镜像实际加载部分） |
+
+## 运行时常驻内存（启动日志 mm stats）
+
+```
+mm: heap 0x200000..0x4000000 (63488 KiB), managed pages 15872
+mm stats: buddy_pages=0 slab_pages=2 kernel_used=516096 B free_pages=15870
+```
+
+- 管理物理内存: 2MB–64MB（15872 页）
+- 内核已用（slab + 页帧台账）: 516096 B ≈ 504 KB
+- 空闲页: 15870（≈ 62 MB，用户态页表/ELF/栈页占用在切片4 后计入）
+
+## 对照锚点（M3 验收: 空闲内核常驻 ≤ 18MB）
+
+64MB 机器上常驻开销约 **0.5 MB 内核结构 + 用户态 init 页（ELF ~13KB + 页表 ~20KB + 栈 128KB）**，
+远低于 18MB 上限；后续 M4-VFS 以本基线为增量对照。

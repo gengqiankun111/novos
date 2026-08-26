@@ -11,6 +11,8 @@ use core::panic::PanicInfo;
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
+const SYS_OPEN: u64 = 2;
+const SYS_CLOSE: u64 = 3;
 const SYS_EXIT: u64 = 60;
 
 /// 通用 syscall（3 参数，Linux x86_64 约定：rax=nr, rdi/rsi/rdx=arg1-3）。
@@ -79,10 +81,27 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | echo <text> | exit | version\n");
+            print("commands: help | echo <text> | version | fdtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
+        }
+        b"fdtest" => {
+            // 验证 fd 表 + open/close：打开 /dev/uart（应得 fd 3），写入，关闭
+            let path = b"/dev/uart\0";
+            let fd = syscall3(SYS_OPEN, path.as_ptr() as u64, 0, 0);
+            if (fd as i64) < 0 {
+                print("fdtest: open failed\n");
+            } else {
+                print("fdtest: opened /dev/uart fd=");
+                print_u64(fd);
+                print("\n");
+                syscall3(SYS_WRITE, fd, "fdtest: hello via open fd\n".as_ptr() as u64, 27);
+                let r = syscall3(SYS_CLOSE, fd, 0, 0);
+                print("fdtest: close rc=");
+                print_u64(r);
+                print("\n");
+            }
         }
         b"exit" => {
             print("bye\n");
