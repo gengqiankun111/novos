@@ -71,6 +71,10 @@ pub struct Task {
     pub cwd: [u8; 64],
     /// TLS 段基址（FS base；M11-切片2 arch_prctl，随任务切换保存/恢复）。
     pub fs_base: u64,
+    /// clone flags（M11-切片3：CLONE_SETTLS/CLONE_CHILD_CLEARTID 等）。
+    pub flags: u32,
+    /// CLONE_CHILD_CLEARTID 目标地址：退出时清零并 futex 唤醒（pthread_join）。
+    pub child_tidptr: u64,
 }
 
 impl Task {
@@ -93,6 +97,8 @@ impl Task {
             cgroup: 0,
             cwd: [0; 64],
             fs_base: 0,
+            flags: 0,
+            child_tidptr: 0,
         }
     }
 }
@@ -243,6 +249,8 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             cgroup: 0,
             cwd: cwd_root(),
             fs_base: 0,
+            flags: 0,
+            child_tidptr: 0,
         };
         // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
         // SAFETY: 单核；cli 保护树操作。
@@ -503,6 +511,8 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         cgroup: 0,
         cwd: TASKS[cur].cwd,
         fs_base: TASKS[cur].fs_base,
+        flags: 0,
+        child_tidptr: 0,
     };
     // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -519,6 +529,14 @@ pub fn exit() {
     // SAFETY: 单核。
     unsafe {
         let cur = CURRENT;
+        // M11-切片3：CLONE_CHILD_CLEARTID——退出时把 tid 清零并 futex 唤醒，
+        // pthread_join 借此得知线程已结束。
+        let tidp = TASKS[cur].child_tidptr;
+        if TASKS[cur].flags & 0x0020_0000 != 0 && tidp != 0 {
+            // SAFETY: 用户地址恒等映射。
+            unsafe { core::ptr::write_volatile(tidp as *mut u32, 0) };
+            crate::futex::futex(tidp, 1, 1); // WAKE 1 个
+        }
         crate::vmm::release_as(cur);
         TASKS[cur].state = TaskState::Exited;
         // M6-切片1：用户子进程从 syscall（IF=0）退出，须先开中断，
@@ -816,11 +834,21 @@ fn alloc_task_slot() -> Option<usize> {
 /// 用户态 fork/clone：复制当前用户上下文到新任务（子返回 0），
 /// 子任务经调度器（PIT 抢占）随后在用户态继续执行。
 ///
-/// `flags` 支持 CLONE_NEWPID（0x20000000）：子进入新 pid ns，pid = 1。
+/// `flags` 支持：
+/// - CLONE_NEWPID（0x20000000）：子进入新 pid ns，pid = 1。
+/// - CLONE_NEWUTS（0x04000000）：子进入新 uts ns（hostname 独立）。
+/// - CLONE_SETTLS（0x00080000）：`tls` 即子的 FS base（pthread_create TLS）。
+/// - CLONE_CHILD_CLEARTID（0x00200000）：子退出时清零 `child_tidptr`
+///   并 futex 唤醒（pthread_join 依赖）。
 ///
 /// # Safety
 /// 由 syscall 处理器调用；`frame` 为当前 syscall 的用户上下文（固定 syscall 栈上）。
-pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: u32) -> i64 {
+pub unsafe fn user_fork(
+    frame: *const crate::interrupts::ExceptionFrame,
+    flags: u32,
+    child_tidptr: u64,
+    tls: u64,
+) -> i64 {
     let cur = CURRENT;
     let cid = match alloc_task_slot() {
         Some(c) => c,
@@ -880,7 +908,11 @@ pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: 
         uts_ns,
         cgroup: cg,
         cwd: TASKS[cur].cwd,
-        fs_base: TASKS[cur].fs_base,
+        // CLONE_SETTLS：子的 TLS 直接取 clone 参数（pthread_create 新线程
+        // 从自己的 TLS 起步）；否则继承父（fork 语义）。
+        fs_base: if flags & 0x0008_0000 != 0 { tls } else { TASKS[cur].fs_base },
+        flags,
+        child_tidptr,
     };
     // 子任务入 CFS 就绪树（同 vruntime 起点）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
