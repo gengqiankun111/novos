@@ -63,6 +63,8 @@ pub struct Task {
     pub pid: u32,
     /// pid namespace id（0 = 根）。
     pub pid_ns: u32,
+    /// uts namespace id（0 = 根）。
+    pub uts_ns: u32,
 }
 
 impl Task {
@@ -81,6 +83,7 @@ impl Task {
             cr3: 0,
             pid: 0,
             pid_ns: 0,
+            uts_ns: 0,
         }
     }
 }
@@ -220,6 +223,7 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             cr3: 0,
             pid: 0,
             pid_ns: 0,
+            uts_ns: 0,
         };
         // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
         // SAFETY: 单核；cli 保护树操作。
@@ -471,6 +475,7 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         cr3: 0,
         pid: 0,
         pid_ns: 0,
+        uts_ns: 0,
     };
     // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -563,6 +568,52 @@ pub fn register_user_task(cr3: usize) {
 static mut NS_NEXT_PID: [u32; 16] = [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
 static mut NEXT_NS: u32 = 1;
 
+// ---- uts namespace（M6-切片2）----
+
+/// uts namespace 表：ns id → hostname（0 号固定根 = "novos"）。
+static mut UTS_HOST: [[u8; 32]; 8] = [
+    *b"novos\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+    [0; 32],
+    [0; 32],
+    [0; 32],
+    [0; 32],
+    [0; 32],
+    [0; 32],
+    [0; 32],
+];
+static mut NEXT_UTS_NS: u32 = 1;
+
+/// sethostname：设置当前任务 uts ns 的 hostname。
+pub fn sethostname(name: &[u8]) -> i64 {
+    let ns = {
+        // SAFETY: 单核读。
+        unsafe { TASKS[CURRENT].uts_ns as usize }
+    };
+    let n = core::cmp::min(name.len(), 31);
+    // SAFETY: 单核写 UTS 表。
+    unsafe {
+        for (i, b) in name[..n].iter().enumerate() {
+            UTS_HOST[ns][i] = *b;
+        }
+        UTS_HOST[ns][n] = 0;
+    }
+    0
+}
+
+/// 当前任务 uts ns 的 hostname（NUL 结尾）。
+pub fn gethostname() -> &'static [u8] {
+    let ns = {
+        // SAFETY: 单核读。
+        unsafe { TASKS[CURRENT].uts_ns as usize }
+    };
+    // SAFETY: 单核读静态表。
+    unsafe {
+        let h = &UTS_HOST[ns];
+        let len = h.iter().position(|&b| b == 0).unwrap_or(h.len());
+        &h[..len]
+    }
+}
+
 /// 分配一个空闲任务槽（优先复用已回收槽，其次追加）。
 fn alloc_task_slot() -> Option<usize> {
     // SAFETY: 单核。
@@ -618,6 +669,14 @@ pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: 
         NS_NEXT_PID[ns as usize] = pid.wrapping_add(1);
         (pid, ns)
     };
+    // uts namespace：CLONE_NEWUTS → 新 uts ns（hostname 独立）；否则共享父 ns
+    let uts_ns = if flags & 0x0400_0000 != 0 {
+        let ns = NEXT_UTS_NS;
+        NEXT_UTS_NS = NEXT_UTS_NS.wrapping_add(1) & 0x7;
+        ns
+    } else {
+        TASKS[cur].uts_ns
+    };
 
     TASKS[cid] = Task {
         name: "user-child",
@@ -633,6 +692,7 @@ pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: 
         cr3: TASKS[cur].cr3, // 与父共享用户页表（内存隔离留后续切片）
         pid,
         pid_ns,
+        uts_ns,
     };
     // 子任务入 CFS 就绪树（同 vruntime 起点）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);

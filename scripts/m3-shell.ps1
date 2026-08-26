@@ -1,6 +1,6 @@
-# M3 切片4 demo: 启动内核 -> 进入用户态 shell -> 经 TCP 串口注入命令
-# -> 读取 shell 输出 -> screendump -> quit。
-# 用法: powershell -ExecutionPolicy Bypass -File scripts/m3-shell.ps1
+﻿# M3 slice demo: boot kernel -> user shell -> inject commands via serial
+# -> read shell output -> screendump -> quit.
+# Usage: powershell -ExecutionPolicy Bypass -File scripts/m3-shell.ps1
 param(
     [string]$Kernel = "target/novos-kernel.bin",
     [string]$OutDir = "images/m3",
@@ -21,7 +21,7 @@ $qemuArgs = @(
     "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
     "-serial", "chardev:com1",
     "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
-    # M5-切片3/4/5：UDP 双规则回环 + TCP hostfwd（echo + HTTP）
+    # M5 slices 3/4/5: UDP loopback rules + TCP hostfwd (echo + HTTP)
     "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000,hostfwd=tcp:127.0.0.1:80-10.0.2.15:80",
     "-display", "none", "-no-reboot",
     "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
@@ -36,21 +36,21 @@ if ($p.HasExited) {
     exit 1
 }
 
-# 经串口注入命令，并读取 shell 回显/输出（验证 sys_read/sys_write 往返）。
+# Inject commands via serial, read shell echo/output (sys_read/sys_write round trip).
 $output = ""
 try {
     $c = New-Object Net.Sockets.TcpClient
     $c.Connect("127.0.0.1", $SerialPort)
     $s = $c.GetStream()
     $s.ReadTimeout = 300
-    # 先清空启动期间已到达的输出
+    # drain boot-time output already arrived
     while ($s.DataAvailable) { [void]$s.ReadByte() }
-    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nls`nversion`n"
+    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`nls`nversion`n"
     $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
     $s.Write($bytes, 0, $bytes.Length)
     $s.Flush()
     Write-Host "commands injected, waiting for tcptest listen..."
-    # 等 guest 监听 20000 后，宿主连接并发数据、收回显（M5-切片4 演示）
+    # wait for guest to listen on 20000, then host connects and sends data, reads echo (M5 slice4 demo)
     $tcpReady = $false
     $sb = New-Object System.Text.StringBuilder
     $deadline = (Get-Date).AddMilliseconds(15000)
@@ -77,7 +77,7 @@ try {
             $tcp.Close()
         } catch { Write-Host ("host TCP io: " + $_.Exception.Message) }
     }
-    # M5-切片5：宿主 HTTP GET guest 服务（hostfwd tcp:80）
+    # M5 slice5: host HTTP GET to guest service (hostfwd tcp:80)
     $httpReady = $false
     $hdeadline = (Get-Date).AddMilliseconds(12000)
     while ((Get-Date) -lt $hdeadline -and -not $httpReady) {
@@ -113,9 +113,9 @@ try {
         } catch { Write-Host ("host HTTP io: " + $_.Exception.Message) }
     }
     Write-Host "draining output..."
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 6000
     while ($true) {
-        try { $b = $s.ReadByte() } catch { break }   # 读超时结束
+        try { $b = $s.ReadByte() } catch { break }   # read timeout ends drain
         if ($b -lt 0) { break }
         [void]$sb.Append([char]$b)
     }

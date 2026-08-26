@@ -32,6 +32,8 @@ const SYS_CLONE: u64 = 56;
 const SYS_FORK: u64 = 57;
 const SYS_GETPID: u64 = 39;
 const SYS_WAITPID: u64 = 61;
+const SYS_UNAME: u64 = 63;
+const SYS_SETHOSTNAME: u64 = 170;
 const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 
@@ -216,12 +218,24 @@ fn list_dir(p: &[u8]) {
     syscall3(SYS_CLOSE, fd, 0, 0);
 }
 
+/// 打印当前 uts ns 的 hostname（uname 的 nodename 字段，偏移 65）。
+fn print_hostname() {
+    let mut u = [0u8; 390];
+    syscall3(SYS_UNAME, u.as_mut_ptr() as u64, 0, 0);
+    let mut i = 65usize;
+    while i < 130 && u[i] != 0 {
+        i += 1;
+    }
+    // SAFETY: u[65..i] 为 hostname ASCII。
+    print(unsafe { core::str::from_utf8_unchecked(&u[65..i]) });
+}
+
 /// 内建命令执行。
 fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -540,6 +554,37 @@ fn exec(cmd: &[u8]) {
                     print_u64(wb);
                     print("\n");
                 }
+            }
+        }
+        b"utstest" => {
+            // M6-切片2：uts namespace——CLONE_NEWUTS 子进程改 hostname 不影响父。
+            print("utstest: parent hostname=");
+            print_hostname();
+            print("\n");
+            let r = syscall3(SYS_CLONE, 0x0400_0000, 0, 0); // CLONE_NEWUTS
+            if r == 0 {
+                // 子：设置自己的 hostname 并打印
+                let hn = b"childns";
+                syscall3(SYS_SETHOSTNAME, hn.as_ptr() as u64, hn.len() as u64, 0);
+                print("utstest: child hostname=");
+                print_hostname();
+                print("\n");
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                // 父：等子退出后打印自身 hostname（应仍是 novos）
+                let mut w = 0u64;
+                let mut n = 0u32;
+                while w == 0 && n < 200000 {
+                    w = syscall3(SYS_WAITPID, r, 0, 0);
+                    n += 1;
+                    let mut s = 0u32;
+                    while s < 50000 {
+                        s += 1;
+                    }
+                }
+                print("utstest: parent hostname after=");
+                print_hostname();
+                print("\n");
             }
         }
         b"exit" => {
