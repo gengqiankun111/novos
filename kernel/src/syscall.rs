@@ -58,6 +58,8 @@ pub const SYS_FW_DEL: u64 = 504;
 pub const SYS_FW_STAT: u64 = 505;
 /// Novos 扩展：BIO 扇区读写（lba, buf, len, is_write）。
 pub const SYS_BLK_RW: u64 = 506;
+/// Novos 扩展：ext4-lite 文件系统操作（op, name, buf, len, offset）。
+pub const SYS_BLKFS: u64 = 507;
 
 /// boot.asm 导出的 syscall 入口。
 extern "C" {
@@ -182,6 +184,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_FW_DEL => sys_fw_del(a1, a2),
         SYS_FW_STAT => sys_fw_stat(a1),
         SYS_BLK_RW => sys_blk_rw(a1, a2, a3, a4),
+        SYS_BLKFS => sys_blkfs(a1, a2, a3, a4, a5),
         SYS_MOUNT => sys_mount(a1, a2, a3, a4, a5),
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
@@ -651,6 +654,62 @@ fn sys_blk_rw(lba: u64, buf: u64, len: u64, is_write: u64) -> u64 {
         // SAFETY: buf 为用户态可写 len 字节。
         let dst = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
         crate::block::bio_read(lba, dst) as u64
+    }
+}
+
+/// 从用户态取名字（原样，不做 cwd 解析——ext4-lite 文件名为纯键）。
+fn copy_name(path: u64) -> Result<alloc::string::String, u64> {
+    let mut nb = [0u8; 64];
+    // SAFETY: path 为用户态 NUL 结尾字符串。
+    let n = unsafe { copy_cstr_from_user(path, &mut nb) };
+    // SAFETY: 文件名为 ASCII。
+    Ok(alloc::string::String::from(unsafe {
+        core::str::from_utf8_unchecked(&nb[..n])
+    }))
+}
+
+/// blkfs(op, name, buf, len, offset)：ext4-lite 文件系统操作（M10-切片2）。
+/// op：0=init 1=create 2=write 3=read 4=unlink 5=sync 6=drop-cache 7=list。
+fn sys_blkfs(op: u64, name: u64, buf: u64, len: u64, offset: u64) -> u64 {
+    match op {
+        0 => crate::ext4::blkfs_init() as u64,
+        1 => match copy_name(name) {
+            Ok(n) => crate::ext4::blkfs_create(&n) as u64,
+            Err(e) => e,
+        },
+        2 => {
+            let nm = match copy_name(name) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
+            // SAFETY: buf 为用户态可读 len 字节。
+            let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
+            crate::ext4::blkfs_write(&nm, data, offset as usize) as u64
+        }
+        3 => {
+            let nm = match copy_name(name) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
+            // SAFETY: buf 为用户态可写 len 字节。
+            let dst = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            crate::ext4::blkfs_read(&nm, dst, offset as usize) as u64
+        }
+        4 => match copy_name(name) {
+            Ok(n) => crate::ext4::blkfs_unlink(&n) as u64,
+            Err(e) => e,
+        },
+        5 => crate::ext4::blkfs_sync() as u64,
+        6 => {
+            crate::ext4::blkfs_drop();
+            0
+        }
+        7 => {
+            // SAFETY: buf 为用户态可写 len 字节。
+            let dst = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            crate::ext4::blkfs_list(dst) as u64
+        }
+        _ => (-22i64) as u64, // EINVAL
     }
 }
 

@@ -45,6 +45,7 @@ const SYS_FW_ADD: u64 = 503;
 const SYS_FW_DEL: u64 = 504;
 const SYS_FW_STAT: u64 = 505;
 const SYS_BLK_RW: u64 = 506;
+const SYS_BLKFS: u64 = 507;
 
 // open flags（Linux O_*）
 const O_CREAT: u64 = 0o100;
@@ -258,7 +259,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1314,6 +1315,67 @@ fn exec(cmd: &[u8]) {
             if all_zero {
                 print("blktest: fresh sector zero ok\n");
             }
+        }
+        b"ext4test" => {
+            // M10-切片2：ext4-lite 持久化文件系统 + Page Cache——创建/读写/删除，
+            // sync 落盘 + drop 缓存模拟重启后仍能读回（持久化）。
+            let rc0 = syscall6(SYS_BLKFS, 0, 0, 0, 0, 0, 0);
+            print("ext4test: init rc=");
+            print_u64(rc0);
+            print("\n");
+            // 1) create + write + read
+            let rc1 = syscall6(SYS_BLKFS, 1, b"persist.txt\0".as_ptr() as u64, 0, 0, 0, 0);
+            print("ext4test: create rc=");
+            print_u64(rc1);
+            print("\n");
+            let msg = b"disk-forever";
+            let rc2 = syscall6(SYS_BLKFS, 2, b"persist.txt\0".as_ptr() as u64, msg.as_ptr() as u64, msg.len() as u64, 0, 0);
+            print("ext4test: write rc=");
+            print_u64(rc2);
+            print("\n");
+            let mut rb = [0u8; 128];
+            let rn = syscall6(SYS_BLKFS, 3, b"persist.txt\0".as_ptr() as u64, rb.as_mut_ptr() as u64, 128, 0, 0);
+            print("ext4test: read rc=");
+            print_u64(rn);
+            print(" data=");
+            print(unsafe { core::str::from_utf8_unchecked(&rb[..rn as usize]) });
+            print("\n");
+            // 2) list
+            let mut lb = [0u8; 256];
+            let ln = syscall6(SYS_BLKFS, 7, 0, lb.as_mut_ptr() as u64, 256, 0, 0);
+            print("ext4test: list: ");
+            print(unsafe { core::str::from_utf8_unchecked(&lb[..ln as usize]) });
+            print("\n");
+            // 3) sync 落盘 + drop 缓存（模拟重启）+ 再读
+            let rc3 = syscall6(SYS_BLKFS, 5, 0, 0, 0, 0, 0);
+            print("ext4test: sync rc=");
+            print_u64(rc3);
+            print("\n");
+            syscall6(SYS_BLKFS, 6, 0, 0, 0, 0, 0);
+            print("ext4test: cache dropped\n");
+            let mut rb2 = [0u8; 128];
+            let rn2 = syscall6(SYS_BLKFS, 3, b"persist.txt\0".as_ptr() as u64, rb2.as_mut_ptr() as u64, 128, 0, 0);
+            print("ext4test: after reboot read: ");
+            print(unsafe { core::str::from_utf8_unchecked(&rb2[..rn2 as usize]) });
+            print("\n");
+            if rn2 as usize == msg.len() && &rb2[..msg.len()] == msg {
+                print("ext4test: persisted across reboot\n");
+            } else {
+                print("ext4test: persist FAILED\n");
+            }
+            // 4) 多文件 + 删除
+            syscall6(SYS_BLKFS, 1, b"second.txt\0".as_ptr() as u64, 0, 0, 0, 0);
+            let m2 = b"file2";
+            syscall6(SYS_BLKFS, 2, b"second.txt\0".as_ptr() as u64, m2.as_ptr() as u64, m2.len() as u64, 0, 0);
+            let rc4 = syscall6(SYS_BLKFS, 4, b"second.txt\0".as_ptr() as u64, 0, 0, 0, 0);
+            print("ext4test: unlink rc=");
+            print_u64(rc4);
+            print("\n");
+            let mut lb2 = [0u8; 256];
+            let ln2 = syscall6(SYS_BLKFS, 7, 0, lb2.as_mut_ptr() as u64, 256, 0, 0);
+            print("ext4test: list after unlink: ");
+            print(unsafe { core::str::from_utf8_unchecked(&lb2[..ln2 as usize]) });
+            print("\n");
         }
         b"exit" => {
             print("bye\n");
