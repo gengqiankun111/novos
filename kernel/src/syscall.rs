@@ -33,6 +33,8 @@ pub const SYS_EPOLL_CTL: u64 = 233;
 pub const SYS_CLONE: u64 = 56;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_WAITPID: u64 = 61;
+pub const SYS_UNAME: u64 = 63;
+pub const SYS_SETHOSTNAME: u64 = 170;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
@@ -160,6 +162,8 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
         SYS_WAITPID => sys_waitpid(a1, a2, a3),
+        SYS_UNAME => sys_uname(a1),
+        SYS_SETHOSTNAME => sys_sethostname(a1, a2),
         SYS_EXIT => sys_exit(a1),
         _ => (-1i64) as u64, // ENOSYS
     }
@@ -458,6 +462,32 @@ fn sys_getpid() -> u64 {
 /// waitpid(pid, status, options)：非阻塞——子已 Exited 则回收并返回 pid，否则 0。
 fn sys_waitpid(pid: u64, _status: u64, _options: u64) -> u64 {
     crate::task::waitpid_nb(pid as usize) as u64
+}
+
+/// uname(buf)：填 struct utsname（6×65 字节域）——uts namespace 隔离展示。
+fn sys_uname(buf: u64) -> u64 {
+    let mut u = [0u8; 390];
+    let put = |dst: &mut [u8; 390], off: usize, s: &[u8]| {
+        let n = core::cmp::min(s.len(), 64);
+        dst[off..off + n].copy_from_slice(&s[..n]);
+    };
+    put(&mut u, 0, b"Novos");
+    put(&mut u, 65, crate::task::gethostname());
+    put(&mut u, 130, b"0.3.0");
+    put(&mut u, 195, b"M6-uts");
+    put(&mut u, 260, b"x86_64");
+    put(&mut u, 325, b"");
+    // SAFETY: buf 为用户态地址（390 字节可写）。
+    unsafe { core::ptr::copy_nonoverlapping(u.as_ptr(), buf as *mut u8, 390) };
+    0
+}
+
+/// sethostname(name, len)：设置当前 uts ns 的 hostname。
+fn sys_sethostname(name: u64, len: u64) -> u64 {
+    let n = core::cmp::min(len as usize, 31);
+    // SAFETY: name 为用户态可读 n 字节。
+    let data = unsafe { core::slice::from_raw_parts(name as *const u8, n) };
+    crate::task::sethostname(data) as u64
 }
 
 /// exit(code)：用户态进程退出——M3 切片先打印并停机（真正的 exit 待进程模型完善）。
