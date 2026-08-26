@@ -44,6 +44,8 @@ pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_MOUNT: u64 = 165;
 pub const SYS_GETDENTS64: u64 = 217;
+pub const SYS_GETCWD: u64 = 79;
+pub const SYS_CHDIR: u64 = 80;
 
 /// boot.asm 导出的 syscall 入口。
 extern "C" {
@@ -160,6 +162,8 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_MKDIR => sys_mkdir(a1, a2),
         SYS_RMDIR => sys_rmdir(a1),
         SYS_UNLINK => sys_unlink(a1),
+        SYS_GETCWD => sys_getcwd(a1, a2),
+        SYS_CHDIR => sys_chdir(a1),
         SYS_MOUNT => sys_mount(a1, a2, a3, a4, a5),
         SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
@@ -229,12 +233,11 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
 
 /// open(path, flags, mode)："/dev/uart" 或 ramfs 文件（O_CREAT 创建）；成功返回新 fd。
 fn sys_open(path: u64, flags: u64, _mode: u64) -> u64 {
-    let mut pbuf = [0u8; 256];
-    // SAFETY: path 为用户态 NUL 结尾字符串。
-    let n = unsafe { copy_cstr_from_user(path, &mut pbuf) };
-    // SAFETY: pbuf[..n] 为合法 UTF-8（ASCII 路径）。
-    let name = unsafe { core::str::from_utf8_unchecked(&pbuf[..n]) };
-    match crate::fs::open_path(name, flags) {
+    let name = match copy_path(path) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match crate::fs::open_path(&name, flags) {
         Ok(f) => crate::fs::fd_alloc(f) as u64,
         Err(e) => e as u64, // 负 errno（按 Linux ABI 返回 -errno）
     }
@@ -255,15 +258,43 @@ fn sys_close(fd: u64) -> u64 {
     }
 }
 
-/// 拷贝用户态路径到 String，返回名称。
+/// 拷贝用户态路径到 String 并解析为绝对路径（M8-切片1：相对路径以 cwd 为前缀，
+/// 处理 "." / ".."）。
 fn copy_path(path: u64) -> Result<alloc::string::String, u64> {
     let mut pbuf = [0u8; 256];
     // SAFETY: path 为用户态 NUL 结尾字符串。
     let n = unsafe { copy_cstr_from_user(path, &mut pbuf) };
     // SAFETY: pbuf[..n] 为合法 UTF-8（ASCII 路径）。
-    Ok(alloc::string::String::from(unsafe {
-        core::str::from_utf8_unchecked(&pbuf[..n])
-    }))
+    let raw = unsafe { core::str::from_utf8_unchecked(&pbuf[..n]) };
+    Ok(resolve_abs(raw))
+}
+
+/// 相对路径 → 绝对路径：以当前任务 cwd 为前缀，逐组件处理 "." / ".."。
+fn resolve_abs(path: &str) -> alloc::string::String {
+    if path.starts_with('/') {
+        return alloc::string::String::from(path);
+    }
+    let cwd = crate::task::current_cwd();
+    // SAFETY: cwd 为内核内部 NUL 结尾 ASCII。
+    let cwd_str = unsafe { core::str::from_utf8_unchecked(cwd) };
+    let mut parts: alloc::vec::Vec<&str> =
+        cwd_str.split('/').filter(|c| !c.is_empty()).collect();
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    if parts.is_empty() {
+        alloc::string::String::from("/")
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(&parts.join("/"));
+        s
+    }
 }
 
 /// mkdir(path, mode)：创建目录；成功 0，失败负 errno。
@@ -274,6 +305,39 @@ fn sys_mkdir(path: u64, _mode: u64) -> u64 {
             Err(e) => e as u64,
         },
         Err(e) => e,
+    }
+}
+
+/// getcwd(buf, size)：拷贝当前任务 cwd（NUL 结尾）到用户缓冲；返回长度（M8-切片1）。
+fn sys_getcwd(buf: u64, size: u64) -> u64 {
+    let cwd = crate::task::current_cwd();
+    let need = cwd.len() + 1;
+    if (size as usize) < need {
+        return (-34i64) as u64; // ERANGE
+    }
+    // SAFETY: buf 为用户态可写缓冲区，size 已校验 ≥ need。
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf as *mut u8, cwd.len());
+        *(buf as *mut u8).add(cwd.len()) = 0;
+    }
+    cwd.len() as u64
+}
+
+/// chdir(path)：切换当前任务工作目录（M8-切片1）；成功 0。
+fn sys_chdir(path: u64) -> u64 {
+    let name = match copy_path(path) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match crate::fs::stat_path(&name) {
+        Ok((_, mode, _, _)) if mode & crate::fs::S_IFDIR != 0 => {
+            match crate::task::set_cwd(&name) {
+                Ok(()) => 0,
+                Err(e) => e as u64,
+            }
+        }
+        Ok(_) => (-20i64) as u64, // ENOTDIR
+        Err(e) => e as u64,
     }
 }
 

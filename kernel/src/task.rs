@@ -67,6 +67,8 @@ pub struct Task {
     pub uts_ns: u32,
     /// cgroup id（0 = 根；pids/内存记账用）。
     pub cgroup: u32,
+    /// 当前工作目录（NUL 结尾绝对路径；chdir 修改，M8-切片1）。
+    pub cwd: [u8; 64],
 }
 
 impl Task {
@@ -87,8 +89,16 @@ impl Task {
             pid_ns: 0,
             uts_ns: 0,
             cgroup: 0,
+            cwd: [0; 64],
         }
     }
+}
+
+/// 根 cwd = "/"。
+fn cwd_root() -> [u8; 64] {
+    let mut c = [0u8; 64];
+    c[0] = b'/';
+    c
 }
 
 static mut TASKS: [Task; MAX_TASKS] = [Task::empty(); MAX_TASKS];
@@ -228,6 +238,7 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             pid_ns: 0,
             uts_ns: 0,
             cgroup: 0,
+            cwd: cwd_root(),
         };
         // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
         // SAFETY: 单核；cli 保护树操作。
@@ -481,6 +492,7 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         pid_ns: 0,
         uts_ns: 0,
         cgroup: 0,
+        cwd: TASKS[cur].cwd,
     };
     // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -566,7 +578,32 @@ pub fn register_user_task(cr3: usize) {
         TASKS[0].cr3 = cr3;
         TASKS[0].pid = 1; // 根 ns 的 init（pid 1）
         TASKS[0].pid_ns = 0;
+        TASKS[0].cwd = cwd_root();
     }
+}
+
+/// 当前任务 cwd（NUL 结尾绝对路径）。
+pub fn current_cwd() -> &'static [u8] {
+    // SAFETY: 单核读。
+    unsafe {
+        let c = &TASKS[CURRENT].cwd;
+        let len = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+        &c[..len]
+    }
+}
+
+/// 设置当前任务 cwd（chdir 用；path 为已校验存在的绝对目录路径）。
+pub fn set_cwd(path: &str) -> Result<(), i64> {
+    if path.len() >= 63 {
+        return Err(-36i64); // ENAMETOOLONG
+    }
+    let mut buf = [0u8; 64];
+    buf[..path.len()].copy_from_slice(path.as_bytes());
+    // SAFETY: 单核写。
+    unsafe {
+        TASKS[CURRENT].cwd = buf;
+    }
+    Ok(())
 }
 
 /// pid namespace 表：ns id → 下一个可分配 pid（0 号固定根 ns）。
@@ -742,6 +779,7 @@ pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: 
         pid_ns,
         uts_ns,
         cgroup: cg,
+        cwd: TASKS[cur].cwd,
     };
     // 子任务入 CFS 就绪树（同 vruntime 起点）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);

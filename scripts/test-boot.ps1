@@ -90,7 +90,7 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -217,7 +217,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -267,7 +267,16 @@ if ($Mode -eq "boot") {
         "whtest: lower intact: to-delete",    # M7-切片2：删除后 lower 保持只读不变
         "whtest: merged listing clean",       # M7-切片2：合并视图无 del.txt、无 .wh.* 标记
         "whtest: recreate: reborn",           # M7-切片2：重建同路径文件覆盖 whiteout
-        "whtest: log tmpfs read: log-line-1"  # M7-切片2：容器日志 tmpfs 挂载读写
+        "whtest: log tmpfs read: log-line-1", # M7-切片2：容器日志 tmpfs 挂载读写
+        "novos run: rootfs mounted",          # M8-切片1：容器 rootfs overlay 挂载
+        "novos run: container init pid=1 host=c0", # M8-切片1：容器 init 在 pid/uts ns 隔离
+        "novos run: chdir rc=0 cwd=/containers/c0/rootfs", # M8-切片1：chdir 进容器 rootfs
+        "novos run: rootfs read: app-data",   # M8-切片1：经 rootfs 合并视图读镜像层
+        "novos run: container log: c0-booted", # M8-切片1：容器写进 upper 层
+        "novos run: cg pids=2 mem=65536",     # M8-切片1：容器进程 cgroup 记账
+        "novos run: after reap pids=1 mem=0", # M8-切片1：回收后 cgroup 回到基线
+        "novos run: image intact: app-data",  # M8-切片1：镜像层未被容器写污染
+        "novos run: container exited"         # M8-切片1：容器生命周期回收完成
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
