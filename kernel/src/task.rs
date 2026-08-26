@@ -69,6 +69,8 @@ pub struct Task {
     pub cgroup: u32,
     /// 当前工作目录（NUL 结尾绝对路径；chdir 修改，M8-切片1）。
     pub cwd: [u8; 64],
+    /// TLS 段基址（FS base；M11-切片2 arch_prctl，随任务切换保存/恢复）。
+    pub fs_base: u64,
 }
 
 impl Task {
@@ -90,6 +92,7 @@ impl Task {
             uts_ns: 0,
             cgroup: 0,
             cwd: [0; 64],
+            fs_base: 0,
         }
     }
 }
@@ -239,6 +242,7 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             uts_ns: 0,
             cgroup: 0,
             cwd: cwd_root(),
+            fs_base: 0,
         };
         // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
         // SAFETY: 单核；cli 保护树操作。
@@ -335,6 +339,11 @@ pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
         if cr3 != 0 {
             // SAFETY: CR3 切换为特权指令；目标为用户进程页表（含内核恒等映射）。
             core::arch::asm!("mov cr3, {0}", in(reg) cr3, options(nostack, nomem));
+        }
+        // M11-切片2：恢复目标任务的 TLS（FS base）——用户态 %fs 寻址依赖。
+        // SAFETY: 单核 + 关中断（tick 上下文）。
+        unsafe {
+            restore_fs_base(next);
         }
     }
     TASKS[next].ctx_rsp as *mut ExceptionFrame
@@ -493,6 +502,7 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         uts_ns: 0,
         cgroup: 0,
         cwd: TASKS[cur].cwd,
+        fs_base: TASKS[cur].fs_base,
     };
     // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -649,6 +659,51 @@ pub fn set_cwd(path: &str) -> Result<(), i64> {
         TASKS[CURRENT].cwd = buf;
     }
     Ok(())
+}
+
+// ---- TLS（M11-切片2：arch_prctl ARCH_SET_FS/ARCH_GET_FS）----
+
+/// 写 FS base MSR。
+///
+/// # Safety
+/// wrmsr 为特权指令。
+unsafe fn wrmsr_fs_base(v: u64) {
+    // SAFETY: MSR_FS_BASE=0xC0000100。
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC000_0100u32,
+            in("eax") v as u32,
+            in("edx") (v >> 32) as u32,
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// 设置当前任务 TLS 段基址（FS base），并写入 MSR。
+pub fn set_fs_base(v: u64) {
+    // SAFETY: 单核写 + wrmsr 特权指令。
+    unsafe {
+        TASKS[CURRENT].fs_base = v;
+        wrmsr_fs_base(v);
+    }
+}
+
+/// 当前任务 TLS 段基址（FS base）。
+pub fn get_fs_base() -> u64 {
+    // SAFETY: 单核读。
+    unsafe { TASKS[CURRENT].fs_base }
+}
+
+/// 切任务时恢复目标任务的 FS base（与 CR3/RSP0 一并由调度器切换）。
+///
+/// # Safety
+/// 在 on_timer_tick（关中断）中调用。
+unsafe fn restore_fs_base(id: usize) {
+    // SAFETY: 单核 + 关中断。
+    unsafe {
+        wrmsr_fs_base(TASKS[id].fs_base);
+    }
 }
 
 /// pid namespace 表：ns id → 下一个可分配 pid（0 号固定根 ns）。
@@ -825,6 +880,7 @@ pub unsafe fn user_fork(frame: *const crate::interrupts::ExceptionFrame, flags: 
         uts_ns,
         cgroup: cg,
         cwd: TASKS[cur].cwd,
+        fs_base: TASKS[cur].fs_base,
     };
     // 子任务入 CFS 就绪树（同 vruntime 起点）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);

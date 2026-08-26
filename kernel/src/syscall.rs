@@ -47,6 +47,8 @@ pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
 pub const SYS_FUTEX: u64 = 202;
+/// arch_prctl：TLS 段基址（FS base）设置/查询（M11-切片2）。
+pub const SYS_ARCH_PRCTL: u64 = 158;
 /// Novos 扩展：添加 NAT 端口映射规则（网关控制面）。
 pub const SYS_NAT_ADD: u64 = 501;
 /// Novos 扩展：读 conntrack 统计 { 条目数, 命中数 }。
@@ -180,6 +182,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_GETCWD => sys_getcwd(a1, a2),
         SYS_CHDIR => sys_chdir(a1),
         SYS_FUTEX => sys_futex(a1, a2, a3),
+        SYS_ARCH_PRCTL => sys_arch_prctl(a1, a2),
         SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
         SYS_CT_STAT => sys_ct_stat(a1),
         SYS_FW_ADD => sys_fw_add(a1, a2, a3),
@@ -371,6 +374,28 @@ fn sys_chdir(path: u64) -> u64 {
 fn sys_futex(uaddr: u64, op: u64, val: u64) -> u64 {
     // SAFETY: 用户地址恒等映射，由 futex 模块校验语义。
     unsafe { crate::futex::futex(uaddr, op, val) }
+}
+
+/// arch_prctl(code, addr)：TLS 段基址（FS base）设置/查询（M11-切片2）。
+///
+/// - ARCH_SET_FS(0x1002)：addr 即新的 FS base，写入任务 TLS 字段并写 MSR。
+/// - ARCH_GET_FS(0x1003)：把当前 FS base 写入 *(u64*)addr（用户恒等映射）。
+fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
+    const ARCH_SET_FS: u64 = 0x1002;
+    const ARCH_GET_FS: u64 = 0x1003;
+    match code {
+        ARCH_SET_FS => {
+            crate::task::set_fs_base(addr);
+            0
+        }
+        ARCH_GET_FS => {
+            let v = crate::task::get_fs_base();
+            // SAFETY: 用户地址恒等映射（与 sys_write 相同约束）。
+            unsafe { core::ptr::write_volatile(addr as *mut u64, v) };
+            0
+        }
+        _ => (-22i64) as u64, // EINVAL
+    }
 }
 
 /// rmdir(path)：删除空目录；成功 0，失败负 errno。
