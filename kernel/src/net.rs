@@ -461,47 +461,47 @@ impl VirtioNet {
     }
 }
 
-// ---- 端口 I/O（u8/u16/u32）----
+// ---- 端口 I/O（u8/u16/u32；供 net/block 驱动共用）----
 
-fn io_read8(port: u16) -> u8 {
+pub(crate) fn io_read8(port: u16) -> u8 {
     let v: u8;
     // SAFETY: 端口为 virtio 配置寄存器。
     unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
     v
 }
 
-fn io_write8(port: u16, val: u8) {
+pub(crate) fn io_write8(port: u16, val: u8) {
     // SAFETY: 端口为 virtio 配置寄存器。
     unsafe { asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags)) };
 }
 
-fn io_read16(port: u16) -> u16 {
+pub(crate) fn io_read16(port: u16) -> u16 {
     let v: u16;
     // SAFETY: 端口为 virtio 配置寄存器。
     unsafe { asm!("in ax, dx", out("ax") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
     v
 }
 
-fn io_write16(port: u16, val: u16) {
+pub(crate) fn io_write16(port: u16, val: u16) {
     // SAFETY: 端口为 virtio 配置寄存器。
     unsafe { asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags)) };
 }
 
-fn io_read32(port: u16) -> u32 {
+pub(crate) fn io_read32(port: u16) -> u32 {
     let v: u32;
     // SAFETY: 端口为 virtio 配置寄存器。
     unsafe { asm!("in eax, dx", out("eax") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
     v
 }
 
-fn io_write32(port: u16, val: u32) {
+pub(crate) fn io_write32(port: u16, val: u32) {
     // SAFETY: 端口为 virtio 配置寄存器。
     unsafe { asm!("out dx, eax", in("dx") port, in("eax") val, options(nomem, nostack, preserves_flags)) };
 }
 
 // ---- PCI 配置空间 ----
 
-fn pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
+pub(crate) fn pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     let addr = 0x8000_0000u32
         | ((bus as u32) << 16)
         | ((dev as u32) << 11)
@@ -511,7 +511,7 @@ fn pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     io_read32(PCI_CONFIG_DATA)
 }
 
-fn pci_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
+pub(crate) fn pci_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
     let addr = 0x8000_0000u32
         | ((bus as u32) << 16)
         | ((dev as u32) << 11)

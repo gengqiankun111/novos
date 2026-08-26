@@ -10,6 +10,7 @@ extern crate alloc;
 core::arch::global_asm!(include_str!("boot.asm"), options(att_syntax));
 
 pub mod dcache;
+pub mod block;
 pub mod elf;
 pub mod fs;
 pub mod gdt;
