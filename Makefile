@@ -7,6 +7,12 @@ KERNEL_TARGET := x86_64-unknown-none
 KERNEL_ELF    := target/$(KERNEL_TARGET)/release/novos-kernel
 KERNEL_BIN    := target/novos-kernel.bin
 
+# rustup 安装的 cargo 路径（便携 make 的 MSYS bash 会丢弃 Windows PATH 中的
+# 部分条目；cargo bin 目录需显式补到 PATH。MSYS bash 只认 /c/... 风格路径，
+# 故用 cygpath 转换；Linux 下该变量为空、无副作用）
+CARGO_DIR := $(shell cygpath -u "$(USERPROFILE)/.cargo/bin" 2>/dev/null)
+RUST_PATH := PATH="$(CARGO_DIR):$$PATH"
+
 # objcopy：Windows(MSVC) 宿主用 llvm-objcopy，Linux 用 rust-objcopy
 ifeq ($(OS),Windows_NT)
   LLVM_OBJCOPY := $(shell rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-objcopy
@@ -21,10 +27,22 @@ else
   QEMU ?= qemu-system-x86_64
 endif
 
-.PHONY: build image run qemu test test-integration test-memory clean
+.PHONY: build build-userspace image run qemu test test-integration test-memory clean
 
-build:
-	cargo build -p novos-kernel --target $(KERNEL_TARGET) --release
+# 先构建用户态 init/shell（ELF 嵌入内核镜像），再构建内核。
+# userspace 的链接参数由 userspace/.cargo/config.toml 提供（CWD=userspace 生效）。
+# cargo 不跟踪链接脚本变化：linker.ld 比 main.rs 新时 touch main.rs 强制重链
+# （宿主机无 MSVC link.exe，userspace 不能带 build.rs）。
+build-userspace:
+	@if [ userspace/linker.ld -nt userspace/src/main.rs ]; then \
+		echo "linker.ld changed, touching main.rs to force relink"; \
+		touch userspace/src/main.rs; \
+	fi
+	cd userspace && $(RUST_PATH) cargo build --release
+
+# 内核链接参数用 RUSTFLAGS env（根 .cargo/config.toml 已清空，避免泄漏进 userspace）
+build: build-userspace
+	$(RUST_PATH) RUSTFLAGS="-C link-arg=-Tkernel/linker.ld -C relocation-model=static -C relro-level=off" cargo build -p novos-kernel --target $(KERNEL_TARGET) --release
 
 # ELF → 扁平二进制（QEMU multiboot loader 需要非 ELF 文件）
 image: build
@@ -41,9 +59,12 @@ qemu: image
 		-no-reboot \
 		-display none
 
-# CI 用（Linux `timeout`）；本地直接 `make qemu`
-test:
-	cargo test --workspace
+# 集成测试（Windows 便携 make）：QEMU 引导 -> 用户态 shell -> 注入命令 -> 断言输出。
+# 说明：裸机内核无法用 cargo test（host 目标编译 boot.asm 会因 .note.Xen 报错，
+# 且 no_std 内核无可运行测试），故测试走 QEMU 真实执行路径。
+test: image
+	powershell -ExecutionPolicy Bypass -File scripts/test-boot.ps1 -Mode boot
+	powershell -ExecutionPolicy Bypass -File scripts/test-boot.ps1 -Mode shell
 
 test-integration: image
 	timeout 15 $(QEMU) -kernel $(KERNEL_BIN) -m 64M -serial file:target/integration.log -display none -no-reboot -no-shutdown -d guest_errors || true

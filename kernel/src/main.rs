@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{gdt, interrupts, mm, multiboot2, page_table, println, serial, syscall, vga};
+use novos_kernel::{elf, gdt, interrupts, mm, multiboot2, println, serial, syscall, vga};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -82,14 +82,9 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         mm::free_page_count()
     );
 
-    // M3 切片3：构建用户态页表 + 进入 ring3（不返回）。
-    let pt = page_table::build();
-    println!(
-        "m3: user page table ready (pml4={:#x} code={:#x})",
-        pt.pml4, pt.code_phys
-    );
-    println!("m3: entering user mode (ring3)...");
-    page_table::enter_user(&pt);
+    // M3 切片4：ELF 加载器 → 进入用户态 init/shell（不返回）。
+    println!("m3: loading embedded userspace init (ELF)...");
+    elf::load_and_run();
 
     // 以下不可达
     println!("Novos-OS: init done, entering idle halt loop");

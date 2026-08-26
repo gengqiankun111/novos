@@ -8,6 +8,7 @@ use core::fmt::Write;
 use spin::Mutex;
 
 /// COM1 寄存器偏移（相对 0x3F8）。
+const RBR: u16 = 0; // 接收缓冲寄存器（读）
 const THR: u16 = 0; // 发送保持寄存器（写）
 const DLL: u16 = 0; // 分频低字节（DLAB=1 时）
 const IER: u16 = 1; // 中断使能
@@ -18,6 +19,7 @@ const MCR: u16 = 4; // 调制解调器控制
 const LSR: u16 = 5; // 线状态
 
 const LSR_THR_EMPTY: u8 = 0x20; // 发送保持寄存器空
+const LSR_DATA_READY: u8 = 0x01; // 接收数据就绪
 
 static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort);
 
@@ -46,6 +48,15 @@ impl SerialPort {
         Self::write_reg(THR, byte);
     }
 
+    /// 非阻塞读一个字节：接收缓冲有数据则返回，否则 None。
+    fn read_byte(&mut self) -> Option<u8> {
+        if Self::read_reg(LSR) & LSR_DATA_READY != 0 {
+            Some(Self::read_reg(RBR))
+        } else {
+            None
+        }
+    }
+
     /// COM1 基址。
     const fn base_addr() -> u16 {
         0x3F8
@@ -67,6 +78,11 @@ impl SerialPort {
 /// 初始化串口。
 pub fn init() {
     SERIAL.lock().init();
+}
+
+/// 非阻塞读一个字节（read 系统调用用）。有数据返回 Some(b)，否则 None。
+pub fn read_byte() -> Option<u8> {
+    SERIAL.lock().read_byte()
 }
 
 /// 带锁输出格式化字符串（`fmt::Write` 对串口永不出错，忽略 Result）。

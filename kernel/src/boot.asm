@@ -205,16 +205,20 @@ syscall_stack_top:
 # syscall 入口（由 syscall 指令进入）：
 # 进入时 RCX=用户 RIP, R11=用户 RFLAGS, RSP=用户栈, CS=0x08, SS=0x10（CPU 不切栈）。
 # 构造与中断一致的 ExceptionFrame，iretq 返回（复用 Rust handler 模式）。
+#
+# 注意：syscall 须透传全部通用寄存器（仅 rcx/r11 例外）。本入口需用 r12 暂存
+# 用户 RSP，故先把用户 r12 溢出到用户栈 [rsp-8]（ABI 红区/scratch；iretq 恢复
+# 原始 rsp 后该位置对用户不可见），再在 rust_syscall_handler 中取回修复。
 # ---------------------------------------------------------------------------
 .section .text
 .global syscall_entry
 syscall_entry:
-    # 保存用户栈指针，切换到 syscall 内核栈
-    movq %rsp, %r12
+    pushq %r12             # [用户栈 rsp-8] = 用户 r12（溢出保存）
+    movq %rsp, %r12        # r12 = 用户 rsp-8
     movabsq $syscall_stack_top, %rsp
     # 构造 ExceptionFrame（从高到低 push：ss,rsp,rflags,cs,rip,err,vec,rax..r15）
     pushq $0x1B            # ss = user data (0x18 | 3)
-    pushq %r12             # rsp = 用户栈
+    pushq %r12             # rsp（= 用户 rsp-8，rust_syscall_handler 修复为原值）
     pushq %r11             # rflags
     pushq $0x23            # cs = user code (0x20 | 3)
     pushq %rcx             # rip = 用户返回地址
@@ -231,12 +235,12 @@ syscall_entry:
     pushq %r9
     pushq %r10
     pushq %r11
-    pushq %r12
+    pushq %r12             # r12（= 用户 rsp-8，rust_syscall_handler 修复为用户 r12）
     pushq %r13
     pushq %r14
     pushq %r15
     movq %rsp, %rdi        # frame 指针
-    call rust_syscall_handler   # 返回后 frame 已修改（rax=返回值）
+    call rust_syscall_handler   # 返回后 frame 已修改（rax=返回值，rsp/r12 已修复）
     # 恢复通用寄存器
     popq %r15
     popq %r14
@@ -254,7 +258,7 @@ syscall_entry:
     popq %rbx
     popq %rax
     addq $16, %rsp         # 跳过 vec + err
-    iretq                  # 弹 rip/cs/rflags/rsp/ss 回用户态
+    iretq                  # 弹 rip/cs/rflags/rsp/ss 回用户态（rsp 为修复后的原值）
 
 # ---------------------------------------------------------------------------
 # 异常 stub 表：每个向量一个 16 字节槽，统一进入 exception_common

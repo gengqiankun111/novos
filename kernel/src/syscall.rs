@@ -72,6 +72,13 @@ pub fn init() {
 pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
     // SAFETY: frame 由 syscall_entry 构造。
     let f = unsafe { &mut *frame };
+    // syscall_entry 用 r12 暂存用户 RSP，已把用户 r12 溢出到用户栈 [rsp-8]：
+    // 修复帧中的 rsp（恢复原值）与 r12（取回溢出值），保证 syscall 透传所有寄存器。
+    let user_rsp = f.rsp + 8;
+    // SAFETY: f.rsp 指向用户栈上 syscall_entry 溢出保存的用户 r12（用户页已映射）。
+    let user_r12 = unsafe { *(f.rsp as *const u64) };
+    f.r12 = user_r12;
+    f.rsp = user_rsp;
     let nr = f.rax; // syscall 号
     let ret = dispatch(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
     f.rax = ret; // 返回值写回 rax
@@ -111,9 +118,19 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
     }
 }
 
-/// read(fd, buf, len)：M3 切片暂不支持串口读，返回 0（EOF）。
-fn sys_read(_fd: u64, _buf: u64, _len: u64) -> u64 {
-    0
+/// read(fd, buf, len)：非阻塞串口读。fd=0 时若有数据写 1 字节并返回 1，否则返回 0。
+fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
+    if fd == 0 && len >= 1 {
+        if let Some(b) = crate::serial::read_byte() {
+            // SAFETY: buf 为用户态地址且 len≥1；用户页已映射，恒等映射下可写。
+            unsafe { *(buf as *mut u8) = b };
+            1
+        } else {
+            0
+        }
+    } else {
+        (-1i64) as u64 // EBADF
+    }
 }
 
 /// getpid()：返回当前任务 id（M3 切片：固定 1）。

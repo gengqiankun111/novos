@@ -1,8 +1,3 @@
-[target.x86_64-unknown-none]
-# 裸机 target 用 rustc 自带 rust-lld 链接，无需宿主链接器。
-rustflags = [
-    "-C", "link-arg=-Tkernel/linker.ld",
-    # 内核固定地址链接：禁用 PIE（避免 R_X86_64_32 重定位错误）
-    "-C", "relocation-model=static",
-    "-C", "relro-level=off",
-]
+# 内核链接参数已移入 Makefile（RUSTFLAGS env，见 build 目标）：
+# 根 config 若保留 [target.x86_64-unknown-none] rustflags，会与 userspace
+# 同目标配置合并、导致 -Tkernel/linker.ld 泄漏进 userspace 构建。
