@@ -19,8 +19,12 @@ pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
+pub const SYS_MKDIR: u64 = 83;
+pub const SYS_RMDIR: u64 = 84;
+pub const SYS_UNLINK: u64 = 87;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_GETDENTS64: u64 = 217;
 
 /// boot.asm 导出的 syscall 入口。
 extern "C" {
@@ -94,6 +98,10 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_READ => sys_read(a1, a2, a3),
         SYS_OPEN => sys_open(a1, a2, a3),
         SYS_CLOSE => sys_close(a1),
+        SYS_MKDIR => sys_mkdir(a1, a2),
+        SYS_RMDIR => sys_rmdir(a1),
+        SYS_UNLINK => sys_unlink(a1),
+        SYS_GETDENTS64 => sys_getdents64(a1, a2, a3),
         SYS_GETPID => sys_getpid(),
         SYS_EXIT => sys_exit(a1),
         _ => (-1i64) as u64, // ENOSYS
@@ -174,6 +182,69 @@ fn sys_close(fd: u64) -> u64 {
         0
     } else {
         (-1i64) as u64 // EBADF
+    }
+}
+
+/// 拷贝用户态路径到 String，返回名称。
+fn copy_path(path: u64) -> Result<alloc::string::String, u64> {
+    let mut pbuf = [0u8; 256];
+    // SAFETY: path 为用户态 NUL 结尾字符串。
+    let n = unsafe { copy_cstr_from_user(path, &mut pbuf) };
+    // SAFETY: pbuf[..n] 为合法 UTF-8（ASCII 路径）。
+    Ok(alloc::string::String::from(unsafe {
+        core::str::from_utf8_unchecked(&pbuf[..n])
+    }))
+}
+
+/// mkdir(path, mode)：创建目录；成功 0，失败负 errno。
+fn sys_mkdir(path: u64, _mode: u64) -> u64 {
+    match copy_path(path) {
+        Ok(name) => match crate::fs::create_dir(&name) {
+            Ok(()) => 0,
+            Err(e) => e as u64,
+        },
+        Err(e) => e,
+    }
+}
+
+/// rmdir(path)：删除空目录；成功 0，失败负 errno。
+fn sys_rmdir(path: u64) -> u64 {
+    match copy_path(path) {
+        Ok(name) => match crate::fs::remove(&name, true) {
+            Ok(()) => 0,
+            Err(e) => e as u64,
+        },
+        Err(e) => e,
+    }
+}
+
+/// unlink(path)：删除文件；成功 0，失败负 errno。
+fn sys_unlink(path: u64) -> u64 {
+    match copy_path(path) {
+        Ok(name) => match crate::fs::remove(&name, false) {
+            Ok(()) => 0,
+            Err(e) => e as u64,
+        },
+        Err(e) => e,
+    }
+}
+
+/// getdents64(fd, buf, len)：枚举目录到用户缓冲，返回字节数（0 = 结束）。
+fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
+    match crate::fs::fd_get(fd as usize) {
+        Some(f) => match f.as_ref() {
+            crate::fs::File::Dir { inode } => {
+                // SAFETY: buf 为用户态地址且 len 由用户保证；内核侧枚举到临时缓冲。
+                let mut tmp = [0u8; 1024];
+                let n = crate::fs::read_dir(inode.as_ref(), &mut tmp).unwrap_or(0);
+                let want = core::cmp::min(n, len as usize);
+                // SAFETY: 拷贝 tmp[..want] 到用户 buf（len ≥ want）。
+                unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, want) };
+                want as u64
+            }
+            _ => (-1i64) as u64, // ENOTDIR
+        },
+        None => (-1i64) as u64, // EBADF
     }
 }
 

@@ -109,6 +109,8 @@ pub enum File {
         inode: Arc<Inode>,
         offset: Mutex<u64>,
     },
+    /// 目录（ramfs）：供 getdents64 枚举。
+    Dir { inode: Arc<Inode> },
 }
 
 impl File {
@@ -136,6 +138,7 @@ impl File {
                 *off = (start + n) as u64;
                 n
             }
+            File::Dir { .. } => 0,
         }
     }
 
@@ -159,6 +162,7 @@ impl File {
                 *off = end as u64;
                 data.len()
             }
+            File::Dir { .. } => 0,
         }
     }
 }
@@ -189,7 +193,96 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     Ok(cur)
 }
 
-/// 打开路径。M3 兼容 "/dev/uart"；其余走 ramfs（O_CREAT 创建文件）。
+/// 拆分路径为 (父目录路径, 末组件名)。如 "/a/b" → ("/a", "b")，"/f" → ("/", "f")。
+fn split_last(path: &str) -> (String, String) {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return (String::from("/"), String::new());
+    }
+    match trimmed.rfind('/') {
+        Some(0) => (String::from("/"), String::from(&trimmed[1..])),
+        Some(idx) => (String::from(&trimmed[..idx]), String::from(&trimmed[idx + 1..])),
+        None => (String::from("/"), String::from(trimmed)),
+    }
+}
+
+/// 创建目录（父目录必须存在且为空路径不合法）。
+pub fn create_dir(path: &str) -> Result<(), i64> {
+    let (parent, leaf) = split_last(path);
+    if leaf.is_empty() {
+        return Err(-2i64); // ENOENT
+    }
+    let p = resolve(&parent, false).map_err(|_| -2i64)?;
+    if !p.is_dir() {
+        return Err(-20i64); // ENOTDIR
+    }
+    if p.lookup(&leaf).is_some() {
+        return Err(-17i64); // EEXIST
+    }
+    p.insert_child(&leaf, Inode::dir());
+    Ok(())
+}
+
+/// 删除路径：is_dir=true 走 rmdir（要求空目录），否则 unlink 文件。
+pub fn remove(path: &str, is_dir: bool) -> Result<(), i64> {
+    let (parent, leaf) = split_last(path);
+    if leaf.is_empty() {
+        return Err(-2i64); // ENOENT
+    }
+    let p = resolve(&parent, false).map_err(|_| -2i64)?;
+    if !p.is_dir() {
+        return Err(-20i64); // ENOTDIR
+    }
+    let mut kids = p.children.lock();
+    let idx = kids.iter().position(|d| d.name == leaf).ok_or(-2i64)?; // ENOENT
+    let ino = kids[idx].inode.clone();
+    if is_dir {
+        if !ino.is_dir() {
+            return Err(-20i64); // ENOTDIR
+        }
+        if !ino.children.lock().is_empty() {
+            return Err(-39i64); // ENOTEMPTY
+        }
+    } else if ino.is_dir() {
+        return Err(-21i64); // EISDIR
+    }
+    kids.remove(idx);
+    Ok(())
+}
+
+/// 枚举目录 inode，按 Linux dirent64 格式写入 buf，返回字节数。
+/// 布局：u64 d_ino | u64 d_off | u16 d_reclen | u8 d_type | char d_name[]（NUL 结尾）。
+pub fn read_dir(ino: &Inode, buf: &mut [u8]) -> Result<usize, i64> {
+    if !ino.is_dir() {
+        return Err(-20i64); // ENOTDIR
+    }
+    let kids = ino.children.lock();
+    let mut off = 0usize;
+    for d in kids.iter() {
+        let name_len = d.name.len() + 1; // + NUL
+        let reclen = 19 + name_len;
+        if off + reclen > buf.len() {
+            break;
+        }
+        let rec = &mut buf[off..off + reclen];
+        // d_ino：inode 指针低 48 位充当 inode 号（M3 简化）
+        let ino_num = Arc::as_ptr(&d.inode) as usize as u64;
+        rec[0..8].copy_from_slice(&ino_num.to_le_bytes());
+        // d_off：下一项偏移（含本项）
+        let next_off = (off + reclen) as u64;
+        rec[8..16].copy_from_slice(&next_off.to_le_bytes());
+        // d_reclen
+        rec[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
+        // d_type：DT_DIR=4, DT_REG=8
+        rec[18] = if d.inode.is_dir() { 4 } else { 8 };
+        // d_name
+        rec[19..19 + d.name.len()].copy_from_slice(d.name.as_bytes());
+        off += reclen;
+    }
+    Ok(off)
+}
+
+/// 打开路径。"/dev/uart" 走设备；目录返回 Dir；文件返回 Reg（O_CREAT 创建）。
 /// 成功返回 File，失败返回负 errno。
 pub fn open_path(name: &str, flags: u64) -> Result<Arc<File>, i64> {
     if name == "/dev/uart" {
@@ -198,7 +291,7 @@ pub fn open_path(name: &str, flags: u64) -> Result<Arc<File>, i64> {
     let create = flags & O_CREAT != 0;
     let inode = resolve(name, create).map_err(|_| -2i64)?; // ENOENT
     if inode.is_dir() {
-        return Err(-21i64); // EISDIR（目录打开留 M4-切片2）
+        return Ok(Arc::new(File::Dir { inode }));
     }
     if flags & O_TRUNC != 0 {
         inode.data.lock().clear();

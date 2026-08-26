@@ -13,7 +13,11 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_MKDIR: u64 = 83;
+const SYS_RMDIR: u64 = 84;
+const SYS_UNLINK: u64 = 87;
 const SYS_EXIT: u64 = 60;
+const SYS_GETDENTS64: u64 = 217;
 
 /// 通用 syscall（3 参数，Linux x86_64 约定：rax=nr, rdi/rsi/rdx=arg1-3）。
 fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
@@ -76,12 +80,24 @@ fn panic(_info: &PanicInfo) -> ! {
     }
 }
 
+/// 从命令参数提取 NUL 结尾路径（trim 尾随空白）。
+fn path_arg(cmd: &[u8], start: usize) -> [u8; 128] {
+    let mut p = [0u8; 128];
+    let mut end = cmd.len();
+    while end > start && (cmd[end - 1] == b' ' || cmd[end - 1] == b'\t') {
+        end -= 1;
+    }
+    let n = core::cmp::min(end - start, p.len() - 1);
+    p[..n].copy_from_slice(&cmd[start..start + n]);
+    p
+}
+
 /// 内建命令执行。
 fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | echo <text> | version | fdtest | fstest | exit\n");
+            print("commands: help | ls | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | version | fdtest | fstest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -131,6 +147,86 @@ fn exec(cmd: &[u8]) {
         b"exit" => {
             print("bye\n");
             syscall3(SYS_EXIT, 0, 0, 0);
+        }
+        b"ls" => {
+            // 枚举根目录（Linux dirent64 格式）
+            let fd = syscall3(SYS_OPEN, b"/\0".as_ptr() as u64, 0, 0);
+            if (fd as i64) < 0 {
+                print("ls: open / failed\n");
+            } else {
+                let mut buf = [0u8; 1024];
+                let n = syscall3(SYS_GETDENTS64, fd, buf.as_mut_ptr() as u64, 1024);
+                let mut off = 0usize;
+                while off + 19 <= n as usize {
+                    let reclen =
+                        u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                    let typ = buf[off + 18];
+                    let mut nl = 0usize;
+                    while off + 19 + nl < buf.len() && buf[off + 19 + nl] != 0 {
+                        nl += 1;
+                    }
+                    if nl > 0 {
+                        // SAFETY: 目录项名称为 ASCII。
+                        let nm = unsafe {
+                            core::str::from_utf8_unchecked(&buf[off + 19..off + 19 + nl])
+                        };
+                        print(nm);
+                        if typ == 4 {
+                            print("/ ");
+                        } else {
+                            print("  ");
+                        }
+                    }
+                    off += reclen;
+                }
+                print("\n");
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        _ if cmd.starts_with(b"cat ") => {
+            let p = path_arg(cmd, 4);
+            let fd = syscall3(SYS_OPEN, p.as_ptr() as u64, 0, 0);
+            if (fd as i64) < 0 {
+                print("cat: open failed\n");
+            } else {
+                loop {
+                    let mut buf = [0u8; 128];
+                    let n = syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, 128);
+                    if n == 0 {
+                        break;
+                    }
+                    // SAFETY: 文件内容按 ASCII 输出。
+                    print(unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) });
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        _ if cmd.starts_with(b"mkdir ") => {
+            let p = path_arg(cmd, 6);
+            let rc = syscall3(SYS_MKDIR, p.as_ptr() as u64, 0o755, 0);
+            if rc != 0 {
+                print("mkdir: rc=");
+                print_u64(rc);
+                print("\n");
+            }
+        }
+        _ if cmd.starts_with(b"rmdir ") => {
+            let p = path_arg(cmd, 6);
+            let rc = syscall3(SYS_RMDIR, p.as_ptr() as u64, 0, 0);
+            if rc != 0 {
+                print("rmdir: rc=");
+                print_u64(rc);
+                print("\n");
+            }
+        }
+        _ if cmd.starts_with(b"rm ") => {
+            let p = path_arg(cmd, 3);
+            let rc = syscall3(SYS_UNLINK, p.as_ptr() as u64, 0, 0);
+            if rc != 0 {
+                print("rm: rc=");
+                print_u64(rc);
+                print("\n");
+            }
         }
         _ if cmd.starts_with(b"echo ") => {
             print(unsafe { core::str::from_utf8_unchecked(&cmd[5..]) });

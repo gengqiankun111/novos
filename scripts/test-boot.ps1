@@ -77,7 +77,7 @@ if ($Mode -eq "boot") {
         $s.ReadTimeout = 300
         $sb = New-Object System.Text.StringBuilder
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nfstest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
@@ -107,12 +107,15 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | echo <text> | version | fdtest | fstest | exit",
+        "commands: help | ls | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | version | fdtest | fstest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
         "fdtest: close rc=0",
-        "fstest: read 17B: hello from ramfs"
+        "fstest: read 17B: hello from ramfs",
+        "etc/",      # ls 输出：预置目录
+        "data/",     # ls 输出：mkdir 新建
+        "hello from ramfs"   # cat /etc/motd 输出
     )
 }
 
