@@ -136,16 +136,124 @@ long_mode_start:
     jmp 1b
 
 # ---------------------------------------------------------------------------
-# 长模式 GDT（null / code64 / data）
+# 长模式 GDT（null / kernel code64 / kernel data / user data / user code64 / TSS）
+# 选择子：0x08=kcode, 0x10=kdata, 0x18=udata, 0x20=ucode, 0x28=TSS
+# syscall/sysret 段规则（STAR MSR）：
+#   SYSCALL 进入：CS=STAR[47:32](0x08), SS=STAR[47:32]+8(0x10)
+#   SYSRET 回 ring3：CS=STAR[63:48]+16(0x20), SS=STAR[63:48]+8(0x18)
+#   故 STAR = (0x10 << 48) | (0x08 << 32)
 # ---------------------------------------------------------------------------
 .section .rodata
+.align 8
+.global gdt64
 gdt64:
     .quad 0x0000000000000000        # null
-    .quad 0x0020980000000000        # code: DPL0, L=1
-    .quad 0x0000920000000000        # data: DPL0
+    .quad 0x0020980000000000        # 0x08 kernel code: DPL0, L=1
+    .quad 0x0000920000000000        # 0x10 kernel data: DPL0
+    .quad 0x0000F20000000000        # 0x18 user data: DPL3
+    .quad 0x0020FA0000000000        # 0x20 user code: DPL3, L=1
+    # TSS 描述符（0x28，16 字节，type=0x89 64-bit TSS available）
+    # base 字段由 gdt.rs 运行时填充（.word tss 会触发 R_X86_64_16 重定位超范围）
+    .word (tss_end - tss - 1)       # limit[15:0] = 103
+    .word 0                         # base[15:0] —— gdt.rs 填充
+    .byte 0                         # base[23:16] —— gdt.rs 填充
+    .byte 0x89                      # P=1, DPL=0, type=0b1001 (64-bit TSS)
+    .byte 0x00                      # flags + limit[19:16]
+    .byte 0                         # base[31:24] —— gdt.rs 填充
+    .long 0                         # base[63:32] —— gdt.rs 填充
+    .long 0                         # reserved
 gdt64_ptr:
     .word gdt64_ptr - gdt64 - 1
-    .long gdt64
+    .long gdt64           # 32-bit lgdt 用 6 字节 GDTR（gdt64 地址 < 4GB）
+
+# ---------------------------------------------------------------------------
+# TSS（64-bit，104 字节；syscall/中断从用户态切回内核时用 RSP0 作内核栈）
+# ---------------------------------------------------------------------------
+.section .data
+.align 16
+.global tss
+tss:
+    .long 0          # reserved (offset 0)
+tss_rsp0:
+    .quad 0          # RSP0 (offset 4) —— 由 gdt.rs 设置
+    .quad 0          # RSP1 (12)
+    .quad 0          # RSP2 (20)
+    .quad 0          # reserved (28)
+    .quad 0          # IST1 (36)
+    .quad 0          # IST2 (44)
+    .quad 0          # IST3 (52)
+    .quad 0          # IST4 (60)
+    .quad 0          # IST5 (68)
+    .quad 0          # IST6 (76)
+    .quad 0          # IST7 (84)
+    .quad 0          # reserved (92)
+    .word 0          # reserved (100)
+    .word 0          # IOPB (102)
+tss_end:
+
+# ---------------------------------------------------------------------------
+# syscall 专用内核栈（用户态 syscall 进入时切换到此处）
+# ---------------------------------------------------------------------------
+.section .bss
+.align 16
+syscall_stack_bottom:
+    .skip 16 * 1024
+syscall_stack_top:
+
+# ---------------------------------------------------------------------------
+# syscall 入口（由 syscall 指令进入）：
+# 进入时 RCX=用户 RIP, R11=用户 RFLAGS, RSP=用户栈, CS=0x08, SS=0x10（CPU 不切栈）。
+# 构造与中断一致的 ExceptionFrame，iretq 返回（复用 Rust handler 模式）。
+# ---------------------------------------------------------------------------
+.section .text
+.global syscall_entry
+syscall_entry:
+    # 保存用户栈指针，切换到 syscall 内核栈
+    movq %rsp, %r12
+    movabsq $syscall_stack_top, %rsp
+    # 构造 ExceptionFrame（从高到低 push：ss,rsp,rflags,cs,rip,err,vec,rax..r15）
+    pushq $0x1B            # ss = user data (0x18 | 3)
+    pushq %r12             # rsp = 用户栈
+    pushq %r11             # rflags
+    pushq $0x23            # cs = user code (0x20 | 3)
+    pushq %rcx             # rip = 用户返回地址
+    pushq $0               # err
+    pushq $0               # vec（syscall 伪向量）
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, %rdi        # frame 指针
+    call rust_syscall_handler   # 返回后 frame 已修改（rax=返回值）
+    # 恢复通用寄存器
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp         # 跳过 vec + err
+    iretq                  # 弹 rip/cs/rflags/rsp/ss 回用户态
 
 # ---------------------------------------------------------------------------
 # 异常 stub 表：每个向量一个 16 字节槽，统一进入 exception_common

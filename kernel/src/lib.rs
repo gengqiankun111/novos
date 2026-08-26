@@ -9,6 +9,7 @@ extern crate alloc;
 
 core::arch::global_asm!(include_str!("boot.asm"), options(att_syntax));
 
+pub mod gdt;
 pub mod interrupts;
 pub mod mm;
 pub mod multiboot2;
@@ -18,6 +19,7 @@ pub mod rbtree;
 pub mod serial;
 pub mod smp;
 pub mod sync;
+pub mod syscall;
 pub mod task;
 pub mod vga;
 pub mod vmm;

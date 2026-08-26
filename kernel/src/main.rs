@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{interrupts, mm, multiboot2, pit, println, serial, task, vga};
+use novos_kernel::{gdt, interrupts, mm, multiboot2, pit, println, serial, syscall, task, vga};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -38,6 +38,12 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
     // IDT 先行：若后续 mm 初始化出异常，可打印寄存器快照而非静默三重故障。
     interrupts::init();
     println!("{}", interrupts::info());
+
+    // M3 切片1：加载 TSS（用户态 RSP0）+ 配置 syscall MSR。
+    gdt::init();
+    println!("{}", gdt::info());
+    syscall::init();
+    println!("{}", syscall::info());
 
     // M1：初始化物理内存 + 内核堆（此后 Vec/Box/Arc 可用）。
     // SAFETY: 仅启动时调用一次，早于任何分配。
