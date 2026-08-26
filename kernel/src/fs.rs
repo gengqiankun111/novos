@@ -171,24 +171,56 @@ impl File {
 }
 
 /// 挂载点：挂载路径 → 独立文件系统根（M4-切片4：tmpfs 简化实现）。
+/// 挂载类型。
+pub enum MountKind {
+    /// tmpfs/ramfs：独立树。
+    Tmpfs(Arc<Inode>),
+    /// overlay（M7-切片1）：lower（只读）+ upper（可写）合并视图。
+    Overlay {
+        lower: Arc<Inode>,
+        upper: Arc<Inode>,
+    },
+}
+
 pub struct Mount {
     pub path: String,
-    pub root: Arc<Inode>,
+    pub kind: MountKind,
 }
 
-/// 挂载表（根 ramfs 之外挂载的 tmpfs）。
+/// 挂载表。
 static MOUNTS: spin::Lazy<Mutex<Vec<Mount>>> = spin::Lazy::new(|| Mutex::new(Vec::new()));
 
-/// 查找挂载点根 inode（精确路径匹配）。
-pub fn mount_lookup(path: &str) -> Option<Arc<Inode>> {
-    MOUNTS
-        .lock()
-        .iter()
-        .find(|m| m.path == path)
-        .map(|m| m.root.clone())
+/// 当前活跃 overlay（{ 挂载路径, upper, lower }）——M7-切片1 单 overlay 简化。
+static ACTIVE_OVERLAY: spin::Lazy<Mutex<Option<(String, Arc<Inode>, Arc<Inode>)>>> =
+    spin::Lazy::new(|| Mutex::new(None));
+
+/// 查找挂载项（精确路径匹配）。
+fn mount_entry(path: &str) -> Option<Mount> {
+    // 返回克隆（避免锁嵌套；demo 规模足够）。
+    MOUNTS.lock().iter().find(|m| m.path == path).map(|m| {
+        let kind = match &m.kind {
+            MountKind::Tmpfs(r) => MountKind::Tmpfs(r.clone()),
+            MountKind::Overlay { lower, upper } => MountKind::Overlay {
+                lower: lower.clone(),
+                upper: upper.clone(),
+            },
+        };
+        Mount {
+            path: m.path.clone(),
+            kind,
+        }
+    })
 }
 
-/// 挂载新 tmpfs 根到 target 目录（简化：source/fstype 忽略）。
+/// 查找挂载点根 inode（精确路径匹配；overlay 返回 merged 上层）。
+pub fn mount_lookup(path: &str) -> Option<Arc<Inode>> {
+    mount_entry(path).map(|m| match m.kind {
+        MountKind::Tmpfs(r) => r,
+        MountKind::Overlay { upper, .. } => upper,
+    })
+}
+
+/// 挂载新 tmpfs 根到 target 目录。
 pub fn mount_fs(target: &str) -> Result<(), i64> {
     if target == "/" || target.is_empty() {
         return Err(-16i64); // EBUSY：根目录不可挂
@@ -197,12 +229,37 @@ pub fn mount_fs(target: &str) -> Result<(), i64> {
     if !tgt.is_dir() {
         return Err(-20i64); // ENOTDIR
     }
-    if mount_lookup(target).is_some() {
+    if mount_entry(target).is_some() {
         return Err(-16i64); // EBUSY：已挂载
     }
     MOUNTS.lock().push(Mount {
         path: String::from(target),
-        root: Inode::dir(),
+        kind: MountKind::Tmpfs(Inode::dir()),
+    });
+    Ok(())
+}
+
+/// 挂载 overlay：lower = source 目录（只读），upper = 新建可写层。
+pub fn mount_overlay(source: &str, target: &str) -> Result<(), i64> {
+    if target == "/" || target.is_empty() {
+        return Err(-16i64);
+    }
+    let tgt = resolve(target, false).map_err(|_| -2i64)?;
+    if !tgt.is_dir() {
+        return Err(-20i64);
+    }
+    if mount_entry(target).is_some() {
+        return Err(-16i64);
+    }
+    let lower = resolve(source, false).map_err(|_| -2i64)?;
+    if !lower.is_dir() {
+        return Err(-20i64);
+    }
+    let upper = Inode::dir();
+    *ACTIVE_OVERLAY.lock() = Some((String::from(target), upper.clone(), lower.clone()));
+    MOUNTS.lock().push(Mount {
+        path: String::from(target),
+        kind: MountKind::Overlay { lower, upper },
     });
     Ok(())
 }
@@ -227,20 +284,60 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
         return Err(());
     }
     let mut cur = ROOT.clone();
+    // overlay 遍历状态：(upper 当前目录(可 None), lower 当前目录(可 None))
+    let mut ov: Option<(Option<Arc<Inode>>, Option<Arc<Inode>>)> = None;
     let mut acc = String::from("/"); // 累积路径（挂载点匹配）
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     for (i, comp) in comps.iter().enumerate() {
         let last = i == comps.len() - 1;
-        // 累积路径
+        // 累积路径（带前导 "/"：i=0 时 acc 已是 "/"）
         if acc == "/" {
-            acc = String::from(*comp);
+            acc.push_str(comp);
         } else {
             acc.push('/');
             acc.push_str(comp);
         }
         // 挂载点：命中则切换到挂载根，后续组件在挂载子树内解析
-        if let Some(root) = mount_lookup(&acc) {
-            cur = root;
+        if let Some(m) = mount_entry(&acc) {
+            match m.kind {
+                MountKind::Tmpfs(root) => {
+                    cur = root;
+                    ov = None;
+                }
+                MountKind::Overlay { lower, upper } => {
+                    cur = upper.clone();
+                    ov = Some((Some(upper), Some(lower)));
+                }
+            }
+            continue;
+        }
+        // overlay 内：upper 优先，其次 lower（M7-切片1）
+        if let Some((up, low)) = ov.take() {
+            let up_ino = up.as_ref().and_then(|u| u.lookup(comp));
+            let low_ino = low.as_ref().and_then(|l| l.lookup(comp));
+            if let Some(ino) = up_ino {
+                cur = ino.clone();
+                ov = Some((Some(ino), low.and_then(|l| l.lookup(comp))));
+                continue;
+            }
+            if let Some(ino) = low_ino {
+                cur = ino.clone();
+                ov = Some((None, Some(ino)));
+                continue;
+            }
+            if last && create_last {
+                if let Some(u) = up {
+                    let ino = Inode::file();
+                    u.insert_child(comp, ino.clone());
+                    crate::dcache::dcache_insert(Arc::as_ptr(&u) as usize, comp, ino.clone());
+                    cur = ino.clone();
+                    ov = Some((Some(ino), low));
+                } else {
+                    return Err(());
+                }
+            } else {
+                return Err(());
+            }
             continue;
         }
         let parent_ptr = Arc::as_ptr(&cur) as usize;
@@ -368,12 +465,88 @@ pub fn read_dir(ino: &Inode, skip: usize, buf: &mut [u8]) -> Result<(usize, usiz
 
 /// 打开路径。"/dev/uart" 走设备；目录返回 Dir；文件返回 Reg（O_CREAT 创建）。
 /// 成功返回 File，失败返回负 errno。
+/// 剥离 overlay 挂载路径前缀，返回相对组件。
+fn overlay_rel<'a>(path: &'a str, mnt: &str) -> Vec<&'a str> {
+    let rel = if let Some(rest) = path.strip_prefix(mnt) {
+        rest
+    } else {
+        path
+    };
+    rel.split('/').filter(|c| !c.is_empty() && *c != ".").collect()
+}
+
+/// 判断路径是否解析到当前 overlay 的 lower 层文件（指针匹配）。
+fn is_lower_file(path: &str, ino: &Arc<Inode>) -> bool {
+    let ov = ACTIVE_OVERLAY.lock();
+    let (mnt, _, lower) = match ov.as_ref() {
+        Some(x) => x,
+        None => return false,
+    };
+    // 沿相对组件在 lower 中定位，比较指针
+    let comps = overlay_rel(path, mnt);
+    let mut cur = lower.clone();
+    for comp in &comps {
+        match cur.lookup(comp) {
+            Some(c) => cur = c,
+            None => return false,
+        }
+    }
+    Arc::ptr_eq(&cur, ino)
+}
+
+/// copy-up：把 overlay lower 中路径对应的文件拷贝到 upper（写时复制）。
+pub fn copy_up(path: &str) -> Option<Arc<Inode>> {
+    let ov = ACTIVE_OVERLAY.lock();
+    let (mnt, upper, lower) = ov.as_ref()?;
+    let comps = overlay_rel(path, mnt);
+    if comps.is_empty() {
+        return None;
+    }
+    // lower 定位源文件
+    let mut lcur = lower.clone();
+    for comp in &comps {
+        lcur = lcur.lookup(comp)?;
+    }
+    if !lcur.is_file() {
+        return None;
+    }
+    // upper 重建相对目录路径（缺失则创建），末组件建文件并拷贝数据
+    let mut ucur = upper.clone();
+    for comp in &comps[..comps.len() - 1] {
+        match ucur.lookup(comp) {
+            Some(c) if c.is_dir() => ucur = c,
+            _ => {
+                let d = Inode::dir();
+                ucur.insert_child(comp, d.clone());
+                ucur = d;
+            }
+        }
+    }
+    let leaf = comps[comps.len() - 1];
+    if let Some(existing) = ucur.lookup(leaf) {
+        return Some(existing); // 已在 upper（无需重复拷贝）
+    }
+    let f = Inode::file();
+    *f.data.lock() = lcur.data.lock().clone();
+    ucur.insert_child(leaf, f.clone());
+    crate::dcache::dcache_insert(Arc::as_ptr(&ucur) as usize, leaf, f.clone());
+    Some(f)
+}
+
 pub fn open_path(name: &str, flags: u64) -> Result<Arc<File>, i64> {
     if name == "/dev/uart" {
         return Ok(Arc::new(File::Uart));
     }
     let create = flags & O_CREAT != 0;
-    let inode = resolve(name, create).map_err(|_| -2i64)?; // ENOENT
+    let mut inode = resolve(name, create).map_err(|_| -2i64)?; // ENOENT
+    // M7-切片1：overlay copy-up——写打开时若文件在下层，先拷到上层再写
+    if inode.is_file() && (flags & (O_WRONLY | O_RDWR | O_TRUNC) != 0 || create) {
+        if is_lower_file(name, &inode) {
+            if let Some(up) = copy_up(name) {
+                inode = up;
+            }
+        }
+    }
     if inode.is_dir() {
         return Ok(Arc::new(File::Dir {
             inode,
