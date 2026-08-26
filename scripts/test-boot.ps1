@@ -101,10 +101,16 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`n"
-        $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
-        $s.Write($bytes, 0, $bytes.Length)
-        $s.Flush()
+        # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
+        # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`n"
+        foreach ($one in ($cmd -split "`n")) {
+            if ($one.Length -eq 0) { continue }
+            $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
+            $s.Write($b, 0, $b.Length)
+            $s.Flush()
+            Start-Sleep -Milliseconds 120
+        }
         # M5-切片4：等 guest 进入 tcptest 监听后，宿主再经 hostfwd(tcp:20000) 连接。
         # 过早连接会被 slirp 乐观接受、SYN 转发时 guest 尚未监听而丢弃。
         $script:hostTcp = ""
@@ -271,7 +277,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -359,7 +365,12 @@ if ($Mode -eq "boot") {
         "ext4test: sync rc=0",                # M10-切片2：脏块落盘
         "ext4test: persisted across reboot",  # M10-切片2：清缓存（模拟重启）后仍读回
         "ext4test: unlink rc=0",              # M10-切片2：删除文件
-        "ext4test: list after unlink: persist.txt 12" # M10-切片2：删除后列表只剩 persist.txt
+        "ext4test: list after unlink: persist.txt 12", # M10-切片2：删除后列表只剩 persist.txt
+        "futtest: child waiting",             # M11-切片1：子进程 futex WAIT 阻塞
+        "futtest: child futex rc=0 flag=1",   # M11-切片1：WAKE 唤醒后读到共享值 1
+        "futtest: child woke ok",             # M11-切片1：同步正确
+        "futtest: parent wake rc=1",          # M11-切片1：唤醒数=1
+        "futtest: reaped="                    # M11-切片1：子进程回收
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )

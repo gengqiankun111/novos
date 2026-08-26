@@ -46,6 +46,7 @@ pub const SYS_MOUNT: u64 = 165;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
+pub const SYS_FUTEX: u64 = 202;
 /// Novos 扩展：添加 NAT 端口映射规则（网关控制面）。
 pub const SYS_NAT_ADD: u64 = 501;
 /// Novos 扩展：读 conntrack 统计 { 条目数, 命中数 }。
@@ -121,8 +122,14 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
     f.r12 = user_r12;
     f.rsp = user_rsp;
     let nr = f.rax; // syscall 号
+    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
+    }
     // M5：每次系统调用轮询一次网络收包（无中断依赖）
+    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
+    }
     crate::net::net_poll();
+    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
+    }
     // M6-切片1：fork/clone 需要当前用户上下文（帧），单独处理。
     // 子任务帧 = 本帧拷贝（rax 置 0）；子先执行（直接切到子帧），
     // 子退出后调度器经父帧恢复父进程（父返回子任务 id）。
@@ -150,6 +157,8 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
         }
     } else {
         let ret = dispatch(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
+        if nr == 2 || nr == 83 {
+        }
         f.rax = ret; // 返回值写回 rax
     }
     frame
@@ -157,6 +166,8 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
 
 /// syscall 分派。
 fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
+    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
+    }
     match nr {
         SYS_WRITE => sys_write(a1, a2, a3),
         SYS_READ => sys_read(a1, a2, a3),
@@ -178,6 +189,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_UNLINK => sys_unlink(a1),
         SYS_GETCWD => sys_getcwd(a1, a2),
         SYS_CHDIR => sys_chdir(a1),
+        SYS_FUTEX => sys_futex(a1, a2, a3),
         SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
         SYS_CT_STAT => sys_ct_stat(a1),
         SYS_FW_ADD => sys_fw_add(a1, a2, a3),
@@ -259,7 +271,9 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> u64 {
         Err(e) => return e,
     };
     match crate::fs::open_path(&name, flags) {
-        Ok(f) => crate::fs::fd_alloc(f) as u64,
+        Ok(f) => {
+            crate::fs::fd_alloc(f) as u64
+        }
         Err(e) => e as u64, // 负 errno（按 Linux ABI 返回 -errno）
     }
 }
@@ -293,7 +307,8 @@ fn copy_path(path: u64) -> Result<alloc::string::String, u64> {
 /// 相对路径 → 绝对路径：以当前任务 cwd 为前缀，逐组件处理 "." / ".."。
 fn resolve_abs(path: &str) -> alloc::string::String {
     if path.starts_with('/') {
-        return alloc::string::String::from(path);
+        let r = alloc::string::String::from(path);
+        return r;
     }
     let cwd = crate::task::current_cwd();
     // SAFETY: cwd 为内核内部 NUL 结尾 ASCII。
@@ -320,12 +335,13 @@ fn resolve_abs(path: &str) -> alloc::string::String {
 
 /// mkdir(path, mode)：创建目录；成功 0，失败负 errno。
 fn sys_mkdir(path: u64, _mode: u64) -> u64 {
-    match copy_path(path) {
-        Ok(name) => match crate::fs::create_dir(&name) {
-            Ok(()) => 0,
-            Err(e) => e as u64,
-        },
-        Err(e) => e,
+    let name = match copy_path(path) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match crate::fs::create_dir(&name) {
+        Ok(()) => 0,
+        Err(e) => e as u64,
     }
 }
 
@@ -360,6 +376,12 @@ fn sys_chdir(path: u64) -> u64 {
         Ok(_) => (-20i64) as u64, // ENOTDIR
         Err(e) => e as u64,
     }
+}
+
+/// futex(addr, op, val)：共享内存同步（M11-切片1）。
+fn sys_futex(uaddr: u64, op: u64, val: u64) -> u64 {
+    // SAFETY: 用户地址恒等映射，由 futex 模块校验语义。
+    unsafe { crate::futex::futex(uaddr, op, val) }
 }
 
 /// rmdir(path)：删除空目录；成功 0，失败负 errno。

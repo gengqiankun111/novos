@@ -14,6 +14,7 @@ pub mod block;
 pub mod elf;
 pub mod ext4;
 pub mod fs;
+pub mod futex;
 pub mod gdt;
 pub mod interrupts;
 pub mod mm;
