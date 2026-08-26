@@ -13,6 +13,7 @@ pub mod gdt;
 pub mod interrupts;
 pub mod mm;
 pub mod multiboot2;
+pub mod page_table;
 pub mod pit;
 pub mod port;
 pub mod rbtree;

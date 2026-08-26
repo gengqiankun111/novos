@@ -68,6 +68,7 @@ boot_stack_top:
 pml4:
     .quad pdpt + 0x03
     .skip 4096 - 8
+.global pdpt
 pdpt:
     .quad pd + 0x03
     .skip 4096 - 8

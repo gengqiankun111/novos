@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{gdt, interrupts, mm, multiboot2, pit, println, serial, syscall, task, vga};
+use novos_kernel::{gdt, interrupts, mm, multiboot2, page_table, println, serial, syscall, vga};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -82,52 +82,18 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         mm::free_page_count()
     );
 
-    // M2 切片4：定时器 + CFS vruntime 红黑树调度（权重 = 1 << prio，
-    // 期望 CPU 占比 A:B:C ≈ 2:4:8）+ per_cpu 占位。
-    pit::init();
-    task::spawn("cfs-a", worker_cfs_a, 1).expect("spawn cfs-a");
-    task::spawn("cfs-b", worker_cfs_b, 2).expect("spawn cfs-b");
-    task::spawn("cfs-c", worker_cfs_c, 3).expect("spawn cfs-c");
-    // SMP 预热：验证 cpu_rq(0) 可访问（占位）
-    let rq = unsafe { novos_kernel::smp::cpu_rq(0) };
+    // M3 切片3：构建用户态页表 + 进入 ring3（不返回）。
+    let pt = page_table::build();
     println!(
-        "m2: cfs demo (rq tree empty={}) started",
-        rq.rbt.is_empty()
+        "m3: user page table ready (pml4={:#x} code={:#x})",
+        pt.pml4, pt.code_phys
     );
+    println!("m3: entering user mode (ring3)...");
+    page_table::enter_user(&pt);
 
+    // 以下不可达
     println!("Novos-OS: init done, entering idle halt loop");
     halt_loop();
-}
-
-/// CFS 忙等任务公共体：每 100 tick 打印本任务的 run_ticks 与 vruntime。
-fn cfs_loop(tag: &'static str, prio: u8) {
-    let mut last = 0u64;
-    loop {
-        let t = task::ticks();
-        if t >= last + 100 {
-            last = t;
-            let id = task::current_id();
-            println!(
-                "  [{}] prio={} run={} vr={}",
-                tag,
-                prio,
-                task::run_ticks(id),
-                task::vruntime(id)
-            );
-        }
-        // SAFETY: 忙等。
-        unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
-    }
-}
-
-fn worker_cfs_a() {
-    cfs_loop("A", 1);
-}
-fn worker_cfs_b() {
-    cfs_loop("B", 2);
-}
-fn worker_cfs_c() {
-    cfs_loop("C", 3);
 }
 
 /// 空闲停机循环。
