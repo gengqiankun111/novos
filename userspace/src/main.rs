@@ -19,9 +19,12 @@ const SYS_RMDIR: u64 = 84;
 const SYS_UNLINK: u64 = 87;
 const SYS_EXIT: u64 = 60;
 const SYS_SOCKET: u64 = 41;
+const SYS_CONNECT: u64 = 42;
+const SYS_ACCEPT: u64 = 43;
 const SYS_SENDTO: u64 = 44;
 const SYS_RECVFROM: u64 = 45;
 const SYS_BIND: u64 = 49;
+const SYS_LISTEN: u64 = 50;
 const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 
@@ -211,7 +214,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -343,6 +346,55 @@ fn exec(cmd: &[u8]) {
                     print_u64(got.into());
                     print(")\n");
                 }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        b"tcptest" => {
+            // M5-切片4：TCP echo 服务——hostfwd(tcp:20000) 下宿主连接后
+            // 收数据原样回发。验证三次握手 / accept / recv / send / 关闭。
+            let fd = syscall3(SYS_SOCKET, 2, 1, 0); // AF_INET, SOCK_STREAM
+            if (fd as i64) < 0 {
+                print("tcptest: socket failed\n");
+            } else {
+                let mut sa = [0u8; 16];
+                sa[0..2].copy_from_slice(&2u16.to_le_bytes());
+                sa[2..4].copy_from_slice(&20000u16.to_be_bytes());
+                syscall3(SYS_BIND, fd, sa.as_ptr() as u64, 16);
+                syscall3(SYS_LISTEN, fd, 4, 0);
+                print("tcptest: listening on 20000\n");
+                // accept：非阻塞自旋等宿主连接（握手完成即 Established，无超时）
+                let mut afd: u64 = 0;
+                while afd == 0 {
+                    afd = syscall3(SYS_ACCEPT, fd, 0, 0);
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                }
+                print("tcptest: accepted fd=");
+                print_u64(afd);
+                print("\n");
+                // recv：等宿主数据（无超时）
+                let mut rb = [0u8; 128];
+                let mut got: u64 = 0;
+                while got == 0 {
+                    got = syscall6(SYS_RECVFROM, afd, rb.as_mut_ptr() as u64, 128, 0, 0, 0);
+                    let mut spin = 0u32;
+                    while spin < 2_000_000 {
+                        spin += 1;
+                    }
+                }
+                print("tcptest: recv ");
+                print_u64(got);
+                print("B: ");
+                print(unsafe { core::str::from_utf8_unchecked(&rb[..got as usize]) });
+                print("\n");
+                // echo 回发
+                let n = syscall6(SYS_SENDTO, afd, rb.as_mut_ptr() as u64, got, 0, 0, 0);
+                print("tcptest: echoed ");
+                print_u64(n);
+                print("\n");
+                syscall3(SYS_CLOSE, afd, 0, 0);
                 syscall3(SYS_CLOSE, fd, 0, 0);
             }
         }

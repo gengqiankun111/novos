@@ -21,9 +21,12 @@ pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_STAT: u64 = 4;
 pub const SYS_SOCKET: u64 = 41;
+pub const SYS_CONNECT: u64 = 42;
+pub const SYS_ACCEPT: u64 = 43;
 pub const SYS_SENDTO: u64 = 44;
 pub const SYS_RECVFROM: u64 = 45;
 pub const SYS_BIND: u64 = 49;
+pub const SYS_LISTEN: u64 = 50;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
@@ -108,6 +111,9 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_CLOSE => sys_close(a1),
         SYS_STAT => sys_stat(a1, a2),
         SYS_SOCKET => sys_socket(a1, a2, a3),
+        SYS_CONNECT => sys_connect(a1, a2, a3),
+        SYS_ACCEPT => sys_accept(a1, a2, a3),
+        SYS_LISTEN => sys_listen(a1, a2),
         SYS_BIND => sys_bind(a1, a2, a3),
         SYS_SENDTO => sys_sendto(a1, a2, a3, a4, a5, a6),
         SYS_RECVFROM => sys_recvfrom(a1, a2, a3, a4, a5, a6),
@@ -192,7 +198,11 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> u64 {
 
 /// close(fd)：关闭并回收 fd；成功返回 0。
 fn sys_close(fd: u64) -> u64 {
-    if crate::fs::fd_close(fd as usize) {
+    if fd >= crate::socket::TCP_FD_BASE as u64 {
+        crate::socket::tcp_close(fd as usize) as u64
+    } else if fd >= 100 {
+        crate::socket::udp_close(fd as usize) as u64
+    } else if crate::fs::fd_close(fd as usize) {
         0
     } else {
         (-1i64) as u64 // EBADF
@@ -265,12 +275,16 @@ fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     }
 }
 
-/// socket(domain, type, protocol)：仅支持 AF_INET + SOCK_DGRAM（M5-切片3）。
+/// socket(domain, type, protocol)：AF_INET + SOCK_STREAM(1)/SOCK_DGRAM(2)。
 fn sys_socket(domain: u64, typ: u64, _proto: u64) -> u64 {
-    if domain != 2 || typ != 2 {
-        return (-1i64) as u64; // EAFNOSUPPORT / EPROTONOSUPPORT
+    if domain != 2 {
+        return (-1i64) as u64; // EAFNOSUPPORT
     }
-    crate::socket::socket_create() as u64
+    match typ {
+        1 => crate::socket::tcp_socket() as u64, // SOCK_STREAM（M5-切片4）
+        2 => crate::socket::udp_socket() as u64, // SOCK_DGRAM
+        _ => (-1i64) as u64,                     // EPROTONOSUPPORT
+    }
 }
 
 /// bind(fd, sockaddr_in, len)：读 sockaddr_in 取端口（family@0 port@2 BE）。
@@ -279,11 +293,42 @@ fn sys_bind(fd: u64, addr: u64, _len: u64) -> u64 {
     // SAFETY: addr 为用户态 sockaddr_in（16 字节可读）。
     unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, sa.as_mut_ptr(), 16) };
     let port = u16::from_be_bytes([sa[2], sa[3]]);
-    crate::socket::socket_bind(fd as usize, port) as u64
+    if fd >= crate::socket::TCP_FD_BASE as u64 {
+        crate::socket::tcp_bind(fd as usize, port) as u64
+    } else {
+        crate::socket::udp_bind(fd as usize, port) as u64
+    }
 }
 
-/// sendto(fd, buf, len, flags, dest, dlen)：读目标端口与数据并发送。
+/// listen(fd, backlog)：TCP 监听。
+fn sys_listen(fd: u64, backlog: u64) -> u64 {
+    crate::socket::tcp_listen(fd as usize, backlog as usize) as u64
+}
+
+/// accept(fd, addr, addrlen)：非阻塞取已建立连接 fd；无则 0。
+fn sys_accept(fd: u64, _addr: u64, _addrlen: u64) -> u64 {
+    crate::socket::tcp_accept(fd as usize) as u64
+}
+
+/// connect(fd, sockaddr_in, len)：TCP 发起连接（SYN 由 net_poll 发出）。
+fn sys_connect(fd: u64, addr: u64, _len: u64) -> u64 {
+    let mut sa = [0u8; 16];
+    // SAFETY: addr 为用户态 sockaddr_in（16 字节可读）。
+    unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, sa.as_mut_ptr(), 16) };
+    let port = u16::from_be_bytes([sa[2], sa[3]]);
+    let ip = [sa[4], sa[5], sa[6], sa[7]];
+    crate::socket::tcp_connect(fd as usize, ip, port) as u64
+}
+
+/// sendto(fd, buf, len, flags, dest, dlen)：TCP 走 send（dest 可空），UDP 读目标端口。
 fn sys_sendto(fd: u64, buf: u64, len: u64, _flags: u64, dest: u64, dlen: u64) -> u64 {
+    let n = core::cmp::min(len, 1472) as usize;
+    let mut data = alloc::vec![0u8; n];
+    // SAFETY: buf 为用户态可读 n 字节。
+    unsafe { core::ptr::copy_nonoverlapping(buf as *const u8, data.as_mut_ptr(), n) };
+    if fd >= crate::socket::TCP_FD_BASE as u64 {
+        return crate::socket::tcp_send(fd as usize, &data) as u64;
+    }
     if dlen < 8 {
         return (-22i64) as u64; // EINVAL
     }
@@ -291,17 +336,17 @@ fn sys_sendto(fd: u64, buf: u64, len: u64, _flags: u64, dest: u64, dlen: u64) ->
     // SAFETY: dest 为用户态 sockaddr_in（16 字节可读）。
     unsafe { core::ptr::copy_nonoverlapping(dest as *const u8, sa.as_mut_ptr(), 16) };
     let port = u16::from_be_bytes([sa[2], sa[3]]);
-    let n = core::cmp::min(len, 1472) as usize;
-    let mut data = alloc::vec![0u8; n];
-    // SAFETY: buf 为用户态可读 n 字节。
-    unsafe { core::ptr::copy_nonoverlapping(buf as *const u8, data.as_mut_ptr(), n) };
-    crate::socket::socket_sendto(fd as usize, &data, port) as u64
+    crate::socket::udp_sendto(fd as usize, &data, port) as u64
 }
 
 /// recvfrom(fd, buf, len, flags, src, slen)：非阻塞取接收缓冲。
 fn sys_recvfrom(fd: u64, buf: u64, len: u64, _flags: u64, _src: u64, _slen: u64) -> u64 {
-    crate::socket::socket_recvfrom(fd as usize, buf as *mut u8, core::cmp::min(len, 4096) as usize)
-        as u64
+    let n = core::cmp::min(len, 4096) as usize;
+    if fd >= crate::socket::TCP_FD_BASE as u64 {
+        crate::socket::tcp_recv(fd as usize, buf as *mut u8, n) as u64
+    } else {
+        crate::socket::udp_recvfrom(fd as usize, buf as *mut u8, n) as u64
+    }
 }
 
 /// stat(path, buf)：填 Linux x86_64 stat 关键字段（st_ino/nlink/mode/size）。

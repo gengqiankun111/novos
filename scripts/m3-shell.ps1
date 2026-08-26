@@ -21,8 +21,8 @@ $qemuArgs = @(
     "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
     "-serial", "chardev:com1",
     "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
-    # M5-切片3：hostfwd 双规则（guest 发往 10.0.2.2:hostport 的 UDP 经 slirp 宿主侧回环到 guest:19999）
-    "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999",
+    # M5-切片3/4：UDP 双规则回环 + TCP hostfwd（宿主连 guest echo 服务）
+    "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000",
     "-display", "none", "-no-reboot",
     "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
 )
@@ -45,13 +45,40 @@ try {
     $s.ReadTimeout = 300
     # 先清空启动期间已到达的输出
     while ($s.DataAvailable) { [void]$s.ReadByte() }
-    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`nls`nversion`n"
+    $cmd = "help`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nls`nversion`n"
     $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
     $s.Write($bytes, 0, $bytes.Length)
     $s.Flush()
-    Write-Host "commands injected, draining output..."
-    Start-Sleep -Milliseconds 4000
+    Write-Host "commands injected, waiting for tcptest listen..."
+    # 等 guest 监听 20000 后，宿主连接并发数据、收回显（M5-切片4 演示）
+    $tcpReady = $false
     $sb = New-Object System.Text.StringBuilder
+    $deadline = (Get-Date).AddMilliseconds(15000)
+    while ((Get-Date) -lt $deadline -and -not $tcpReady) {
+        while ($s.DataAvailable) {
+            [void]$sb.Append([char]$s.ReadByte())
+            if ($sb.ToString().Contains("tcptest: listening on 20000")) { $tcpReady = $true }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($tcpReady) {
+        try {
+            $tcp = New-Object Net.Sockets.TcpClient
+            $tcp.Connect("127.0.0.1", 20000)
+            Start-Sleep -Milliseconds 1500
+            $ns = $tcp.GetStream()
+            $payload = [Text.Encoding]::ASCII.GetBytes("hello tcp from host")
+            $ns.Write($payload, 0, 19)
+            $ns.Flush()
+            $tcp.Client.ReceiveTimeout = 5000
+            $rbuf = New-Object byte[] 128
+            $n = $ns.Read($rbuf, 0, 128)
+            if ($n -gt 0) { Write-Host ("host got TCP echo: " + [Text.Encoding]::ASCII.GetString($rbuf, 0, $n)) }
+            $tcp.Close()
+        } catch { Write-Host ("host TCP io: " + $_.Exception.Message) }
+    }
+    Write-Host "draining output..."
+    Start-Sleep -Milliseconds 2000
     while ($true) {
         try { $b = $s.ReadByte() } catch { break }   # 读超时结束
         if ($b -lt 0) { break }

@@ -244,9 +244,52 @@ impl VirtioNet {
         let payload = &ip[ihl..core::cmp::min(total_len, ip.len())];
         match proto {
             1 => self.handle_icmp(payload, src), // ICMP
-            17 => self.handle_udp(payload),      // UDP（M5-切片3）
+            6 => self.handle_tcp(payload, src),   // TCP（M5-切片4）
+            17 => self.handle_udp(payload),       // UDP（M5-切片3）
             _ => {}
         }
+    }
+
+    /// TCP：校验伪头校验和（不符则丢弃），交给 socket 层状态机处理，
+    /// 返回的待发段（ACK/SYN-ACK）直接发出。
+    fn handle_tcp(&mut self, tcp: &[u8], src_ip: [u8; 4]) {
+        if tcp.len() < 20 {
+            return;
+        }
+        let src_port = u16::from_be_bytes([tcp[0], tcp[1]]);
+        let dst_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+        let seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+        let ack = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
+        let doff = (((tcp[12] >> 4) & 0xF) as usize) * 4;
+        let flags = tcp[13];
+        let csum = u16::from_be_bytes([tcp[16], tcp[17]]);
+        // 校验：伪头 + 段（checksum 字段按 0 参与计算）
+        let calc = tcp_checksum(src_ip, OUR_IP, src_port, dst_port, tcp);
+        if calc != csum {
+            return; // 校验失败丢弃
+        }
+        let data = &tcp[core::cmp::min(doff, tcp.len())..];
+        let segs = crate::socket::tcp_receive(src_ip, src_port, dst_port, flags, seq, ack, data);
+        for s in segs {
+            self.send_tcp_seg(s);
+        }
+    }
+
+    /// 组 TCP 段（20 字节头 + 数据）并发送。
+    fn send_tcp_seg(&mut self, s: crate::socket::TcpSeg) {
+        let mut seg = [0u8; 20 + 1460];
+        seg[0..2].copy_from_slice(&s.src_port.to_be_bytes());
+        seg[2..4].copy_from_slice(&s.dst_port.to_be_bytes());
+        seg[4..8].copy_from_slice(&s.seq.to_be_bytes());
+        seg[8..12].copy_from_slice(&s.ack.to_be_bytes());
+        seg[12] = 0x50; // data offset = 5（无选项）
+        seg[13] = s.flags;
+        seg[14..16].copy_from_slice(&4096u16.to_be_bytes()); // 窗口
+        let n = 20 + s.data.len();
+        seg[20..n].copy_from_slice(&s.data);
+        let cs = tcp_checksum(OUR_IP, s.dst_ip, s.src_port, s.dst_port, &seg[..n]);
+        seg[16..18].copy_from_slice(&cs.to_be_bytes());
+        self.send_ipv4(s.dst_ip, 6, &seg[..n]);
     }
 
     /// UDP：投递数据到绑定对应端口的 socket。
@@ -513,6 +556,33 @@ fn checksum(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+/// TCP 校验和（IPv4 伪头 + 段；checksum 字段 16..18 恒按 0 计算）。
+fn tcp_checksum(src: [u8; 4], dst: [u8; 4], src_port: u16, dst_port: u16, seg: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    sum += u16::from_be_bytes([src[0], src[1]]) as u32;
+    sum += u16::from_be_bytes([src[2], src[3]]) as u32;
+    sum += u16::from_be_bytes([dst[0], dst[1]]) as u32;
+    sum += u16::from_be_bytes([dst[2], dst[3]]) as u32;
+    sum += 6u32; // 伪头字节 [00, 06]：保留 + proto=TCP（大端字 0x0006）
+    sum += seg.len() as u32; // 伪头长度字段（大端字 0x00XX）
+    let mut i = 0;
+    while i + 1 < seg.len() {
+        if i == 16 {
+            i = 18; // 跳过 checksum 字段（按 0 参与）
+            continue;
+        }
+        sum += u16::from_be_bytes([seg[i], seg[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < seg.len() {
+        sum += (seg[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 // ---- 全局设备与初始化 ----
 
 static NET: spin::Lazy<spin::Mutex<VirtioNet>> = spin::Lazy::new(|| {
@@ -633,6 +703,11 @@ pub fn net_poll() {
             }
             None => break,
         }
+    }
+    // M5-切片4：flush TCP 待发数据 / SYN / FIN（socket 层不直接碰 NET 锁）
+    let segs = crate::socket::tcp_drain_tx();
+    for s in segs {
+        net.send_tcp_seg(s);
     }
 }
 

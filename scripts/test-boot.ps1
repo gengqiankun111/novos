@@ -56,10 +56,11 @@ if ($Mode -eq "boot") {
         "-chardev", "socket,id=com1,host=127.0.0.1,port=$SerialPort,server=on,nowait",
         "-serial", "chardev:com1",
         "-device", "virtio-net-pci,disable-modern=on,netdev=net0",
-        # M5-切片3：hostfwd 双规则——slirp 的 UDP hostfwd 会把 guest 发往 10.0.2.2:hostport 的包
-        # 经宿主侧回环到 guest:19999（QEMU/Windows 上宿主主动发 UDP 无法进 guest，故用双规则自环）：
-        #   12345→19999 回环 "hello udp from novos"（20B）；12344→19999 回环 "pong from novos"（15B）
-        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999",
+        # M5-切片3/4：hostfwd 规则
+        #   udp 12345/12344→19999：guest 发往 10.0.2.2:port 经 slirp 宿主侧回环（QEMU/Windows 上
+        #   宿主主动发 UDP 无法进 guest，故用双规则自环验证 UDP 收发）
+        #   tcp 20000→20000：宿主连接 guest echo 服务（三次握手 + 数据回环）
+        "-netdev", "user,id=net0,hostfwd=udp:127.0.0.1:12345-10.0.2.15:19999,hostfwd=udp:127.0.0.1:12344-10.0.2.15:19999,hostfwd=tcp:127.0.0.1:20000-10.0.2.15:20000",
         "-display", "none", "-no-reboot",
         "-monitor", "tcp:127.0.0.1:$MonPort,server,nowait"
     )
@@ -90,12 +91,56 @@ if ($Mode -eq "boot") {
     $sb = New-Object System.Text.StringBuilder
     try {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`n"
         $bytes = [Text.Encoding]::ASCII.GetBytes($cmd)
         $s.Write($bytes, 0, $bytes.Length)
         $s.Flush()
-        # 排空串口输出（guest 依次执行命令，udptest 收满 2 条回环包后自行结束）
-        Start-Sleep -Milliseconds 10000
+        # M5-切片4：等 guest 进入 tcptest 监听后，宿主再经 hostfwd(tcp:20000) 连接。
+        # 过早连接会被 slirp 乐观接受、SYN 转发时 guest 尚未监听而丢弃。
+        $script:hostTcp = ""
+        $tcpReady = $false
+        $deadline = (Get-Date).AddMilliseconds(20000)
+        while ((Get-Date) -lt $deadline -and -not $tcpReady) {
+            while ($s.DataAvailable) {
+                [void]$sb.Append([char]$s.ReadByte())
+                if ($sb.ToString().Contains("tcptest: listening on 20000")) { $tcpReady = $true }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($tcpReady) {
+            $tcpClient = $null
+            $cdeadline = (Get-Date).AddMilliseconds(15000)
+            while ((Get-Date) -lt $cdeadline -and $null -eq $tcpClient) {
+                try {
+                    $tcpClient = New-Object Net.Sockets.TcpClient
+                    $tcpClient.Connect("127.0.0.1", 20000)
+                } catch {
+                    $tcpClient = $null
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+            if ($null -ne $tcpClient) {
+                try {
+                    # 握手落定后发送，再读回显
+                    Start-Sleep -Milliseconds 1500
+                    $ns = $tcpClient.GetStream()
+                    $payload = [Text.Encoding]::ASCII.GetBytes("hello tcp from host")
+                    $ns.Write($payload, 0, 19)
+                    $ns.Flush()
+                    $tcpClient.Client.ReceiveTimeout = 5000
+                    $rbuf = New-Object byte[] 128
+                    $n = $ns.Read($rbuf, 0, 128)
+                    if ($n -gt 0) { $script:hostTcp = [Text.Encoding]::ASCII.GetString($rbuf, 0, $n) }
+                } catch {
+                    $script:hostTcp = "<io>"
+                }
+                $tcpClient.Close()
+            } else {
+                $script:hostTcp = "<connect timeout>"
+            }
+        }
+        # 排空串口输出（guest 依次执行命令，udptest 回环 + tcptest echo 后自行结束）
+        Start-Sleep -Milliseconds 4000
         $s.ReadTimeout = 1500
         while ($true) {
             try { $b = $s.ReadByte() } catch { break }
@@ -122,7 +167,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | version | fdtest | fstest [path] | dtest | udptest | tcptest | exit",
         "Novos-OS userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -140,7 +185,11 @@ if ($Mode -eq "boot") {
         "udptest: sent rc=20",       # M5-切片3：guest UDP 出站 1（20B "hello udp from novos"）
         "udptest: sent2 rc=15",      # M5-切片3：guest UDP 出站 2（15B "pong from novos"）
         "udptest: recv 20B: hello udp from novos", # M5-切片3：hostfwd 12345 回环入站
-        "udptest: recv 15B: pong from novos" # M5-切片3：hostfwd 12344 回环入站
+        "udptest: recv 15B: pong from novos", # M5-切片3：hostfwd 12344 回环入站
+        "tcptest: listening on 20000", # M5-切片4：TCP 监听
+        "tcptest: accepted fd=",       # M5-切片4：accept 取到连接
+        "tcptest: recv 19B: hello tcp from host", # M5-切片4：收到宿主数据
+        "tcptest: echoed 19"           # M5-切片4：echo 回发成功
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
@@ -148,6 +197,10 @@ if ($Mode -eq "boot") {
 
 # 断言
 $ok = $true
+if ($Mode -eq "shell" -and $script:hostTcp -ne "hello tcp from host") {
+    Write-Host "FAIL: host TCP echo mismatch (got '$($script:hostTcp)')"
+    $ok = $false
+}
 foreach ($needle in $needles) {
     if ($output -notmatch [regex]::Escape($needle)) {
         Write-Host "FAIL: missing '$needle'"
