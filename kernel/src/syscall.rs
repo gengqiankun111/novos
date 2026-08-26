@@ -122,14 +122,8 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
     f.r12 = user_r12;
     f.rsp = user_rsp;
     let nr = f.rax; // syscall 号
-    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
-    }
     // M5：每次系统调用轮询一次网络收包（无中断依赖）
-    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
-    }
     crate::net::net_poll();
-    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
-    }
     // M6-切片1：fork/clone 需要当前用户上下文（帧），单独处理。
     // 子任务帧 = 本帧拷贝（rax 置 0）；子先执行（直接切到子帧），
     // 子退出后调度器经父帧恢复父进程（父返回子任务 id）。
@@ -157,8 +151,6 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
         }
     } else {
         let ret = dispatch(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
-        if nr == 2 || nr == 83 {
-        }
         f.rax = ret; // 返回值写回 rax
     }
     frame
@@ -166,8 +158,6 @@ pub unsafe extern "C" fn rust_syscall_handler(frame: *mut ExceptionFrame) -> *mu
 
 /// syscall 分派。
 fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
-    if nr == 2 || nr == 83 || nr == 217 || nr == 3 {
-    }
     match nr {
         SYS_WRITE => sys_write(a1, a2, a3),
         SYS_READ => sys_read(a1, a2, a3),
@@ -307,8 +297,7 @@ fn copy_path(path: u64) -> Result<alloc::string::String, u64> {
 /// 相对路径 → 绝对路径：以当前任务 cwd 为前缀，逐组件处理 "." / ".."。
 fn resolve_abs(path: &str) -> alloc::string::String {
     if path.starts_with('/') {
-        let r = alloc::string::String::from(path);
-        return r;
+        return alloc::string::String::from(path);
     }
     let cwd = crate::task::current_cwd();
     // SAFETY: cwd 为内核内部 NUL 结尾 ASCII。
