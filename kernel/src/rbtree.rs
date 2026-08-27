@@ -337,12 +337,12 @@ mod tests {
         black_height(&t, t.root);
         // 最小 = 10
         assert_eq!(t.min(), Some(7));
-        // 删除最左，逐步删除
+        // 删除最左，逐步删除（节点 7/3/2 的 key 分别为 10/20/70）
         t.remove(7); // key 10
         t.remove(3); // key 20
-        t.remove(2); // key 30
+        t.remove(2); // key 70
         black_height(&t, t.root);
-        assert_eq!(t.min(), Some(4)); // key 40
+        assert_eq!(t.min(), Some(1)); // key 30
         // 全部删除
         for i in [4, 1, 5, 6, 0] {
             t.remove(i);

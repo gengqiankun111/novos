@@ -7,8 +7,11 @@
 
 extern crate alloc;
 
-// boot.asm：启动全流程（长模式/页表/多核唤醒 stub 等），真实内核与 host 测试
-// 均需其中的符号（_start/fork_wrapper/syscall_entry/gdt64/pdpt）。
+// boot.asm：启动全流程（长模式/页表/GDT/异常 stub/syscall 入口/fork 桩）。
+// 仅真实内核构建（非 test）引入——host `cargo test` 链接的是宿主测试可执行文件，
+// 裸机启动汇编与其符号（rust_start/_kernel_end 等）不参与，由各模块的
+// `#[cfg(test)]` 桩替代（见 gdt/interrupts/page_table/syscall/task）。
+#[cfg(not(test))]
 core::arch::global_asm!(include_str!("boot.asm"), options(att_syntax));
 // boot_note.asm：PVH ELF note（`.note.Xen, "a", @note` 为 GNU/ELF 语法，
 // host 测试（COFF 目标）汇编器不识别）——仅在真实内核构建（非 test）引入。
