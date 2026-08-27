@@ -41,6 +41,8 @@ const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
 const SYS_FUTEX: u64 = 202;
 const SYS_ARCH_PRCTL: u64 = 158;
+const SYS_RT_SIGACTION: u64 = 13;   // M13-06：注册信号 handler
+const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
 const SYS_FW_ADD: u64 = 503;
@@ -185,6 +187,117 @@ fn scan_bytes(hay: &[u8], needle: &[u8]) -> bool {
     false
 }
 
+// ---- M13-06：信号测试（sigtest）----
+// 信号帧 ABI 与 kernel/src/signal.rs 严格对齐（SigFrame 布局）。
+const SIGSEGV: u64 = 11;
+const SA_SIGINFO: u64 = 0x4;
+
+#[repr(C)]
+struct SigAction {
+    handler: u64,
+    flags: u64,
+    restorer: u64,
+    mask: u64,
+}
+
+/// 与内核 ExceptionFrame 对齐（rt_sigreturn 恢复 / handler 改 rip 跳恢复点）。
+#[repr(C)]
+struct SavedRegs {
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rbp: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    rcx: u64,
+    rbx: u64,
+    rax: u64,
+    vec: u64,
+    err: u64,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+/// ucontext（内核 SigFrame +0x08，saved 在 +0x38）。
+#[repr(C)]
+struct UContext {
+    flags: u64,
+    link: u64,
+    stack_sp: u64,
+    stack_flags: u64,
+    stack_size: u64,
+    sigmask: u64,
+    mcontext: SavedRegs,
+}
+
+/// siginfo（内核 SigFrame +0xC0）。
+#[repr(C)]
+struct SigInfo {
+    signo: u64,
+    errno: u64,
+    code: u64,
+    addr: u64,
+    pid: u64,
+    uid: u64,
+}
+
+static mut HANDLED_SIGNOS: u64 = 0;
+static mut HANDLED_ADDR: u64 = 0;
+/// 信号已触发（首次运行置位；handler 恢复后据此跳过触发段）。
+static mut SIG_ACTIVE: bool = false;
+/// setjmp 式恢复点（jmp_set 保存）。
+static mut JB_RSP: u64 = 0;
+static mut JB_RBP: u64 = 0;
+static mut JB_RET: u64 = 0;
+
+/// 保存当前 rsp/rbp/返回地址（handler 经 rt_sigreturn 恢复后跳到保存点继续）。
+#[inline(never)]
+fn jmp_set() {
+    // SAFETY: 单核测试环境；仅读 rsp/rbp/[rsp]，不改栈。
+    unsafe {
+        let rsp: u64;
+        let rbp: u64;
+        let ret: u64;
+        core::arch::asm!(
+            "mov {0}, rsp",
+            "mov {1}, rbp",
+            "mov {2}, [rsp]",
+            out(reg) rsp,
+            out(reg) rbp,
+            out(reg) ret,
+            options(nostack)
+        );
+        JB_RSP = rsp;
+        JB_RBP = rbp;
+        JB_RET = ret;
+    }
+}
+
+/// SIGSEGV handler（内核按 C ABI 调用：rdi=signo, rsi=&siginfo, rdx=&ucontext）。
+/// 以 `rt_sigreturn` 收尾（不返回）；把 mcontext 恢复为 jmp_set 保存点，
+/// 跳过触发指令并以保存的干净栈继续 sigtest。
+extern "C" fn segv_handler(signo: i32, info: *mut SigInfo, uctx: *mut UContext) -> ! {
+    // SAFETY: 内核保证三参数有效；单核测试环境。
+    unsafe {
+        HANDLED_SIGNOS = signo as u64;
+        HANDLED_ADDR = (*info).addr;
+        (*uctx).mcontext.rsp = JB_RSP;
+        (*uctx).mcontext.rbp = JB_RBP;
+        (*uctx).mcontext.rip = JB_RET;
+    }
+    syscall3(SYS_RT_SIGRETURN, 0, 0, 0);
+    loop {}
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     print("PANIC: userspace\n");
@@ -299,7 +412,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -1870,6 +1983,45 @@ fn exec(cmd: &[u8]) {
                 } else {
                     print("statustest: status FAIL\n");
                 }
+            }
+        }
+        b"sigtest" => {
+            // M13-06：注册 SIGSEGV handler → 触发用户态 #PF → handler 改恢复点 →
+            // rt_sigreturn → 回到 sigtest 继续验证（内核不 panic）。
+            let act = SigAction {
+                handler: segv_handler as usize as u64,
+                flags: SA_SIGINFO,
+                restorer: 0,
+                mask: 0,
+            };
+            let rc = syscall6(SYS_RT_SIGACTION, SIGSEGV, &act as *const SigAction as u64, 0, 8, 0, 0);
+            print("sigtest: sigaction rc=");
+            print_u64(rc);
+            print("\n");
+            // 保存恢复点（handler 经 rt_sigreturn 后从 jmp_set 调用点继续）
+            jmp_set();
+            if !unsafe { SIG_ACTIVE } {
+                // 首次：触发 #PF
+                // SAFETY: 单核测试环境。
+                unsafe { SIG_ACTIVE = true; }
+                print("sigtest: triggering page fault (write addr 0)...\n");
+                // SAFETY: 故意写非法地址 0，触发用户态 #PF → SIGSEGV 投递。
+                unsafe { core::ptr::write_volatile(0usize as *mut u64, 1) };
+            }
+            // 恢复后走到这里：验证 handler 结果
+            print("sigtest: resumed after SIGSEGV\n");
+            // SAFETY: 单核测试环境。
+            let signos = unsafe { HANDLED_SIGNOS };
+            let addr = unsafe { HANDLED_ADDR };
+            print("sigtest: handler ran, signos=");
+            print_u64(signos);
+            print(" addr=");
+            print_u64(addr);
+            print("\n");
+            if signos == SIGSEGV && addr == 0 {
+                print("sigtest: SIGSEGV handled ok\n");
+            } else {
+                print("sigtest: SIGSEGV MISMATCH\n");
             }
         }
         b"exit" => {
