@@ -227,6 +227,20 @@ pub fn sleep_deadline(deadline: u64) {
     unsafe {
         crate::sync::cli();
         let cur = CURRENT;
+        if cur == 0 {
+            // task 0（init/shell 内联执行命令）：on_timer_tick 唤醒循环从 i=1 开始、
+            // 不覆盖 task 0，故不能置 Sleeping；改为 hlt 自旋等 tick 到点。
+            // volatile 读 TICKS：hlt 带 options(nomem) 时编译器不得提升负载。
+            crate::sync::sti();
+            while unsafe {
+                core::ptr::read_volatile(core::ptr::addr_of!(TICKS) as *const AtomicU64)
+                    .load(Ordering::Relaxed)
+            } < deadline
+            {
+                core::arch::asm!("hlt", options(nomem, nostack));
+            }
+            return;
+        }
         TASKS[cur].sleep_until = deadline;
         TASKS[cur].state = TaskState::Sleeping;
         if TASKS[cur].in_rq {
@@ -319,6 +333,8 @@ pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
 
     TICKS.fetch_add(1, Ordering::Relaxed);
     let now = TICKS.load(Ordering::Relaxed);
+    // M13-11：timerfd 到期推进（IRQ 上下文，关中断，天然互斥）。
+    crate::timer::on_tick();
 
     // CFS 记账：当前任务 vruntime += 1024 / 权重（权重 = 1 << effective_prio）。
     // 权重高 → vruntime 增长慢 → 被选中频率高 → 获得更多 CPU（含 PIP 提升语义）。
