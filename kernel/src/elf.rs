@@ -53,6 +53,18 @@ fn rd64(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(v)
 }
 
+/// p_flags → maps 权限位（"r-xp" / "rw-p"：读恒有，写/执行按标志，私有）。
+fn seg_perms(flags: u32) -> [u8; 4] {
+    let mut p = [b'r', b'-', b'-', b'p']; // r / w / x / p
+    if flags & 2 != 0 {
+        p[1] = b'w';
+    }
+    if flags & 1 != 0 {
+        p[2] = b'x';
+    }
+    p
+}
+
 /// ELF 解析结果（M11-切片5：动态段/解释器/依赖识别）。
 pub struct ElfInfo<'a> {
     /// e_type：2 = ET_EXEC，3 = ET_DYN。
@@ -246,6 +258,14 @@ pub fn load_and_run() -> ! {
         crate::println!(
             "m3/elf: PT_LOAD vaddr={p_vaddr:#x} filesz={p_filesz:#x} memsz={p_memsz:#x} flags={p_flags:#x}"
         );
+        // M13-01：登记到 /proc/self/maps 映射表
+        crate::vmm::register_map(
+            p_vaddr,
+            p_vaddr + p_memsz,
+            seg_perms(p_flags),
+            p_offset,
+            "/init",
+        );
     }
 
     // 用户栈：USER_STACK_VADDR 向下 128KB，全零页。
@@ -266,6 +286,14 @@ pub fn load_and_run() -> ! {
     }
     // Linux ABI 启动帧：argc/argv/envp + 辅助向量（M11-切片5）。
     let sp = build_abi_frame(sp_phys, &info);
+    // M13-01：登记用户栈映射（[stack]）
+    crate::vmm::register_map(
+        USER_STACK_VADDR - (STACK_PAGES as u64 * 4096),
+        USER_STACK_VADDR,
+        *b"rw-p",
+        0,
+        "[stack]",
+    );
     crate::println!(
         "m3/elf: user stack {:#x} sp={sp:#x}, auxv phdr={:#x} base=0 entry={:#x}",
         USER_STACK_VADDR,

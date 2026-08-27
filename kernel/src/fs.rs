@@ -315,6 +315,16 @@ fn proc_special_file(name: &str) -> Option<Arc<Inode>> {
     }
 }
 
+/// /proc/self（M13-01：当前任务视图，指针相等判定）。
+pub static SELF_DIR: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| Inode::dir());
+
+/// /proc/self/maps（M13-01）：当前进程地址空间映射。
+pub fn maps_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    *ino.data.lock() = crate::vmm::maps_content().into_bytes();
+    ino
+}
+
 /// 挂载 overlay：lower = source 目录（只读），upper = 新建可写层。
 pub fn mount_overlay(source: &str, target: &str) -> Result<(), i64> {
     if target == "/" || target.is_empty() {
@@ -362,8 +372,9 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     let mut cur = ROOT.clone();
     // overlay 遍历状态：(upper 当前目录(可 None), lower 当前目录(可 None))
     let mut ov: Option<(Option<Arc<Inode>>, Option<Arc<Inode>>)> = None;
-    // proc 挂载内标记（M9-切片1：health/cpuinfo 特殊文件）
+    // proc 挂载内标记（M9-切片1：health/cpuinfo 特殊文件；M13-01：self/maps）
     let mut proc_active = false;
+    let mut proc_self = false;
     let mut acc = String::from("/"); // 累积路径（挂载点匹配）
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     for (i, comp) in comps.iter().enumerate() {
@@ -401,6 +412,19 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
                 proc_active = false; // 文件不再有子组件
                 continue;
             }
+        }
+        // M13-01：/proc/self → 当前任务视图目录
+        if proc_active && *comp == "self" {
+            cur = SELF_DIR.clone();
+            proc_active = false;
+            proc_self = true;
+            continue;
+        }
+        // M13-01：/proc/self/maps → 当前进程地址空间映射
+        if proc_self && *comp == "maps" {
+            cur = maps_inode();
+            proc_self = false;
+            continue;
         }
         // overlay 内：upper 优先，其次 lower；.wh.* 白标记视为已删除（M7-切片2）
         if let Some((up, low)) = ov.take() {
@@ -830,10 +854,16 @@ fn visible_children(ino: &Inode) -> Vec<Dentry> {
                 inode: Inode::dir(), // /proc/<pid> 均为目录
             })
             .collect();
+        // M13-01：/proc/self（当前任务视图）
+        kids.push(Dentry { name: String::from("self"), inode: SELF_DIR.clone() });
         // M9-切片1：/proc/health + /proc/cpuinfo（只读文件）
         kids.push(Dentry { name: String::from("health"), inode: Inode::file() });
         kids.push(Dentry { name: String::from("cpuinfo"), inode: Inode::file() });
         return kids;
+    }
+    // M13-01：/proc/self 下仅 maps
+    if ino as *const Inode as usize == Arc::as_ptr(&SELF_DIR) as usize {
+        return alloc::vec![Dentry { name: String::from("maps"), inode: Inode::file() }];
     }
     if let Some(merged) = overlay_merged_children(ino) {
         return merged;
