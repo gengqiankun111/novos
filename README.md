@@ -176,7 +176,8 @@ OSv / MirageOS 更小但牺牲了多容器隔离；Linux 通用但太重。山�
 
 > **M13 进行中**：完整 /proc 视图（`/proc/self/{maps,status,exe,fd}` + `/proc/{mounts,filesystems,cpuinfo,health}`）✅；
 > 信号子系统（`rt_sigaction` SA_SIGINFO/SA_ONSTACK、用户态 #PF→SIGSEGV 投递、`sigaltstack` 备用栈、`sigprocmask` 阻塞 + `kill`）✅；
-> 均经 QEMU `sigtest`/`sigmasktest` 集成验证。剩余：timerfd/signalfd、实时信号、JVM 冒烟、内存基线（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
+> timerfd（`timerfd_create/settime/gettime` + epoll 阻塞监听 + `read` 到期计数）✅；
+> 均经 QEMU `sigtest`/`sigmasktest`/`tfdtest` 集成验证。剩余：signalfd、实时信号、JVM 冒烟、内存基线（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 
 ---
 

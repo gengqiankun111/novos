@@ -46,6 +46,9 @@ const SYS_RT_SIGACTION: u64 = 13;   // M13-06：注册信号 handler
 const SYS_RT_SIGPROCMASK: u64 = 14; // M13-08：阻塞/解除阻塞信号
 const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
 const SYS_KILL: u64 = 62;           // M13-08：投递信号
+const SYS_TIMERFD_CREATE: u64 = 283; // M13-11：创建 timerfd
+const SYS_TIMERFD_SETTIME: u64 = 286; // M13-11：设/重调度 timerfd
+const SYS_TIMERFD_GETTIME: u64 = 287; // M13-11：查询 timerfd
 const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
@@ -205,6 +208,15 @@ struct StackT {
     ss_flags: u32,
     _pad: u32,
     ss_size: u64,
+}
+
+/// itimerspec { it_interval{sec,nsec}, it_value{sec,nsec} }（32 字节，timerfd）。
+#[repr(C)]
+struct Itimerspec {
+    int_sec: i64,
+    int_nsec: i64,
+    val_sec: i64,
+    val_nsec: i64,
 }
 
 /// 备用信号栈缓冲（M13-07：handler 在其上运行，验证不溢出主栈）。
@@ -448,7 +460,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigmasktest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigmasktest | tfdtest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2096,6 +2108,61 @@ fn exec(cmd: &[u8]) {
                 } else {
                     print("fdtree: fd listing FAIL\n");
                 }
+            }
+        }
+        b"tfdtest" => {
+            // M13-11：timerfd_create + settime(20ms 一次性) → epoll 监听 →
+            // 到期 EPOLLIN → read 读回计数=1。定时器取 2 tick（20ms）使整条
+            // 链路在测试脚本采集窗口内快速完成。
+            let tfd = syscall3(SYS_TIMERFD_CREATE, 0, 0, 0);
+            print("tfdtest: timerfd_create fd=");
+            print_u64(tfd);
+            print("\n");
+            if tfd < 400 {
+                print("tfdtest: create FAIL\n");
+            } else {
+                let spec = Itimerspec { int_sec: 0, int_nsec: 0, val_sec: 0, val_nsec: 20_000_000 };
+                let rc = syscall6(SYS_TIMERFD_SETTIME, tfd, 0, &spec as *const Itimerspec as u64, 0, 0, 0);
+                print("tfdtest: settime rc=");
+                print_u64(rc);
+                print("\n");
+                // gettime：剩余时间应 > 0
+                let mut cur = Itimerspec { int_sec: 0, int_nsec: 0, val_sec: 0, val_nsec: 0 };
+                let grc = syscall6(SYS_TIMERFD_GETTIME, tfd, &mut cur as *mut Itimerspec as u64, 0, 0, 0, 0);
+                let remaining = (cur.val_sec * 1_000_000_000 + cur.val_nsec) as u64;
+                print("tfdtest: gettime rc=");
+                print_u64(grc);
+                print(" remain_ns=");
+                print_u64(remaining);
+                print("\n");
+                // epoll 监听
+                let epfd = syscall3(SYS_EPOLL_CREATE, 1, 0, 0);
+                let ev = [1u32, 0, 0, 0, 0, 0]; // EPOLLIN
+                let arc = syscall5(SYS_EPOLL_CTL, epfd, 1 /*ADD*/, tfd, ev.as_ptr() as u64, 0);
+                print("tfdtest: epoll_ctl rc=");
+                print_u64(arc);
+                print("\n");
+                // 阻塞等待到期（超时 200ms；内核 sleep_deadline hlt 让出）
+                let mut events = [0u8; 12];
+                let wn = syscall5(SYS_EPOLL_WAIT, epfd, events.as_mut_ptr() as u64, 1, 200, 0);
+                print("tfdtest: epoll_wait got=");
+                print_u64(wn);
+                print("\n");
+                // read 到期计数
+                let mut count: u64 = 0;
+                let n = syscall3(SYS_READ, tfd, &mut count as *mut u64 as u64, 8);
+                print("tfdtest: read rc=");
+                print_u64(n);
+                print(" count=");
+                print_u64(count);
+                print("\n");
+                if wn > 0 && rc == 0 && n == 8 && count == 1 && remaining > 0 {
+                    print("tfdtest: timerfd ok\n");
+                } else {
+                    print("tfdtest: timerfd FAIL\n");
+                }
+                syscall3(SYS_CLOSE, tfd, 0, 0);
+                syscall3(SYS_CLOSE, epfd, 0, 0);
             }
         }
         b"mtabtest" => {

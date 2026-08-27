@@ -695,7 +695,10 @@ pub fn udp_ready(fd: usize) -> bool {
 }
 
 fn epoll_item_ready(fd: usize) -> bool {
-    if fd >= TCP_FD_BASE {
+    if fd >= crate::timer::TIMER_FD_BASE {
+        // M13-11：timerfd 到期可读
+        crate::timer::timer_ready(fd)
+    } else if fd >= TCP_FD_BASE {
         tcp_ready(fd)
     } else if fd >= 100 {
         udp_ready(fd)
@@ -704,31 +707,44 @@ fn epoll_item_ready(fd: usize) -> bool {
     }
 }
 
-/// epoll_wait(epfd, events, maxevents, timeout_ms)：非阻塞轮询就绪项。
+/// epoll_wait(epfd, events, maxevents, timeout_ms)：阻塞等待就绪项。
 /// 每个 epoll_event 为 { events: u32, data: u64 }（12 字节）。
-pub fn epoll_wait(epfd: usize, events: *mut u8, maxevents: usize) -> i64 {
-    let e = EPOLLS.lock();
-    let inst = match e.iter().find(|x| x.fd == epfd) {
-        Some(x) => x,
-        None => return -9,
-    };
-    let mut n = 0usize;
-    for item in &inst.items {
-        if n >= maxevents {
-            break;
-        }
-        if epoll_item_ready(item.fd) {
-            // SAFETY: events 为用户态可写 maxevents*12 字节。
-            unsafe {
-                let base = events.add(n * 12);
-                core::ptr::write_volatile(base as *mut u32, item.events);
-                core::ptr::write_volatile(base.add(4) as *mut u32, 0); // pad
-                core::ptr::write_volatile(base.add(8) as *mut u64, 0); // data
+/// timeout_ms=0 非阻塞；>0 时在 deadline 前反复检查，期间 hlt 让出（tick 唤醒）。
+pub fn epoll_wait(epfd: usize, events: *mut u8, maxevents: usize, timeout_ms: u64) -> i64 {
+    // PIT 100Hz：10ms/tick，超时换算成 tick 截止时刻。
+    let deadline = crate::task::ticks() + timeout_ms / 10;
+    loop {
+        {
+            let e = EPOLLS.lock();
+            let inst = match e.iter().find(|x| x.fd == epfd) {
+                Some(x) => x,
+                None => return -9,
+            };
+            let mut n = 0usize;
+            for item in &inst.items {
+                if n >= maxevents {
+                    break;
+                }
+                if epoll_item_ready(item.fd) {
+                    // SAFETY: events 为用户态可写 maxevents*12 字节。
+                    unsafe {
+                        let base = events.add(n * 12);
+                        core::ptr::write_volatile(base as *mut u32, item.events);
+                        core::ptr::write_volatile(base.add(4) as *mut u32, 0); // pad
+                        core::ptr::write_volatile(base.add(8) as *mut u64, 0); // data
+                    }
+                    n += 1;
+                }
             }
-            n += 1;
+            if n > 0 {
+                return n as i64;
+            }
+        } // 释放 EPOLLS 锁后再休眠
+        if timeout_ms == 0 || crate::task::ticks() >= deadline {
+            return 0;
         }
+        crate::task::sleep_deadline(deadline);
     }
-    n as i64
 }
 
 /// close epoll 实例。
