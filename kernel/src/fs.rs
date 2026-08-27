@@ -311,8 +311,37 @@ fn proc_special_file(name: &str) -> Option<Arc<Inode>> {
     match name {
         "health" => Some(health_inode()),
         "cpuinfo" => Some(cpuinfo_inode()),
+        "mounts" => Some(mounts_inode()),
+        "filesystems" => Some(filesystems_inode()),
         _ => None,
     }
+}
+
+/// /proc/mounts（M13-05）：挂载表视图（device mountpoint fstype opts 0 0）。
+pub fn mounts_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    let mut body = alloc::string::String::from("/dev/root / tmpfs rw 0 0\n");
+    for m in MOUNTS.lock().iter() {
+        let (fstype, _opts) = match &m.kind {
+            MountKind::Tmpfs(_) => ("tmpfs", "rw"),
+            MountKind::Overlay { .. } => ("overlay", "rw"),
+            MountKind::Proc(_) => ("proc", "rw"),
+        };
+        body.push_str(&alloc::format!(
+            "{} {} {} {} 0 0\n",
+            fstype, m.path, fstype, _opts
+        ));
+    }
+    *ino.data.lock() = body.into_bytes();
+    ino
+}
+
+/// /proc/filesystems（M13-05）：内核支持的文件系统类型。
+pub fn filesystems_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    *ino.data.lock() =
+        b"nodev\ttmpfs\nnodev\tramfs\nnodev\toverlayfs\nnodev\tproc\n\text4\n".to_vec();
+    ino
 }
 
 /// /proc/self（M13-01：当前任务视图，指针相等判定）。
@@ -999,6 +1028,9 @@ fn visible_children(ino: &Inode) -> Vec<Dentry> {
         // M9-切片1：/proc/health + /proc/cpuinfo（只读文件）
         kids.push(Dentry { name: String::from("health"), inode: Inode::file() });
         kids.push(Dentry { name: String::from("cpuinfo"), inode: Inode::file() });
+        // M13-05：/proc/mounts + /proc/filesystems
+        kids.push(Dentry { name: String::from("mounts"), inode: Inode::file() });
+        kids.push(Dentry { name: String::from("filesystems"), inode: Inode::file() });
         return kids;
     }
     // M13-01/02/03：/proc/self 下 maps + status + exe
