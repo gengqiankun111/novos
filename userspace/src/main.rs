@@ -46,6 +46,14 @@ const SYS_RT_SIGACTION: u64 = 13;   // M13-06：注册信号 handler
 const SYS_RT_SIGPROCMASK: u64 = 14; // M13-08：阻塞/解除阻塞信号
 const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
 const SYS_KILL: u64 = 62;           // M13-08：投递信号
+const SYS_FCNTL: u64 = 72;          // M14：记录锁（F_SETLK/F_GETLK/F_UNLCK）
+// fcntl 命令与锁类型（M14）
+const F_GETLK: u64 = 5;
+const F_SETLK: u64 = 6;
+const F_SETLKW: u64 = 7;
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
 const SYS_TIMERFD_CREATE: u64 = 283; // M13-11：创建 timerfd
 const SYS_TIMERFD_SETTIME: u64 = 286; // M13-11：设/重调度 timerfd
 const SYS_TIMERFD_GETTIME: u64 = 287; // M13-11：查询 timerfd
@@ -266,6 +274,17 @@ struct SignalfdSiginfo {
     fd: i32,
     tid: u32,
     band: u32,
+}
+
+/// struct flock（M14，x86_64 32 字节，与内核布局一致）。
+#[repr(C)]
+struct Flock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+    _pad: [u8; 4],
 }
 
 /// 备用信号栈缓冲（M13-07：handler 在其上运行，验证不溢出主栈）。
@@ -572,7 +591,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | jvmsmoke | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | fcntltest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | jvmsmoke | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -1594,6 +1613,69 @@ fn exec(cmd: &[u8]) {
                 print("healthtest: reaped=");
                 print_u64(w);
                 print("\n");
+            }
+        }
+        b"fcntltest" => {
+            // M14：字节区间记录锁——父写锁 [0,10) → fork → 子尝试加锁冲突
+            // EAGAIN → F_GETLK 查得父锁 → 父解锁 → 子重新加锁成功 → 回收。
+            let fd = syscall3(SYS_OPEN, b"/data/lockfile\0".as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+            if (fd as i64) < 0 {
+                print("fcntltest: open failed\n");
+            } else {
+                // 写入 16 字节（文件大小供 SEEK_END 语义使用）
+                syscall3(SYS_WRITE, fd, b"0123456789ABCDEF".as_ptr() as u64, 16);
+                // 父：写锁 [0,10)
+                let fl = Flock { l_type: F_WRLCK, l_whence: 0, l_start: 0, l_len: 10, l_pid: 0, _pad: [0u8; 4] };
+                let prc = syscall3(SYS_FCNTL, fd, F_SETLK, &fl as *const Flock as u64);
+                print("fcntltest: parent setlk rc=");
+                print_u64(prc);
+                print("\n");
+                let r = syscall3(SYS_FORK, 0, 0, 0);
+                if r == 0 {
+                    // 子（fork 模型先执行）：尝试写锁 → 应冲突 EAGAIN (-11)
+                    let c1 = syscall3(SYS_FCNTL, fd, F_SETLK, &fl as *const Flock as u64);
+                    let conflict = (c1 as i64) < 0;
+                    print("fcntltest: child conflict=");
+                    print_u64(conflict as u64);
+                    print("\n");
+                    // F_GETLK 查询 → 应返回父的写锁（type=F_WRLCK=1, pid=父）
+                    let mut q = Flock { l_type: F_WRLCK, l_whence: 0, l_start: 0, l_len: 10, l_pid: 0, _pad: [0u8; 4] };
+                    syscall3(SYS_FCNTL, fd, F_GETLK, &mut q as *mut Flock as u64);
+                    print("fcntltest: getlk type=");
+                    print_u64(q.l_type as u64);
+                    print(" pid=");
+                    print_u64(q.l_pid as u64);
+                    print("\n");
+                    // F_SETLKW 阻塞等父解锁（内核 sleep 让出，父可运行解锁）
+                    let c2 = syscall3(SYS_FCNTL, fd, F_SETLKW, &fl as *const Flock as u64);
+                    print("fcntltest: child relock ok=");
+                    print_u64((c2 == 0) as u64);
+                    print("\n");
+                    syscall3(SYS_EXIT, 0, 0, 0);
+                } else {
+                    // 父：解锁（l_type=F_UNLCK 经 F_SETLK 提交；子已先执行完冲突+查询段）
+                    let u = Flock { l_type: F_UNLCK, l_whence: 0, l_start: 0, l_len: 10, l_pid: 0, _pad: [0u8; 4] };
+                    let urc = syscall3(SYS_FCNTL, fd, F_SETLK, &u as *const Flock as u64);
+                    print("fcntltest: parent unlock rc=");
+                    print_u64(urc);
+                    print("\n");
+                    // 回收子
+                    let mut w = 0u64;
+                    let mut n = 0u32;
+                    while w == 0 && n < 300000 {
+                        w = syscall3(SYS_WAITPID, r, 0, 0);
+                        n += 1;
+                    }
+                    print("fcntltest: reaped=");
+                    print_u64(w);
+                    print("\n");
+                    if prc == 0 && urc == 0 && w == r {
+                        print("fcntltest: record lock ok\n");
+                    } else {
+                        print("fcntltest: record lock FAIL\n");
+                    }
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
             }
         }
         b"memtest" => {

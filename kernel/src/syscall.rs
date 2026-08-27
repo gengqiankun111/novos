@@ -55,6 +55,7 @@ pub const SYS_RT_SIGPROCMASK: u64 = 14; // M13-08：阻塞/解除阻塞信号
 pub const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
 pub const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 pub const SYS_KILL: u64 = 62;           // M13-08：投递信号
+pub const SYS_FCNTL: u64 = 72; // M14：记录锁（F_SETLK/F_GETLK/F_UNLCK，SQLite 依赖）
 pub const SYS_TIMERFD_CREATE: u64 = 283; // M13-11：创建 timerfd
 pub const SYS_TIMERFD_SETTIME: u64 = 286; // M13-11：设/重调度 timerfd
 pub const SYS_TIMERFD_GETTIME: u64 = 287; // M13-11：查询 timerfd
@@ -202,6 +203,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_GETCWD => sys_getcwd(a1, a2),
         SYS_CHDIR => sys_chdir(a1),
         SYS_READLINK => sys_readlink(a1, a2, a3),
+        SYS_FCNTL => sys_fcntl(a1, a2, a3),
         SYS_FUTEX => sys_futex(a1, a2, a3, a4, a5),
         SYS_ARCH_PRCTL => sys_arch_prctl(a1, a2),
         SYS_RT_SIGACTION => crate::signal::sys_rt_sigaction(a1, a2, a3, a4) as u64,
@@ -434,6 +436,74 @@ fn sys_readlink(path: u64, buf: u64, bufsiz: u64) -> u64 {
 fn sys_futex(addr: u64, op: u64, val: u64, arg4: u64, arg5: u64) -> u64 {
     // SAFETY: 用户地址恒等映射，由 futex 模块校验语义。
     unsafe { crate::futex::futex(addr, op, val, arg4, arg5) }
+}
+
+/// 用户态 `struct flock`（x86_64，32 字节）。
+#[repr(C)]
+struct Flock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+    _pad: [u8; 4],
+}
+
+/// fcntl(fd, cmd, arg)：字节区间记录锁（M14，SQLite 依赖）。
+/// 支持 F_GETLK(5)/F_SETLK(6)/F_SETLKW(7)；arg 指向用户 `struct flock`。
+fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
+    let (inode, size) = match crate::fs::fd_inode_size(fd as usize) {
+        Some(x) => x,
+        None => return (-9i64) as u64, // EBADF（仅常规文件可加锁）
+    };
+    // SAFETY: arg 为用户态 flock 指针（32 字节可读）。
+    let f = unsafe { core::ptr::read_volatile(arg as *const Flock) };
+    let pid = crate::task::current_pid();
+    match cmd {
+        crate::flock::F_SETLK | crate::flock::F_SETLKW => {
+            let blocking = cmd == crate::flock::F_SETLKW;
+            crate::flock::set_lock(
+                inode,
+                f.l_type,
+                f.l_whence,
+                f.l_start,
+                f.l_len,
+                pid,
+                size,
+                blocking,
+            ) as u64
+        }
+        crate::flock::F_GETLK => {
+            let hit = crate::flock::get_lock(
+                inode,
+                f.l_type,
+                f.l_whence,
+                f.l_start,
+                f.l_len,
+                pid,
+                size,
+            );
+            // SAFETY: arg 为用户态 flock 指针（32 字节可写）。
+            let out = unsafe { &mut *(arg as *mut Flock) };
+            match hit {
+                Some((typ, start, end, owner)) => {
+                    out.l_type = typ;
+                    out.l_start = start as i64;
+                    out.l_len = if end == u64::MAX {
+                        0
+                    } else {
+                        (end - start) as i64
+                    };
+                    out.l_pid = owner as i32;
+                }
+                None => {
+                    out.l_type = crate::flock::F_UNLCK;
+                }
+            }
+            0
+        }
+        _ => (-22i64) as u64, // EINVAL
+    }
 }
 
 /// arch_prctl(code, addr)：TLS 段基址（FS base）设置/查询（M11-切片2）。
