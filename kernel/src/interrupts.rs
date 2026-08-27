@@ -197,23 +197,36 @@ pub fn init() {
     }
 }
 
-/// 异常统一入口：打印寄存器快照 + 停机（M0 异常即致命，DESIGN §8.2）。
+/// 异常统一入口：返回目标任务的 frame 指针（异常处理后可 iretq 回用户态）。
+///
+/// - **用户态 `#PF`（vec=14）** → 投递 SIGSEGV（M13-10）：有 handler 则改写 frame
+///   进入 handler（exception_common 恢复后 iretq）；无 handler 由 signal 内部终止。
+/// - 其余/内核态异常：打印寄存器快照 + 停机（M0 异常即致命，DESIGN §8.2）。
 ///
 /// # Safety
 /// 由 boot.asm 的 `exception_common` 以有效帧指针调用。
 #[no_mangle]
-pub unsafe extern "C" fn rust_exception_handler(frame: *const ExceptionFrame) -> ! {
-    let f = unsafe { &*frame };
-    panic_write(format_args!("EXCEPTION: vector={} err={:#x}\n", f.vec, f.err));
+pub unsafe extern "C" fn rust_exception_handler(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
+    let f = unsafe { &mut *frame };
+    // M13-10：用户态缺页 → SIGSEGV（不再直接内核 panic）
+    if f.vec == 14 && f.cs & 3 == 3 {
+        // SAFETY: mov %cr2 为只读特权指令。
+        let cr2: u64;
+        unsafe { asm!("movq %cr2, {0}", out(reg) cr2, options(nomem, nostack, att_syntax)) };
+        let _ = crate::signal::deliver_segv(f, cr2);
+        return frame; // 有 handler 时 f 已改写为进入 handler；否则已终止
+    }
+    let f2 = unsafe { &*frame };
+    panic_write(format_args!("EXCEPTION: vector={} err={:#x}\n", f2.vec, f2.err));
     // 读取 CR2（页错误地址）
     let cr2: u64;
     // SAFETY: mov %cr2 为只读特权指令。
     unsafe { asm!("movq %cr2, {0}", out(reg) cr2, options(nomem, nostack, att_syntax)) };
     panic_write(format_args!("  cr2={:#x}\n", cr2));
-    panic_write(format_args!("  rip={:#x} cs={:#x} rflags={:#x}\n", f.rip, f.cs, f.rflags));
-    panic_write(format_args!("  rsp={:#x} ss={:#x}\n", f.rsp, f.ss));
-    panic_write(format_args!("  rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}\n", f.rax, f.rbx, f.rcx, f.rdx));
-    panic_write(format_args!("  rdi={:#x} rsi={:#x} rbp={:#x}\n", f.rdi, f.rsi, f.rbp));
+    panic_write(format_args!("  rip={:#x} cs={:#x} rflags={:#x}\n", f2.rip, f2.cs, f2.rflags));
+    panic_write(format_args!("  rsp={:#x} ss={:#x}\n", f2.rsp, f2.ss));
+    panic_write(format_args!("  rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}\n", f2.rax, f2.rbx, f2.rcx, f2.rdx));
+    panic_write(format_args!("  rdi={:#x} rsi={:#x} rbp={:#x}\n", f2.rdi, f2.rsi, f2.rbp));
     loop {
         // SAFETY: hlt 为特权指令。
         unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
