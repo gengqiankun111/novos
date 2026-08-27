@@ -50,6 +50,14 @@ if ($Mode -eq "boot") {
         "Novos-OS: boot ok",
         "m3: loading embedded userspace init",
         "m3/elf: PT_LOAD vaddr=0x8000000000",
+        "elf/dyn: static ET_EXEC ok",          # M11-切片5：静态判定
+        "elf/dyn: dynamic + interp + DT_NEEDED ok", # M11-切片5：动态+解释器+依赖解析
+        "elf/dyn: dynamic no-interp ok",       # M11-切片5：无 interp 的 DSO 判定
+        "elf/dyn: bad-magic rejected ok",      # M11-切片5：坏镜像拒绝
+        "elf/dyn: self-test PASS",             # M11-切片5：解析自测通过
+        "m3/elf: static (no PT_INTERP)",       # M11-切片5：init 为静态 ELF
+        "m3/elf: no PT_DYNAMIC (static)",      # M11-切片5：无动态段
+        "m3/elf: user stack",                  # M11-切片5：辅助向量栈帧
         "Novos-OS M3 userspace shell (init)",
         "virtio-net: io=",                    # M5-切片1：virtio-net 驱动初始化
         "net: arp who-has 10.0.2.2",          # tx：ARP 请求发出
