@@ -1275,12 +1275,38 @@ pub fn fd_alloc(f: Arc<File>) -> usize {
 
 /// 关闭 fd。
 pub fn fd_close(fd: usize) -> bool {
-    FD_TABLE.lock().close(fd)
+    // M14：POSIX fcntl 记录锁——进程关闭 fd 时释放该 inode 上本进程全部锁。
+    let ino = fd_inode(fd);
+    let ok = FD_TABLE.lock().close(fd);
+    if ok {
+        if let Some(inode) = ino {
+            crate::flock::release_inode(crate::task::current_pid(), inode);
+        }
+    }
+    ok
 }
 
 /// 取 fd 对应文件。
 pub fn fd_get(fd: usize) -> Option<Arc<File>> {
     FD_TABLE.lock().get(fd)
+}
+
+/// 取 fd 对应常规文件的 inode 指针（非常规文件返回 None）。
+pub fn fd_inode(fd: usize) -> Option<usize> {
+    let f = FD_TABLE.lock().get(fd)?;
+    match &*f {
+        File::Reg { inode, .. } => Some(Arc::as_ptr(inode) as usize),
+        _ => None,
+    }
+}
+
+/// 取 fd 对应常规文件的 (inode 指针, 文件字节数)。
+pub fn fd_inode_size(fd: usize) -> Option<(usize, u64)> {
+    let f = FD_TABLE.lock().get(fd)?;
+    match &*f {
+        File::Reg { inode, .. } => Some((Arc::as_ptr(inode) as usize, inode.size() as u64)),
+        _ => None,
+    }
 }
 
 // ---- /proc/self/status 单元测试（M13-02）----

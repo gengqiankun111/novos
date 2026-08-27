@@ -297,7 +297,7 @@
 - [ ] `shanshui-guanxin-pull`：registry HTTPS + OCI 解析 + SHA-256 摘要校验 + 层解压。
 - [ ] **OTA 升级 + 回滚**：增量拉取变化层 + 镜像版本切换（出错切回旧层）；**内核镜像纳入 A/B 分区管理**（内核分区 A/B 标识 + 回滚，覆盖内核本身升级，DESIGN §21.9）。
 - [ ] **Redis 部署模板**：预置只读 `/etc/redis/redis.conf`（Immutable），`--maxmemory 64mb`、禁 RDB、只开 AOF——用户无法 `-c` 覆盖导致 OOM（DESIGN §21.2）。
-- [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖）。
+- [x] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖）。
 - [ ] 移植 **SQLite**（musl 静态，CRUD + WAL） + **Redis**（**部署模板强制**：`--maxmemory 64mb`、禁 RDB、只开 AOF）。
 - [ ] **实现 shanshui-guanxin-gateway**（`--features gateway`，Rust 静态编译，纯用户态）：
   - [ ] **配置格式**（TOML）：监听端口、上游服务、路由规则、TLS 证书路径（示例 `/etc/shanshui-guanxin/gateway.toml`）；
