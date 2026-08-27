@@ -39,6 +39,7 @@ const SYS_MOUNT: u64 = 165;
 const SYS_GETDENTS64: u64 = 217;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
+const SYS_READLINK: u64 = 89;   // M13-03：读取符号链接目标
 const SYS_FUTEX: u64 = 202;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_RT_SIGACTION: u64 = 13;   // M13-06：注册信号 handler
@@ -433,7 +434,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2004,6 +2005,22 @@ fn exec(cmd: &[u8]) {
                 } else {
                     print("statustest: status FAIL\n");
                 }
+            }
+        }
+        b"exetest" => {
+            // M13-03：readlink /proc/self/exe → 当前进程可执行文件路径 "/init"。
+            let mut buf = [0u8; 64];
+            let rc = syscall3(SYS_READLINK, b"/proc/self/exe\0".as_ptr() as u64, buf.as_mut_ptr() as u64, 64);
+            print("exetest: readlink rc=");
+            print_u64(rc);
+            print(" path=");
+            // SAFETY: rc 为内核返回长度（≤64），buf 内容为 ASCII 路径。
+            print(unsafe { core::str::from_utf8_unchecked(&buf[..core::cmp::min(rc as usize, 64)]) });
+            print("\n");
+            if rc == 5 && &buf[..5] == b"/init" {
+                print("exetest: exe ok\n");
+            } else {
+                print("exetest: exe FAIL\n");
             }
         }
         b"sigtest" => {
