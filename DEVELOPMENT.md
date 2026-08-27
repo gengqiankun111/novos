@@ -1,8 +1,9 @@
-# Novos‑OS 开发步骤（路线图）v2.0
+# 山水观心操作系统开发步骤（路线图）v2.0
 
 > 本路线图基于 DESIGN.md v0.1 及 2026-08-26 深度评审（12 项勘误已内联）制定。
 > **版本发布策略与关键设计决策索引见 [VERSIONING.md](VERSIONING.md)**。
-> **核心目标**：从零构建一个 **≤32MB（minimal）/ ≤40MB（full）** 的微型容器宿主内核。
+> **核心目标**：从零构建一个 **≤32MB（minimal）/ ≤40MB（full）** 的微型容器宿主内核（山水观心 Core）。
+> **图形版 Desktop（≥128MB，含 GPU/GUI）为独立产品线**，见 M16（feature-gated，默认不编译）。
 >
 > **开发原则**：
 > 1. **先跑通，再优化** —— 每个里程碑必须可运行，不追求完美。
@@ -25,7 +26,7 @@
 | M6 | Namespace + Cgroup | 进程/资源隔离 | 26–30 MB | M3 | 3 周 |
 | **合并** | | | | | |
 | M7 | OverlayFS | 容器镜像分层 | 28–31 MB | M4 + M6 | 3 周 |
-| M8 | 容器运行时 + 网关 | `novos run` + NAT 转发 | 30–32 MB | M5+M6+M7 | 4 周 |
+| M8 | 容器运行时 + 网关 | `shanshui-guanxin run` + NAT 转发 | 30–32 MB | M5+M6+M7 | 4 周 |
 | M9 | 长期稳定版 | 32MB 基线正式达标 | **≤32 MB** | M8 | 4 周 |
 
 **总计工期（minimal 1.0）**：约 **34 周**（~8.5 个月，3 人并行可压缩至 5 个月）
@@ -47,7 +48,7 @@
 - [ ] 内核命令行解析：支持 `log=debug`、`console=ttyS0` 等参数。
 
 **验收标准**：
-- QEMU 启动后串口打印 `Novos-OS: boot ok` 与内存映射信息。
+- QEMU 启动后串口打印 `Shanshui-guanxin: boot ok` 与内存映射信息。
 - 手动触发 panic（如 `assert_eq!(1, 2)`）能打印寄存器快照且不重启。
 
 ---
@@ -174,7 +175,7 @@
 ### M8：容器运行时 + 网关
 **目标**：跑起第一个容器 + 网关转发。
 
-- [ ] 类 runC 命令：`novos run <image> <cmd>`（§4.6 完整流程）。
+- [ ] 类 runC 命令：`shanshui-guanxin run <image> <cmd>`（§4.6 完整流程）。
 - [ ] 容器 rootfs 用 OverlayFS 组装；`pivot_root`。
 - [ ] 容器内挂 `/proc`（pid ns 视图）、设 cgroup。
 - [ ] 网关：IP 转发 + conntrack + MASQUERADE + 端口映射。
@@ -182,7 +183,7 @@
 - [ ] 基础防火墙（线性规则表）。
 
 **验收标准**：
-- `novos run busybox echo hello` 输出 hello，容器隔离正确。
+- `shanshui-guanxin run busybox echo hello` 输出 hello，容器隔离正确。
 - 容器外网访问经 MASQUERADE 成功，conntrack 老化回收。
 - **内存基线**：空闲 32MB 内；跑 3 个容器内核常驻不涨破预算。
 
@@ -202,6 +203,15 @@
 - [ ] 看门狗 + 掉电保护（日志原子写 / FS 一致性）。
 - [ ] **环形日志落盘**：内核日志异步写 `/var/log/kernel.log`，内存缓冲 → 批量写 Ext4（§10.1→§19.2 衔接）。
 - [ ] **健康指标暴露**：`/proc/health` 输出 JSON：内存 used/free、fd 数、容器数、CPU 负载。
+- [ ] **top 数据源（/proc 扩展）**：
+  - [ ] **`/proc/stat`**：CPU 总时间 / 各态时间、中断计数、上下文切换次数（DESIGN §10.2）；
+  - [ ] **`/proc/loadavg`**：1/5/15 分钟负载平均值；
+  - [ ] **`/proc/<pid>/stat`**：每进程 pid、状态、utime/stime、rss、vsize。
+- [ ] **编写 top 命令**（Rust，静态编译，<100KB，`--features top`）：
+  - 循环读取 `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat`，计算进程 CPU 占用率；
+  - 交互式界面（crossterm 或简单 ANSI 转义），刷新间隔 1s；
+  - 支持按 CPU/内存排序、按键 `q` 退出、`h` 帮助。
+- [ ] 将 top 放入默认 rootfs（`/bin/top`），在 M15 用户文档中说明使用方法。
 - [ ] 可观测性：环形日志 + 落盘 + 健康指标（内存/fd/CPU）。
 
 **验收标准**：
@@ -220,6 +230,7 @@
 
 - [ ] `BlockDevice` trait + virtio-blk 驱动。
 - [ ] BIO 层（简单队列 + 同步 I/O + **错误重试：读失败返回 EIO，写失败重试 3 次（间隔 10ms），超时 5s**）。
+- [ ] **电梯调度（Deadline，可选）**：READ 优先 + 写 LBA 合并的极简 Deadline（`--features block-scheduler`，对应 M13 评估项）。
 - [ ] Page Cache（`AddressSpace`：文件偏移 → 物理页，可 shrink）。
 - [ ] ext4 驱动：`data=journal` 完整模式（防掉电损坏）。
 - [ ] `mmap MAP_SHARED` 文件映射（多进程共享物理页）。
@@ -238,8 +249,9 @@
 - [ ] futex 系统调用（WAIT/WAKE/REQUEUE，**逻辑键索引**，支持 COW 迁移）。
 - [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR。
 - [ ] **宿主机交叉编译工具链**：musl-cross + `crt1.o` + linker script。
-- [ ] **`novos-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（M14 应用合入门槛）；**启动前扫描 `PT_INTERP`，非 `/novos/ld-musl` 拒绝启动并提示**（glibc 拦截，DESIGN §21.1）。
-- [ ] **官方推荐软件清单（阶段一）**：文档页表格列出软件/功能/官方地址/官方验证 musl 静态二进制链接（core/runtime/service/net-tools 四类，DESIGN §22）；配套 `novos-build` 一键构建；**立即产出《为 Novos-OS 构建 Redis》musl 静态编译指南**（Redis 7.2.4+）。
+- [ ] **`shanshui-guanxin-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（RSS+虚拟内存），不通过禁止合入；**启动前扫描 `PT_INTERP`，非 `/shanshui-guanxin/ld-musl` 拒绝启动并提示**（glibc 拦截，DESIGN §21.1）。
+- [ ] **动态链接依赖检查**：`shanshui-guanxin-check` 解析 `DT_NEEDED` 依赖链，确认 ld.so 均位于 `/shanshui-guanxin/` 下（`/shanshui-guanxin/ld-musl-x86_64.so.1` 路径校验）。
+- [ ] **官方推荐软件清单（阶段一）**：文档页表格列出软件/功能/官方地址/官方验证 musl 静态二进制链接（core/runtime/service/net-tools 四类，DESIGN §22）；配套 `shanshui-guanxin-build` 一键构建；**立即产出《为 山水观心操作系统构建 Redis》musl 静态编译指南**（Redis 7.2.4+）。
 
 **验收标准**：
 - 运行动态链接的 hello world（`gcc -o hello hello.c` 不加 `-static`）。
@@ -251,6 +263,7 @@
 **目标**：Docker 安全模型 + 完整设备文件。
 
 - [ ] **驱动框架定型**：bus→device→driver + BSP + 中断分发。
+- [ ] **设备类型增加 GPU（BusType::Gpu）**：为 M16 图形版预留接口（`feature = "gpu"`，DESIGN §6.2⑤/§13.16）。
 - [ ] 标准设备：`/dev/null`、`/dev/zero`、`/dev/urandom`、`/dev/ptmx`。
 - [ ] Capabilities：`TaskCreds`（permitted/effective/inheritable/bounding）。
 - [ ] Seccomp BPF：参数值匹配（eq/ne/masked_eq，覆盖 mount/ptrace/openat 等 10 个高风险调用）。
@@ -267,7 +280,7 @@
 - [ ] /proc 扩展：`/proc/self/maps`、`/proc/self/status`、`/proc/self/exe`、`/proc/self/fd/`、`/proc/net/conntrack`（纯文本：协议/剩余秒/状态/五元组，DESIGN §10.2 新增）。
 - [ ] 信号扩展：`sigaction`（SA_SIGINFO + SA_ONSTACK）、`sigprocmask`、`sigaltstack`。
 - [ ] timerfd：`timerfd_create` + `timerfd_settime` + epoll 可监听。
-- [ ] **网络调试开关**：`/proc/sys/net/novos/packet_trace`——开启后环形日志打印每包五元组 + 丢弃原因（性能降 ~50%，替代 tcpdump，DESIGN §21.8）。
+- [ ] **网络调试开关**：`/proc/sys/net/shanshui-guanxin/packet_trace`——开启后环形日志打印每包五元组 + 丢弃原因（性能降 ~50%，替代 tcpdump，DESIGN §21.8）。
 - [ ] **Block I/O 电梯调度（评估）**：READ 优先 + 写 LBA 合并的极简 Deadline（勘误②，DESIGN §13.3，~300 行）。
 
 **验收标准**：
@@ -277,19 +290,26 @@
 ---
 
 ### M14：OCI 镜像 + 轻量容器运行时（OTA 升级回滚）
-**目标**：full 模式正式达标 —— `novos-pull` + Redis/SQLite 容器服务 + OTA 演示。
+**目标**：full 模式正式达标 —— `shanshui-guanxin-pull` + Redis/SQLite 容器服务 + OTA 演示。
 
 - [ ] veth pair + bridge 虚拟网络设备 + 完整 DNAT 端口映射。
 - [ ] OCI runtime spec 兼容（config.json 解析 + seccomp/capability 应用）。
-- [ ] `novos-pull`：registry HTTPS + OCI 解析 + SHA-256 摘要校验 + 层解压。
+- [ ] `shanshui-guanxin-pull`：registry HTTPS + OCI 解析 + SHA-256 摘要校验 + 层解压。
 - [ ] **OTA 升级 + 回滚**：增量拉取变化层 + 镜像版本切换（出错切回旧层）；**内核镜像纳入 A/B 分区管理**（内核分区 A/B 标识 + 回滚，覆盖内核本身升级，DESIGN §21.9）。
 - [ ] **Redis 部署模板**：预置只读 `/etc/redis/redis.conf`（Immutable），`--maxmemory 64mb`、禁 RDB、只开 AOF——用户无法 `-c` 覆盖导致 OOM（DESIGN §21.2）。
 - [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖）。
 - [ ] 移植 **SQLite**（musl 静态，CRUD + WAL） + **Redis**（**部署模板强制**：`--maxmemory 64mb`、禁 RDB、只开 AOF）。
+- [ ] **实现 shanshui-guanxin-gateway**（`--features gateway`，Rust 静态编译，纯用户态）：
+  - [ ] **配置格式**（TOML）：监听端口、上游服务、路由规则、TLS 证书路径（示例 `/etc/shanshui-guanxin/gateway.toml`）；
+  - [ ] **HTTP/1.1 服务**（基于 M5 TCP/socket）+ **TLS（rustls）**（80/443）；
+  - [ ] **反向代理核心**：`ProxyPass` 转发到容器后端，注入 `X-Forwarded-For`，keep-alive 连接池；
+  - [ ] **WebSocket 升级**（用于 Web 管理界面的实时日志）；
+  - [ ] **系统服务集成**：`shanshui-guanxin gateway start/stop/status`，支持守护进程（fork/daemonize）；
+  - [ ] **默认配置**：监听 80/443，`/api/` 转发容器后端，静态文件服务 `/ui/`（Web 管理界面）。
 - [ ] （值得）内置 Web 管理界面 + SSH（dropbear）+ Agent 主动上联。
 
 **验收标准**：
-- `novos run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问。
+- `shanshui-guanxin run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问。
 - **OTA 演示**：更新镜像层 → 增量拉取 → 重启生效；回滚旧层可恢复。
 - **内存基线**：≤40MB（full 模式最终断言）。
 
@@ -301,7 +321,7 @@
 
 - [ ] **预构建环境**：
   - 生成 QEMU 镜像（`make qemu-image`）并上传至官方下载站点；
-  - 编写一键启动脚本 `novos-run.sh`，支持 QEMU 参数自动适配；
+  - 编写一键启动脚本 `shanshui-guanxin-run.sh`，支持 QEMU 参数自动适配；
   - 测试镜像在至少两种 QEMU 配置（`-machine pc` 和 `-machine virt`）下可启动。
 - [ ] **核心文档**：
   - 编写 `docs/quickstart.md`（5 分钟快速开始）；
@@ -309,8 +329,8 @@
   - 编写 `docs/migration-guide.md`（从 Linux 迁移避坑指南）。
 - [ ] **开发者工具链**：
   - 提供交叉编译 SDK 的 Dockerfile（`docker/Dockerfile.sdk`），包含 musl-cross、crt1 等；
-  - 提供示例应用仓库 `novos-examples`，包含 C/Rust 的 Hello World 及 `Makefile`/`build.rs`；
-  - 确保 `novos-build` 命令已集成到 `novos` CLI（或作为独立脚本），并完成 `novos-check` 集成。
+  - 提供示例应用仓库 `shanshui-guanxin-examples`，包含 C/Rust 的 Hello World 及 `Makefile`/`build.rs`；
+  - 确保 `shanshui-guanxin-build` 命令已集成到 `shanshui-guanxin` CLI（或作为独立脚本），并完成 `shanshui-guanxin-check` 集成。
 - [ ] **调试与反馈**：
   - 配置串口日志输出（默认开启，可收集）；
   - 在 GitHub 创建 Issue 模板（`.github/ISSUE_TEMPLATE/bug_report.md`），引导用户填写必要信息；
@@ -320,13 +340,71 @@
   - 建立社区更新发布流程（如每两周发布一次 `CHANGELOG.md` 更新）。
 
 **验收标准**：
-- 一位从未接触过 Novos-OS 的开发者，按照 `docs/quickstart.md` 的指引，能在 15 分钟内下载镜像并启动 shell。
-- 该开发者按照 `docs/first-container.md`，能在 5 分钟内成功运行 `novos run busybox echo hello` 并看到输出。
+- 一位从未接触过 山水观心操作系统的开发者，按照 `docs/quickstart.md` 的指引，能在 15 分钟内下载镜像并启动 shell。
+- 该开发者按照 `docs/first-container.md`，能在 5 分钟内成功运行 `shanshui-guanxin run busybox echo hello` 并看到输出。
 - 该开发者能使用 SDK 在宿主机上交叉编译示例程序，并部署到 QEMU 中运行。
 - 该开发者在遇到问题时，能通过 Issue 模板在 10 分钟内提交一份包含完整日志的报告。
 - 社区沟通渠道至少有一名核心开发者在 24 小时内响应。
 
 **内存影响**：无（均为用户态工具和文档，不计入内核预算）。
+
+---
+
+### M16：图形版 Desktop（独立产品线，`--features full,gui`）
+
+> 与 Core（M0–M15）**独立核算**：图形版内存目标 **≥128MB**（DESIGN §2.4），不适用 32MB/40MB 断言。
+> 阶段规划见 DESIGN_EXTENSION §4.1（主线四），内核侧最小显示子集见 DESIGN §13.16。
+
+#### M16-1：帧缓冲设备（`/dev/fb*`，`feature = "framebuffer"`）
+
+- [ ] 实现 **fbdev 框架**：注册帧缓冲设备，提供 `open/read/write/mmap/ioctl` 接口；
+- [ ] 支持 **FBIOGET_VSCREENINFO / FBIOPUT_VSCREENINFO**：查询/设置分辨率与色深；
+- [ ] QEMU `-vga virtio` 下初始化 **virtio-gpu**（或 bochs-display）设备；
+- [ ] 分配**线性帧缓冲内存**（DMA 区），暴露给用户态 `mmap`；
+- [ ] 命令行冒烟：`dd if=/dev/zero of=/dev/fb0 bs=1024 count=1024` 清屏；
+- [ ] `/dev/tty0` 虚拟终端（`console=tty0`），与 UART 输出并存。
+
+**验收**：QEMU 下 `/dev/fb0` mmap 写像素可见；`FBIOGET_VSCREENINFO` 返回正确分辨率。
+
+#### M16-2：DRM KMS 最小子集（`feature = "drm"`）
+
+- [ ] **drm 核心**：设备注册、`drm_open`、`drm_ioctl` 分发；
+- [ ] **KMS 接口**：`drm_mode_set_crtc`、`drm_mode_page_flip`、VBlank 中断处理；
+- [ ] virtio-gpu 3D 加速（可选，可先只做 2D scanout）；
+- [ ] 测试程序：设置分辨率、执行 page flip，观察画面无撕裂。
+
+**验收**：模式切换 + 页翻转无撕裂；VBlank 中断计数正确（DESIGN §6.2⑤ GPU trait）。
+
+#### M16-3：用户态 Wayland 合成器（轻量）
+
+- [ ] 移植或编写**简化版 Wayland 合成器**（weston 精简配置或自定义轻量实现）；
+- [ ] 实现 `wl_display` / `wl_compositor` 接口，支持创建 `wl_surface` 与 `wl_shell`；
+- [ ] 在帧缓冲上渲染**两个窗口**（终端 + 系统监视器），支持拖动与调整大小（最小化）。
+
+**验收**：两个窗口叠加渲染到帧缓冲，窗口可拖动/缩放。
+
+#### M16-4：图形库 + 系统监视器 GUI
+
+- [ ] 图形库选型：推荐 **egui 或 fltk-rs**（轻量）；
+- [ ] 实现 **shanshui-guanxin-monitor**：CPU 曲线、内存柱状图、进程列表；
+- [ ] 与 top **共享数据源**（读 `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat`），可视化实时刷新。
+
+**验收**：实时显示 CPU/内存曲线与进程列表（数据与 top 一致）。
+
+#### M16-5：桌面应用 – 文件管理器（shanshui-guanxin-fm）+ 盘符视图
+
+- [ ] **shanshui-guanxin-fm**（用户态）：
+  - 左侧固定显示 **"文档/下载/桌面"** 三个目录（用户家目录下创建）；
+  - 右侧显示当前目录文件列表（图标 + 名称 + 大小 + 修改时间）；
+  - 单击进入子目录，双击打开文件（调用默认程序）；
+  - 地址栏显示路径，支持输入路径跳转；
+- [ ] **盘符模拟（C:/ D:）**：绑定挂载 `/mnt/c` → `/C`，在文件管理器界面映射为 `C:` 标签（用户态，DESIGN §3.6）；
+- [ ] 文件**复制/移动/删除**（经系统调用）。
+
+**验收**：文件管理器浏览/复制/删除可用；盘符视图（C:/D:）与"文档/下载/桌面"快捷入口可用。
+
+**内存断言**：`--features full,gui` 构建后 `kernel_used ≤ 128MB`（DESIGN §5.3、§10.3），
+与 minimal/full 断言互不混用。
 
 ---
 
@@ -357,9 +435,10 @@
 | M5 | TCP 状态机转换；epoll 就绪 | HTTP + 100 连并发 | sk_buff 上限 |
 | M6 | pid ns 层级；cgroup 记账 | clone 隔离 + OOM kill | cgroup 对象计数 |
 | M7 | overlay lookup；copy-up 流程 | 写后下层不变 + whiteout | overlay cache |
-| M8 | 容器全流程；NAT 规则 | `novos run busybox` + 外网 | **3 容器≤32MB** |
-| M9 | 全回归 | 7 天长跑 + 1000 连接 | **≤32MB 最终** |
-| M10–M14 | 各模块单元测试 | 对应场景（ext4/docker/apt/jvm） | **≤40MB** |
+| M8 | 容器全流程；NAT 规则 | `shanshui-guanxin run busybox` + 外网 | **3 容器≤32MB** |
+| M9 | 全回归 + top 输出核对 | 7 天长跑 + 1000 连接 | **≤32MB 最终** |
+| M10–M14 | 各模块单元测试 | 对应场景（ext4/docker/apt/jvm）；shanshui-guanxin-gateway 反向代理 | **≤40MB** |
+| M16（Desktop） | GPU trait 单测 | QEMU `-vga virtio` 帧缓冲/页翻转/合成器截图断言 | **≤128MB（独立）** |
 
 ---
 
@@ -415,7 +494,7 @@ jobs:
 | 任务 | 方案 | 验收 |
 |---|---|---|
 | 容器保活策略 | OCI `restartPolicy`（`always`/`on-failure`/`unless-stopped`），掉电自启无人值守 | 掉电重启后容器自动拉起 |
-| Web 管理界面默认开启 | `novos-webui`（端口 80）：列表/启停/日志滚动/资源曲线 | 浏览器按钮化操作容器 |
+| Web 管理界面默认开启 | `shanshui-guanxin-webui`（端口 80）：列表/启停/日志滚动/资源曲线 | 浏览器按钮化操作容器 |
 
 ### 近期规划（v1.5）
 
@@ -423,8 +502,8 @@ jobs:
 |---|---|---|
 | 4G/5G 蜂窝上网 | PPP 栈 + USB 串口驱动 + wpa_supplicant 轻量移植 | 蜂窝/Wi-Fi 模块联网成功 |
 | 持久化日志 | 内核/容器日志异步写 `/var/log/journal/` + 按大小轮转 | 重启后日志可回溯 |
-| WireGuard VPN | `novos-vpn` 站点到站点 | 设备主动连云端 VPN |
-| 存储卷独占锁 | `novos run --volume-exclusive`（flock/leases） | SQLite 并发写安全 |
+| WireGuard VPN | `shanshui-guanxin-vpn` 站点到站点 | 设备主动连云端 VPN |
+| 存储卷独占锁 | `shanshui-guanxin run --volume-exclusive`（flock/leases） | SQLite 并发写安全 |
 | MicroPython | <256KB 引擎，官方镜像入仓库 | 跑通 JSON→CSV 脚本 |
 | PTP/NTP 同步 | chrony/ntpd 轻量版 + PTP 评估 | 多设备时间戳一致 |
 

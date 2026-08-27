@@ -1,9 +1,10 @@
-# Novos‑OS 设计文档
+# 山水观心操作系统设计文档
 
 - 版本：v0.1（规划稿）
 - 适用目标：x86‑64 起步（QEMU 开发便利）；**ARM64 为终局目标**（arch 层隔离从第一天做好）
 - 定位：面向内存受限设备（256MB–2GB）的**微型容器宿主** —— RTOS 的占地，Linux 的生态，Rust 的安全
-- 硬性目标：**常驻内存 ≤ 32MB** 稳定运行容器工作负载
+- 硬性目标：**常驻内存 ≤ 32MB** 稳定运行容器工作负载（标准容器宿主形态，无图形）
+- 部署形态：**山水观心 Core**（标准容器宿主，无图形，≤32MB，默认主线）与 **山水观心 Desktop**（全功能桌面版，含图形，≥128MB，feature-gated 可选编译）两种形态；本文默认描述 Core，图形版差异在各章节内联标注（详见 §2.4）
 
 > ⚠️ **勘误**：2026-08-26 深度架构评审发现 12 项未覆盖/过于乐观的工程问题（OverlayFS 写放大、Futex COW、Init 自愈、SMP 预热、零拷贝、碎片化等）。
 > **补救方案见 [DESIGN_ERRATA.md](DESIGN_ERRATA.md)**，本文档对应章节已内联关键修正。
@@ -12,7 +13,13 @@
 
 ## 1. 总览与设计哲学
 
-Novos‑OS 只解决一个问题：**用最小的内核常驻开销，稳定运行容器工作负载并充当网关。**
+山水观心操作系统只解决一个问题：**用最小的内核常驻开销，稳定运行容器工作负载并充当网关。**
+
+**两种部署形态（2026-08 定稿）**：
+- **山水观心 Core**（本文默认主线）：标准容器宿主，无图形，常驻 **≤ 32MB**，`minimal`/`full` 两种编译档；
+- **山水观心 Desktop**：在 Core 之上叠加图形/GPU/桌面应用，常驻 **≥ 128MB**，所有图形组件以
+  `cfg(feature = "gui")` **默认不编译**（详见 §2.4、§13.15、§13.16）。32MB 硬性目标仅约束 Core；
+  图形版内存单独核算，不适用 32MB 限制。
 
 **定位（2026-08 定稿）**：嵌入式容器宿主 —— 填补 FreeRTOS 与嵌入式 Linux 之间的结构性空白
 （RTOS 无 MMU/单进程够不着"多服务隔离 + 容器"；裁剪 Linux 空闲 50–80MB、256MB 设备跑不动）。
@@ -21,7 +28,7 @@ Novos‑OS 只解决一个问题：**用最小的内核常驻开销，稳定运�
 
 三条原则贯穿所有设计：
 
-1. **只保留容器基础设施的完整闭环** —— TCP/IP 完整网络栈、epoll、Namespace、Cgroup、OverlayFS 一个都不能少，其余（图形、大量驱动、兼容层）一律砍掉。
+1. **只保留容器基础设施的完整闭环** —— TCP/IP 完整网络栈、epoll、Namespace、Cgroup、OverlayFS 一个都不能少，其余（图形、大量驱动、兼容层）一律砍掉；图形组件以 feature flag 隔离，默认不编译。
 2. **内存按预算工程化** —— 每个子系统有明确的预算上限，超预算视为 bug。缓存类内存（dcache/icache/sk_buff）必须可回收、可 shrink。
 3. **性能让位于确定性** —— 在 32MB 内追求可预测的延迟和可控的抖动，而不是极限吞吐。
 
@@ -99,6 +106,10 @@ Novos‑OS 只解决一个问题：**用最小的内核常驻开销，稳定运�
 - **Phase 2 串行初始化**——子系统有严格顺序依赖（先内存管理，后能用 `Arc`/`Vec`）；
 - **Phase 3 首次进入用户态**——从此 CPU 不再直接执行内核代码，只通过 syscall/中断返回。
 
+> **图形版启动注记（`feature = "gui"`）**：Phase 2 在时钟/UART 之后增加显示设备初始化
+> （枚举 GPU → `fb_init` 建立帧缓冲映射，`feature = "drm"` 时含 KMS 模式设置），控制台输出
+> 同时保留在 UART 与 `/dev/tty0`；Phase 3 由 init 按配置启动 Wayland 合成器。默认编译不含此步骤。
+
 ### 1.4 中断与异常处理
 
 #### IDT 结构
@@ -157,7 +168,7 @@ exception_handler(vec, frame):
 
 ## 2. 内存目标规划
 
-### 2.1 第一版（无桌面、命令行、具备容器能力）：常驻 ≤ 32MB
+### 2.1 标准版（无图形，命令行 + 容器能力，山水观心 Core）：常驻 ≤ 32MB
 
 ```
 ┌─────────────────────────── 32 MB ───────────────────────────┐
@@ -231,6 +242,29 @@ exception_handler(vec, frame):
 - dcache/icache 最低命中缓存。
 
 过度精简 → 性能断崖、抖动失控，对“网关 + 容器”场景是负优化。
+
+### 2.4 图形扩展版（山水观心 Desktop）：常驻 ≥ 128MB
+
+> 图形版内存**独立核算，不适用 32MB 限制**；叠加在标准版之上，仍低于主流桌面 Linux（空闲 400–800MB）。
+> 所有图形组件由 `cfg(feature = "gui")` 条件编译控制，**默认不编译**（§13.15 / §13.16）。
+
+在标准版（≤32MB）基础上，图形版叠加以下额外开销：
+
+| 组件 | 预算 | 说明 |
+|---|---|---|
+| GPU 驱动（DRM/KMS 最小子集） | 4–8 MB | `.text` + 帧缓冲内存（内核态） |
+| 显示服务器（Wayland 合成器） | 2–5 MB | 用户态，weston 或自定义轻量合成器 |
+| 图形库 / 工具箱 | 10–20 MB | minifb / egui / fltk 之一 |
+| 桌面应用（文件管理器/终端/设置） | 5–10 MB | 含图形版系统监视器（GUI 版 top） |
+| 图形帧缓冲（分辨率相关） | 8–64 MB | 取决于分辨率/位深，可换页回收 |
+
+**核算示例**：内核增量（GPU 驱动 + fb）8–16MB + 用户态图形栈 20–40MB + 帧缓冲 8–32MB
+≈ **40–80MB 图形增量**；叠加标准版 32MB 基线，目标 **128MB 起步（256MB 宽松）**。
+
+**与标准版的关系**：
+- Core 与 Desktop 共用同一份内核代码与用户态基础组件，差异仅在编译期 feature；
+- `minimal`/`full` 编译档**均不包含**图形组件；Desktop 版独立发布，内存按本小节核算；
+- 图形版启动流程在 Phase 2/3 增加显示设备初始化（`fb_init`，与 UART 输出共存），见 §1.3 注记。
 
 ---
 
@@ -525,6 +559,13 @@ pub struct DCache {
   `entries > shrink_watermark` 时强制立即回收（`shrink_batch` 一批）。
 - 挂载通过 `Dentry.mount` 跳转：路径解析到挂载点时换 `SuperBlock`。
 - `Arc<Inode>` + `Weak<Dentry>` 关系，防止 inode 因 dentry 环泄漏。
+
+**挂载点与"盘符"视图（2026-08 定稿）**：
+- 挂载点可以是**任意目录路径**（`/mnt/c`、`/data`、`/var` 等），内核只维护统一的挂载树；
+- 模拟 Windows 盘符（C: D:）是**纯用户态**行为：用户态服务用 **符号链接** 或 **绑定挂载**
+  （`Mount.flags` 支持 bind）把 `/mnt/c`、`/mnt/d` 等显式目录链接到 `/` 下，并负责管理这些链接；
+- 文件管理器左侧固定的"文档/下载/桌面"目录同为**用户态配置**，内核无需感知——图形版桌面
+  由此获得类 Windows 目录视图，且不污染内核 VFS（见 §19.3、§20.1）。
 
 **哈希函数决策（2026-08 评审定案）**：
 - **热路径哈希表（dcache、epoll items、conntrack、ARP 等）禁用 Rust 默认 SipHash**——
@@ -878,6 +919,8 @@ run_container(image, spec):
 - 每个子系统暴露 `used/limit` 计数（`/proc` 只读视图）；
 - CI 里加**内存回归测试**：启动 N 个容器后断言内核常驻 ≤ 32MB；
 - 超预算 = bug，进 issue 必修，不允许靠"再优化编译选项"糊弄。
+- **按编译档分档断言**：`minimal`/`full` 断言 `kernel_used ≤ 32MB / ≤ 40MB`；
+  图形版（`--features full,gui`）单独断言 `kernel_used ≤ 128MB`（§2.4），三种配置互不混用。
 
 #### Page Cache 预算（2026-08 评审补充）
 
@@ -894,7 +937,7 @@ run_container(image, spec):
 
 ### 6.1 总体对比
 
-| 维度 | 裁剪后主线 Linux（参考） | Novos‑OS |
+| 维度 | 裁剪后主线 Linux（参考） | 山水观心操作系统 |
 |---|---|---|
 | 空闲常驻 | 50–80 MB | **≤ 32 MB** |
 | 兼容层 | 数十年 ABI/驱动包袱 | 无，只保留所需子集 |
@@ -904,13 +947,13 @@ run_container(image, spec):
 | 开发语言 | C + 汇编 | **Rust（内存安全）** |
 | 可审计性 | 极难 | 预算明确、可测可回归 |
 
-### 6.2 子系统级简化（Linux 复杂 → Novos‑OS 简化）
+### 6.2 子系统级简化（Linux 复杂 → 山水观心操作系统简化）
 
-以下逐子系统分析 Linux 的设计复杂度来源，以及 Novos‑OS 在保持容器宿主功能完整的前提下可以砍掉什么。
+以下逐子系统分析 Linux 的设计复杂度来源，以及 山水观心操作系统在保持容器宿主功能完整的前提下可以砍掉什么。
 
 #### ① VFS 层
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | `file_operations` ~30 个回调 | 兼容数十种文件系统 | 精简到 ~10 个（read/write/lookup/create/unlink/readdir/stat/mmap） | 只支持 ramfs/tmpfs/overlayfs 三种 fs |
 | `inode_operations` ~15 个回调 | 包含 ACL/xattr/fiemap/... | 去掉 ACL、xattr（第一版）、fiemap | 容器场景不依赖 ACL/xattr |
@@ -920,11 +963,11 @@ run_container(image, spec):
 | 挂载传播（mount propagation） | 4 种传播类型 | 仅支持 private + bind | 容器 pivot_root 不需要共享传播 |
 | VFS dentry 操作 20+ 个 | `d_delete/d_dentry/d_iput/d_compare/...` | 去掉 `d_compare`（统一 strcmp）、`d_dentry`、`d_iput` 等 | 只有 3 种 fs，不需要多态 |
 
-> **收益估算**：VFS 层逻辑代码从 Linux 的 ~1.5 万行 → Novos‑OS 目标 ~2300 行（含最小记录锁 ~300 行），节省约 1–1.5MB .text。
+> **收益估算**：VFS 层逻辑代码从 Linux 的 ~1.5 万行 → 山水观心操作系统目标 ~2300 行（含最小记录锁 ~300 行），节省约 1–1.5MB .text。
 
 #### ② 内存管理
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | Per-CPU 页分配器（pageset） | 多核减少锁竞争 | **去掉**，单 buddy + 自旋锁 | 单核无竞争 |
 | LRU 多链表（active/inactive/unevictable） | 精细化回收 | 单一 LRU + shrink_target | 缓存总量小，不需要精细分级 |
@@ -936,11 +979,11 @@ run_container(image, spec):
 | 多种 GFP 标志（GFP_KERNEL/GFP_HIGHUSER/...） | 区分分配上下文 | 精简到 2 种：KERNEL（不可失败）、USER（可失败→OOM） | 上下文简单 |
 | memcg 多层嵌套统计 | v1→v2 兼容 | v2 单一层级，只统计 anon/file/kernel | 无 v1 包袱 |
 
-> **收益估算**：mm 层逻辑从 Linux ~2.5 万行 → Novos‑OS 目标 ~3000 行，节省约 1.5–2MB .text。
+> **收益估算**：mm 层逻辑从 Linux ~2.5 万行 → 山水观心操作系统目标 ~3000 行，节省约 1.5–2MB .text。
 
 #### ③ 网络栈
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | Netfilter 框架（5 个 hook 点 × N 个 table） | iptables/nftables 通用包过滤 | 内联防火墙规则（线性表，`{dev,src,dst,sport,dport,action}`） | 容器网关规则少，不需要通用 hook |
 | sk_buff 复杂指针运算（`skb->data/skb->head/skb->tail`） | 支持多种协议层 push/pull | 简化 Skb：`data: Vec<u8>` + 协议头偏移索引 | 容器场景协议种类少（IP/TCP/UDP/ARP） |
@@ -951,11 +994,11 @@ run_container(image, spec):
 | 网络设备框架（net_device + NAPI + GRO/GSO） | 高吞吐优化 | 简化 NetDevice：rx_queue/tx_queue + 轮询中断 | 单核 + 32MB，不需要 NAPI 复杂度 |
 | socket 层多地址族 | AF_INET/AF_INET6/AF_UNIX/AF_NETLINK/... | AF_INET + AF_UNIX + AF_INET6（后续） | 容器只需这三族 |
 
-> **收益估算**：网络栈从 Linux ~10 万行 → Novos‑OS 目标 ~8000 行，节省约 1.5–2.5MB .text（但 TCP 状态机本身不可省，这是代码量最大的子系统）。
+> **收益估算**：网络栈从 Linux ~10 万行 → 山水观心操作系统目标 ~8000 行，节省约 1.5–2.5MB .text（但 TCP 状态机本身不可省，这是代码量最大的子系统）。
 
 #### ④ 调度器
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | 多调度类（Stop/DL/RT/Fair/Idle） | 实时 + 公平 + 空闲 | 单一调度类（CFS 简化），无 RT/DL | 容器场景不需要内核级实时调度 |
 | nice 级别（-20~+19，40 级） | 细粒度优先级 | 去掉 nice，仅用 cgroup `cpu.weight` | 容器用 cgroup 隔离 CPU 足够 |
@@ -965,13 +1008,13 @@ run_container(image, spec):
 | RT 调度器（FIFO/RR） | 实时进程 | **不实现**（第一版） | 容器无实时需求 |
 | DL 调度器（EDF） | 截止时间调度 | **不实现** | 同上 |
 
-> **收益估算**：调度器从 Linux ~1 万行 → Novos‑OS 目标 ~800 行，节省约 0.5–1MB .text。
+> **收益估算**：调度器从 Linux ~1 万行 → 山水观心操作系统目标 ~800 行，节省约 0.5–1MB .text。
 
 #### ⑤ 设备模型 / 驱动框架
 
 > **架构骨架（§19.1）**：第一版就定型 **bus→device→driver 统一框架 + BSP（板级包）+ 中断分发**；真实设备外设（GPIO/I2C/SPI/CAN/多路 UART/PWM/ADC）五花八门，驱动模型不在第一版定型，每加一个外设推一次架构。
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | kobject + kset + sysfs | 设备层次化 + 用户态可见 | **不实现** sysfs | 容器管理靠 /proc 只读视图 |
 | udev / devtmpfs | 动态设备节点 | 静态设备文件 + 驱动注册表 | 设备固定（virtio/uart/timer），新增走 bus→device→driver |
@@ -979,35 +1022,57 @@ run_container(image, spec):
 | 通用 DMA 框架 | 各种总线/设备差异 | 仅 virtio DMA（直接 MMIO）；DMA 抽象留接口（§13.3 Hal trait） | 只支持 virtio |
 | 通用中断框架（irq_desc/chip/domain） | 中断控制器虚拟化 | 固定中断向量表 + **中断分发抽象**（外设 IRQ → 驱动回调） | IRQ 来源固定（timer/uart/virtio），分发框架留扩展 |
 
-> **收益估算**：设备框架从 Linux ~3 万行 → Novos‑OS 目标 ~1500 行（含 bus→device→driver 框架），节省约 1–1.5MB .text。
+> **收益估算**：设备框架从 Linux ~3 万行 → 山水观心操作系统目标 ~1500 行（含 bus→device→driver 框架），节省约 1–1.5MB .text。
+
+**GPU 设备类型（`feature = "gpu"`，图形版专用）**：
+
+标准版驱动集（virtio/uart/timer）不含 GPU；图形版在 bus→device→driver 框架下新增 GPU 设备类型：
+
+```rust
+/// GPU 设备驱动接口（最小显示子集，feature = "gpu"）
+pub trait GpuDevice: Sync + Send {
+    /// 设置显示模式（分辨率 / 位深）
+    fn mode_set(&self, width: u32, height: u32, bpp: u8);
+    /// 当前帧缓冲的物理地址（供扫描输出 / 用户态 mmap）
+    fn framebuffer(&self) -> PhysAddr;
+    /// 页翻转（double/triple buffer 切换，避免撕裂）
+    fn page_flip(&self, fb: PhysAddr);
+    /// 垂直同步（VBlank）中断回调注册（图形合成时序用）
+    fn register_vblank(&self, cb: VBlankCallback) -> Result<(), GpuError>;
+}
+```
+
+- 驱动模型从 `bus→device→driver` 扩展：GPU 可挂在 **PCIe**（virtio-gpu）或 **MMIO**（内置显示控制器）总线上；
+- 内核只提供**最小 DRM/KMS 接口 + `/dev/fb*` 帧缓冲设备**，渲染与合成全部放用户态（§13.16）；
+- GPU 驱动的 `.text` 预算 4–8MB，计入图形版内存口径（§2.4），**不进入 32MB 基线**。
 
 #### ⑥ 时间与定时器
 
 > **架构骨架（§19.1）**：第一版就定型 **通用时钟源抽象**（不同硬件 timer/RTC 差异屏蔽）+ **RTC（硬件实时时钟）** + **monotonic 时钟**；很多用户态程序依赖 monotonic 语义。
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | hrtimer 框架 + 红黑树 + 高精度 | 多种时钟分辨率 | 单一定时器堆（最小堆，tick 分辨率）+ 时钟源 trait | 32MB 预算内够用 |
 | 多时钟类型（REALTIME/MONOTONIC/BOOTTIME/TAI/...） | POSIX 时钟全集 | 仅 MONOTONIC + REALTIME + RTC | 容器不需要 TAI/BOOTTIME |
 | timer wheel（低精度）+ hrtimer（高精度）双框架 | 兼容旧 API + 新 API | 单一定时器堆 | 无旧 API 包袱 |
 | tickless / NOHZ | 省电 | **不实现**（第一版） | 服务器场景不需要省电（嵌入式省电 = idle 指令级，见 §19.2 电源管理） |
 
-> **收益估算**：时间子系统从 Linux ~5000 行 → Novos‑OS 目标 ~800 行（含时钟源抽象 + RTC），节省约 0.3–0.5MB .text。
+> **收益估算**：时间子系统从 Linux ~5000 行 → 山水观心操作系统目标 ~800 行（含时钟源抽象 + RTC），节省约 0.3–0.5MB .text。
 
 #### ⑦ 进程创建（clone/fork）
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | `copy_process` ~20 个子步骤（copy_files/copy_fs/copy_mm/copy_sighand/copy_signal/copy_namespaces/copy_creds/...） | 每个子系统有独立 clone 回调 | Task 字段用 `Arc` 共享 → clone = `Arc::clone` + 按需 COW | Rust 所有权天然处理共享/独占语义 |
 | `clone` flags 数十个 | 细粒度控制 | 精简到 5 种（NEWPID/NEWNET/NEWNS/NEWUTS/NEWUSER） | 容器只需这几种 |
 | COW 页表标记流程 | 手动 `page->refcount` 管理 | `Arc<PageFrame>` 引用计数自动管理 | Rust 保证无泄漏/无 double-free |
 | `do_fork → copy_process → wake_up_new_task` 链 | 分层复杂 | 单一 `fork()` 函数 | 无历史中间层 |
 
-> **收益估算**：进程管理从 Linux ~1.5 万行 → Novos‑OS 目标 ~1500 行，节省约 0.8–1.2MB .text。
+> **收益估算**：进程管理从 Linux ~1.5 万行 → 山水观心操作系统目标 ~1500 行，节省约 0.8–1.2MB .text。
 
 #### ⑧ 锁与并发
 
-| Linux 设计 | 复杂度来源 | Novos‑OS 简化 | 安全性论证 |
+| Linux 设计 | 复杂度来源 | 山水观心操作系统简化 | 安全性论证 |
 |---|---|---|---|
 | RCU（Read-Copy-Update） | 多核无锁读路径 | **不实现**（第一版用 defer 队列替代） | 单核无 RCU 需求 |
 | seqlock | 读多写少无锁 | **不实现** | 单核 RwLock 足够 |
@@ -1016,7 +1081,7 @@ run_container(image, spec):
 | 多种锁变体（spinlock/rwlock/rwsem/percpu_rwsem/...） | 场景优化 | 精简到 3 种（Spinlock/Mutex/RwLock） | 3 种覆盖所有场景 |
 | lock_ordering 靠人记 | 无编译期保证 | 可用 Rust 幻影类型（PhantomData）编码锁层级 | 从"靠人记"到"编译器检查" |
 
-> **收益估算**：锁框架从 Linux ~8000 行 → Novos‑OS 目标 ~600 行，节省约 0.3–0.5MB .text。
+> **收益估算**：锁框架从 Linux ~8000 行 → 山水观心操作系统目标 ~600 行，节省约 0.3–0.5MB .text。
 
 ### 6.3 设计提升（不仅简化，而是从根本上更好）
 
@@ -1030,7 +1095,7 @@ struct kref ref;
 kref_get(&ref);   // 忘记 → use-after-free
 kref_put(&ref, cleanup);  // 多调 → double-free
 
-// Novos‑OS：编译器保证
+// 山水观心操作系统：编译器保证
 let task: Arc<Task> = Arc::new(...);
 let weak = Arc::downgrade(&task);  // 破环
 // Arc::clone → 引用计数 +1（编译器保证配对）
@@ -1048,7 +1113,7 @@ int ret = do_something();
 if (ret < 0) goto out;  // 忘记 goto → 资源泄漏
 // 指针错误：IS_ERR(ptr) + PTR_ERR(ptr)，混合两种错误表示
 
-// Novos‑OS：? 强制处理
+// 山水观心操作系统：? 强制处理
 fn do_something() -> Result<(), KernelError> { ... }
 
 fn caller() -> Result<(), KernelError> {
@@ -1081,7 +1146,7 @@ fn example(mm: &Lock<1>, fs: &Lock<2>) {
 struct task_struct *task = find_task_by_pid(pid);
 put_task_struct(task);  // 忘记 → 泄漏
 
-// Novos‑OS：Arc<Task> 自动管理
+// 山水观心操作系统：Arc<Task> 自动管理
 let task: Arc<Task> = find_task_by_pid(pid)?;
 // 自动 drop，无泄漏风险
 
@@ -1098,7 +1163,7 @@ struct Dentry {
 
 ```yaml
 # Linux：没有"子系统内存预算"概念，内核常驻靠运行时 slubtop 估算
-# Novos‑OS：每个子系统 used/limit 是一等公民，CI 强制断言
+# 山水观心操作系统：每个子系统 used/limit 是一等公民，CI 强制断言
 - name: memory regression
   run: |
     # 断言内核常驻 ≤ 32MB
@@ -1106,13 +1171,13 @@ struct Dentry {
     test $USED -le 33554432  # 32MB = 33554432 bytes
 ```
 
-> Linux 的内存问题往往是"不知道哪个子系统在涨"。Novos‑OS 的预算模型让每个子系统的内存占用**可测、可断言、可回归**。
+> Linux 的内存问题往往是"不知道哪个子系统在涨"。山水观心操作系统的预算模型让每个子系统的内存占用**可测、可断言、可回归**。
 
 #### 提升⑥：unsafe 代码审查边界
 
 ```rust
 // Linux：全部 C 代码都是"unsafe"，无法区分安全边界
-// Novos‑OS：unsafe 块显式标注，可审查范围极小
+// 山水观心操作系统：unsafe 块显式标注，可审查范围极小
 pub fn buddy_alloc(order: u8) -> Result<PhysFrame, KernelError> {
     // 安全代码：逻辑正确性由 Rust 保证
     let area = find_free_area(order)?;
@@ -1129,11 +1194,11 @@ pub fn buddy_alloc(order: u8) -> Result<PhysFrame, KernelError> {
 }
 ```
 
-> Novos‑OS 中 `unsafe` 占比目标 <5%，审查者只需集中看 `unsafe` 块。Linux 等于审查 100% 代码。
+> 山水观心操作系统中 `unsafe` 占比目标 <5%，审查者只需集中看 `unsafe` 块。Linux 等于审查 100% 代码。
 
 ### 6.4 简化汇总与内存收益
 
-| 子系统 | Linux 代码行（估） | Novos‑OS 目标（估） | .text 节省 |
+| 子系统 | Linux 代码行（估） | 山水观心操作系统目标（估） | .text 节省 |
 |---|---|---|---|
 | VFS + 文件系统 | ~15,000 | ~2,000 | 1–1.5 MB |
 | 内存管理 | ~25,000 | ~3,000 | 1.5–2 MB |
@@ -1145,7 +1210,7 @@ pub fn buddy_alloc(order: u8) -> Result<PhysFrame, KernelError> {
 | 锁/并发 | ~8,000 | ~600 | 0.3–0.5 MB |
 | **合计** | **~208,000** | **~17,400** | **~7–10 MB** |
 
-> 这 7–10MB 的 .text 节省，是 Novos‑OS 能把内核常驻压到 32MB 的核心来源——不靠编译选项，靠**设计上就不需要那些代码**。
+> 这 7–10MB 的 .text 节省，是 山水观心操作系统能把内核常驻压到 32MB 的核心来源——不靠编译选项，靠**设计上就不需要那些代码**。
 
 ---
 
@@ -1275,7 +1340,7 @@ impl KernelError {
 
 ### 9.1 权限模型
 
-Novos‑OS 采用简化的 Unix 权限模型：
+山水观心操作系统采用简化的 Unix 权限模型：
 
 | 概念 | 实现 |
 |---|---|
@@ -1350,8 +1415,11 @@ pub static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
 ```
 /proc/
-├── meminfo          # 内核内存使用（buddy/slab/各缓存 used/limit）
+├── meminfo          # 内核内存使用（buddy/slab/各缓存 used/limit）；启用 swap 时含 Swap 字段
+├── stat             # CPU 时间、中断计数、上下文切换次数（top 数据源）
+├── loadavg          # 负载平均值（1/5/15 分钟，top 数据源）
 ├── schedstat        # 调度统计（上下文切换次数、各 task vruntime）
+├── <pid>/stat       # 进程状态、内存、CPU 时间（top 数据源）
 ├── net/             # 网络统计（设备流量/conntrack 条目/TCP 状态分布）
 │   ├── dev          # 网络设备收发统计
 │   ├── conntrack    # 连接跟踪表摘要
@@ -1361,6 +1429,10 @@ pub static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 ├── containers/      # 活跃容器列表 + 资源占用
 └── uptime           # 内核运行时间
 ```
+
+> **top 数据源**：用户态 `top` 工具（Rust 静态编译，<100KB，§18.3）直接读取
+> `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat` 与 `/proc/meminfo`，内核只需提供
+> 这些只读视图，无需额外监控接口。
 
 - `/proc` 完全只读（减少攻击面），不支持 `echo > /proc/...`；
 - 预算监控数据从内核原子计数器直接读取，无额外内存开销。
@@ -1395,7 +1467,9 @@ pub struct MemStat {
 
 - `kernel_used` = `slab_used` + `dcache_bytes` + `sk_buff_bytes` + `page_table_bytes` + `.bss/.data` 静态大小；
 - CI 内存断言直接读取此值与 32MB 比较；
-- 每个 shrink 路径完成后更新对应计数器。
+- 每个 shrink 路径完成后更新对应计数器；
+- **图形版口径（`feature = "gui"`）**：`kernel_used` 追加 GPU 驱动 `.text` 与帧缓冲映射
+  （framebuffer mmap 按页记账、可回收），断言阈值切换到 128MB（§2.4、§5.3）。
 
 ---
 
@@ -1500,7 +1574,7 @@ UP 稳定 (M9)
 
 ```
 qemu-system-x86_64 \
-  -kernel build/novos.bin \
+  -kernel build/shanshui-guanxin.bin \
   -m 64M                    # 仅给 64MB 物理内存，逼出小内核
   -serial stdio \
   -nographic \
@@ -2180,7 +2254,7 @@ pub struct Bridge {
 
 ### 13.15 Feature Flag 策略
 
-用 Cargo feature 控制扩展编译，满足两种部署场景：
+用 Cargo feature 控制扩展编译，满足多种部署场景：
 
 ```toml
 # Cargo.toml
@@ -2201,6 +2275,16 @@ full = [                         # 40MB：Linux 兼容容器宿主
     "timerfd",
     "cni-net",
 ]
+# —— 以下为图形版（山水观心 Desktop）专用，默认不编译 ——
+gpu = ["drm", "framebuffer"]      # GPU 驱动 + DRM/KMS 最小子集 + /dev/fb*
+gui = ["gpu", "wayland", "desktop-apps"]  # 图形栈（合成器 + 图形库 + 桌面应用）
+drm = []                          # 仅内核 DRM/KMS 最小接口
+framebuffer = []                  # /dev/fb* 帧缓冲设备 + /dev/tty0 虚拟终端
+wayland = []                      # 用户态 Wayland 合成器（随 rootfs 打包）
+desktop-apps = []                 # 文件管理器/终端/设置/系统监视器等
+# —— 以下为用户态工具/服务（不影响内核编译） ——
+top = []                          # top 系统监控工具（Rust 静态编译，<100KB）
+gateway = []                      # shanshui-guanxin-gateway：HTTP/反向代理（纯用户态，仅用 TCP + rustls）
 ```
 
 ```rust
@@ -2210,11 +2294,46 @@ fn load_dynamic_elf(...) { ... }
 
 #[cfg(not(feature = "dynamic-link"))]
 fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
+
+#[cfg(feature = "drm")]
+fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 注记）
 ```
 
 - `--no-default-features --features minimal` → 32MB 最小版；
 - `--features full` → ~40MB Linux 兼容版；
-- 同一份代码，两种部署形态。
+- `--features full,gui` → 山水观心 Desktop（含 GPU/图形/桌面应用，内存按 §2.4 核算）；
+- `top`/`gateway` 为**用户态**组件，不改变内核 `.text`；`gateway` 仅依赖现有 TCP 栈与 rustls，
+  不要求内核新功能；
+- 同一份代码，多条产品线（Core minimal / Core full / Desktop）。
+
+### 13.16 图形子系统（山水观心 Desktop，`feature = "gui"`）
+
+> 定位：**内核只做"最小显示输出"**——帧缓冲 + DRM KMS 最小子集；渲染、合成、窗口管理、
+> 桌面应用全部在用户态。图形版内存按 §2.4 独立核算，不适用 32MB 限制。
+
+**内核侧（feature = "gpu"/"framebuffer"）**：
+
+| 组件 | 说明 |
+|---|---|
+| `/dev/fb*` 帧缓冲设备 | 显示内存的 mmap 视图（`/dev/fb0`），用户态直接读写像素 |
+| `/dev/tty0` 虚拟终端 | 控制台输出（`console=tty0`），与 UART 并存 |
+| DRM 最小子集（仅 KMS） | `mode_set` / `page_flip` / VBlank 中断（§6.2 GPU trait），无完整 DRM render 节点 |
+| 参考驱动 | virtio-gpu / bochs-drm（QEMU 开发与验证） |
+
+**用户态图形栈（可选组件，随 rootfs 打包）**：
+
+| 组件 | 选型方向 |
+|---|---|
+| Wayland 合成器 | weston 精简版或自定义轻量合成器（桌面版必需） |
+| 图形库 / 工具箱 | minifb / egui / fltk 之一（按开发速度与体积权衡） |
+| 文件管理器 | pcmanfm 或自定义（左侧固定"文档/下载/桌面"，用户态配置，§3.6） |
+| 系统监视器 | top 的 GUI 版（复用 top 的数据源，§10.2 / §18.3） |
+
+**内存口径**：内核增量（GPU 驱动 + fb）4–8MB `.text` + 帧缓冲内存；用户态图形栈 20–40MB；
+总目标 ≥128MB（§2.4）。
+
+**测试策略**：QEMU 集成测试带 `-vga virtio`（virtio-gpu）验证 `fb_init` 后帧缓冲内容
+（如打印测试图案到 `/dev/fb0` 后截图断言），与无图形版的 `make test-integration` 并存。
 
 ---
 
@@ -2293,17 +2412,17 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 #### ⑦ 容器 / cgroup / OCI（§3.5、§4.6）→ youki、oci-spec-rs
 
 - **采纳**：libcontainer 的生命周期状态机与 builder 模式（spec → 容器状态）；libcgroups v2 的 memory/pids/cpu 语义（内核侧 reimplement，行为对齐）；oci-spec-rs 的 `config.json` 字段模型作为 OCI 解析清单（TASKS M14-04）。
-- **避坑**：youki 是用户态运行时，依赖 syscall；Novos 是内核实现 —— 只借语义与状态机。
+- **避坑**：youki 是用户态运行时，依赖 syscall；山水观心操作系统是内核实现 —— 只借语义与状态机。
 
 #### ⑧ 安全（§13.5）→ seccompiler
 
-- **采纳**：seccomp 的 `filter_action/default_action` 分离 + 参数级匹配语义；按线程/进程类别分别加载 filter 的思路（Novos 按容器粒度）。
-- **避坑**：seccompiler 是 BPF 编译器，Novos 需要的是解释器（<500 行），读其指令生成逻辑理解语义即可。
+- **采纳**：seccomp 的 `filter_action/default_action` 分离 + 参数级匹配语义；按线程/进程类别分别加载 filter 的思路（山水观心操作系统按容器粒度）。
+- **避坑**：seccompiler 是 BPF 编译器，山水观心操作系统需要的是解释器（<500 行），读其指令生成逻辑理解语义即可。
 
 #### ⑨ 驱动 / 设备（§13.3、§13.4）→ virtio-drivers、Tock
 
 - **采纳**：virtio `Hal` trait（DMA 分配/虚实转换）解耦驱动与页分配器；split VirtQueue 三环（desc/avail/used + free_head）；Tock 的 DMA 缓冲静态化原则 + `set_client` 破环模式。
-- **避坑**：需把 DMA 层接到 Novos 页分配器 + cgroup `charge/uncharge`，直接移植会绕过记账。
+- **避坑**：需把 DMA 层接到 山水观心操作系统页分配器 + cgroup `charge/uncharge`，直接移植会绕过记账。
 
 #### ⑩ ext4（§13.3）→ ext4-view-rs、am-fs-ext4、mkext4
 
@@ -2324,7 +2443,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 ## 15. 工具链支持与 ABI 兼容面（宿主机交叉编译 Go / Rust / C++）
 
 > 核心决策（对应"轻量容器宿主"路线）：**兼容面 = musl 的 syscall 足迹**，而不是"实现全部 Linux syscall"。
-> 因为 Novos 对齐 Linux syscall ABI（§1.2），现成工具链 target 直接复用，**无需自定义语言 target**。
+> 因为 山水观心操作系统对齐 Linux syscall ABI（§1.2），现成工具链 target 直接复用，**无需自定义语言 target**。
 
 ### 15.1 三语言的接入方式（零语言后端成本）
 
@@ -2334,8 +2453,8 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | **Rust** | `x86_64-unknown-linux-musl` target（rustup 现成） | 宿主机交叉编译；设备端只运行产物 |
 | **C++** | musl-cross（musl.cc 预编译或 musl-cross-make）+ `-static -static-libstdc++ -static-libgcc` | 宿主机交叉编译 |
 
-> 三者本就为 Linux ABI 生成代码，Novos 兼容的就是这个 ABI —— 语言层零改造。
-> **硬性约束**：Novos **不在设备上编译任何语言**（交叉编译只发生在宿主机/云端，见 §15.2 云构建服务）。TinyGo/gccgo 轻量子集仅当"设备端必须编译"的场景再评估，默认不做。
+> 三者本就为 Linux ABI 生成代码，山水观心操作系统兼容的就是这个 ABI —— 语言层零改造。
+> **硬性约束**：山水观心操作系统 **不在设备上编译任何语言**（交叉编译只发生在宿主机/云端，见 §15.2 云构建服务）。TinyGo/gccgo 轻量子集仅当"设备端必须编译"的场景再评估，默认不做。
 
 ### 15.2 新增工作量（约 2–3 人月，单人）
 
@@ -2343,8 +2462,8 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 |---|---|---|
 | 交叉工具链搭建 | musl-cross + crt1/crti/crtn + linker script + 版本锁定（宿主机侧） | M11 |
 | musl 适配 | 跑通 musl；把"musl 需要的 syscall"定成兼容面清单 | M11 |
-| **Novos-SDK 基础镜像** | 预置 ld-musl + 头文件 + linker script；所有第三方应用强制 `--dynamic-linker=/novos/ld-musl...` 指向 Novos 专用路径，避免动态链接到宿主未实现的 syscall | M11 |
-| **novos-check 工具** | 扫描 ELF 的 syscall 依赖 + 内存足迹预估（RSS+虚拟内存），不通过禁止合入 | M11 |
+| **山水观心 SDK 基础镜像** | 预置 ld-musl + 头文件 + linker script；所有第三方应用强制 `--dynamic-linker=/shanshui-guanxin/ld-musl...` 指向 `/shanshui-guanxin/` 专用路径，避免动态链接到宿主未实现的 syscall | M11 |
+| **shanshui-guanxin-check 工具** | 扫描 ELF 的 syscall 依赖 + 内存足迹预估（RSS+虚拟内存），不通过禁止合入 | M11 |
 | ABI 契约文档化 | syscall 清单、结构体布局、errno、调用约定 → SDK 文档（黑白名单） | M11（持续维护） |
 | 测试框架 + CI | 编译 → 打包 → QEMU 真跑 + 断言 + 示例程序 | M11/M14 |
 | 语言各自增量 | Go 1–2 周、Rust 1–3 周、C++ 2–4 周（各自怪癖） | M14 |
@@ -2356,15 +2475,15 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 - **可测试、可回归**：每个新增 syscall 有对应 host 测试 + QEMU 集成断言；
 - **与 §13.6 动态链接的关系**：容器服务默认静态编译（Go/Rust/C++）；musl 动态链接（ld-musl）为 musl 生态二进制服务，两者并存；
 - **SDK 文档为交付物**：`docs/abi.md` 维护 syscall 清单/结构体/errno/调用约定，作为工具链适配的契约；
-- **红线（M14 应用合入门槛）**：任何外部应用的移植，**必须先通过 `novos-check`** 扫描其 ELF 的 syscall 依赖并给出内存足迹预估（RSS+虚拟内存），否则禁止合入 M14 应用列表；
-- **（可选）Novos 官方云构建服务**：用户上传源码 → 云端交叉编译出 musl 静态二进制 → OTA 下发；既省设备内存，又避免在设备上暴露编译器。
+- **红线（M14 应用合入门槛）**：任何外部应用的移植，**必须先通过 `shanshui-guanxin-check`** 扫描其 ELF 的 syscall 依赖并给出内存足迹预估（RSS+虚拟内存），否则禁止合入 M14 应用列表；
+- **（可选）山水观心操作系统官方云构建服务**：用户上传源码 → 云端交叉编译出 musl 静态二进制 → OTA 下发；既省设备内存，又避免在设备上暴露编译器。
 
 ---
 
 ## 16. 容器形态：OCI 镜像 + 轻量运行时 + OTA（"Docker" 重述）
 
 > 定位收敛后，"支持 Docker" **重述为**：**支持 OCI 镜像格式（pull/解压/摘要校验）+ 轻量容器运行时（namespace/cgroup/overlayfs 之上）+ 镜像分发（OTA 升级回滚）**——**不做 docker daemon / CLI 兼容**。
-> 理由：Novos 只跑"为 Novos 编译"的 musl 静态子集镜像，"任意镜像 pull 下来就能跑" 的 Docker 核心卖点不成立；完整 dockerd/containerd 是负担不是价值。
+> 理由：山水观心操作系统只跑"为 山水观心操作系统编译"的 musl 静态子集镜像，"任意镜像 pull 下来就能跑" 的 Docker 核心卖点不成立；完整 dockerd/containerd 是负担不是价值。
 
 ### 16.1 价值排序（嵌入式核心需求）
 
@@ -2372,7 +2491,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 |---|---|---|
 | **OTA 升级 + 回滚（最大价值）** | OCI 镜像分层 + SHA-256 摘要 + 不可变 → 设备只增量拉取变化的层，出问题切回旧层 | 嵌入式设备第一需求，镜像格式 = 现成 OTA 载体 |
 | **多服务隔离 + 资源限额** | namespace/cgroup：网关、Redis、业务逻辑互相隔离，内存/CPU 可限额 | 多服务网关基础 |
-| **标准部署包** | "为 Novos 编译的程序 + 依赖 + 配置" 打包成镜像 = 统一交付物 | 替代手工拷二进制 |
+| **标准部署包** | "为 山水观心操作系统编译的程序 + 依赖 + 配置" 打包成镜像 = 统一交付物 | 替代手工拷二进制 |
 | **快速恢复** | 容器无状态可重建：坏了删掉重拉 | 设备远程维护关键 |
 | **安全隔离** | 管理面/数据面分离、服务间攻击面隔离 | 安全卖点支撑 |
 | **开发/生产一致性** | 开发环境跑同一份镜像 = 目标设备环境 | 降低开发成本 |
@@ -2384,7 +2503,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ### 16.3 工程含义（工作量减一个数量级）
 
-只需：一个轻量 **`novos-pull`**（走 registry HTTPS + OCI 解析 + 摘要校验）+ 轻量容器运行时（§4.6 流程）+ 镜像打包工具（OCI layer 构建，配合 §15 宿主机交叉编译工具链）。OTA 升级/隔离/部署核心价值一个不少。
+只需：一个轻量 **`shanshui-guanxin-pull`**（走 registry HTTPS + OCI 解析 + 摘要校验）+ 轻量容器运行时（§4.6 流程）+ 镜像打包工具（OCI layer 构建，配合 §15 宿主机交叉编译工具链）。OTA 升级/隔离/部署核心价值一个不少。
 
 ---
 
@@ -2434,10 +2553,33 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 | 等级 | 组件 |
 |---|---|
-| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、轻量 HTTP 服务（网关）、busybox、musl 交叉工具链 |
+| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、**shanshui-guanxin-gateway**（HTTP 服务/反向代理）、**top**（系统监控）、busybox、musl 交叉工具链 |
 | 🟢 值得 | Mosquitto（MQTT）、Lua / MicroPython / QuickJS |
 | 🟡 可选 | NanoMQ、ZeroMQ、CPython |
 | ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang |
+
+#### shanshui-guanxin-gateway（轻量 HTTP 服务 / 反向代理，2026-08 定稿）
+
+> **必支持核心服务**，用 Rust 编写、静态编译；Web 管理界面（§20）直接由它承载。
+
+| 能力 | 说明 |
+|---|---|
+| HTTP/1.1 | 必支持（含 keep-alive、分块传输） |
+| HTTP/2 | 可选（`feature = "http2"`，按需启用） |
+| TLS | rustls（musl 静态，无 OpenSSL 依赖） |
+| 反向代理 | 请求按路由转发到后端容器服务（含 WebSocket 升级） |
+| 负载均衡 | 可扩展（轮询/hash 接口预留，配合 §23.2 L4LB 分层） |
+
+- **不依赖内核新功能**：仅使用现有 TCP 栈 + TLS 套接字（§3.8 / §18.6），无内核改动；
+- 部署形态：独立静态二进制（musl），`shanshui-guanxin run` 或以系统服务方式常驻；
+- 内存预算：常驻 ~2–4MB（随连接数线性增长），**独立核算，不计入 32MB 内核基线**。
+
+#### top（系统监控工具）
+
+- **必支持工具**：Rust 编写、静态编译，二进制 **<100KB**；
+- 数据源全部来自 `/proc` 只读视图（§10.2）：`/proc/stat`（CPU）、`/proc/loadavg`、
+  `/proc/<pid>/stat`（进程）、`/proc/meminfo`（内存）；
+- 图形版提供 **GUI 版系统监视器**，复用同一数据源（§13.16）。
 
 #### Redis 内存受限部署模板（2026-08 评审补充）
 
@@ -2446,7 +2588,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 - **部署模板强制注入**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`（按设备内存口径缩）；
 - **禁用 RDB 持久化**：`save ""`（禁 `fork()` 快照）；
 - **只开 AOF**：`appendonly yes` + `auto-aof-rewrite-percentage 100`（重写机制必须可用，防 AOF 无限增长）；
-- 模板随镜像打包（Novos-SDK / 官方镜像仓库统一维护），应用方不得以默认配置部署。
+- 模板随镜像打包（山水观心 SDK / 官方镜像仓库统一维护），应用方不得以默认配置部署。
 
 ### 18.4 消息队列路线（每类需求用最轻的那个）
 
@@ -2491,6 +2633,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | **时钟 / 中断框架** | 通用时钟源抽象、高精度 timer、**RTC**、**monotonic** 时钟 | 嵌入式拿到的是具体硬件（不同 timer/RTC）；很多用户态程序依赖 monotonic | §6.2⑥、§1.4 |
 | **快速启动预留** | 秒级冷启动：只初始化必需驱动、**deferred init（延迟初始化）**、直接映射优化 | 冷启动快是嵌入式核心卖点；启动路径（什么先起、什么懒加载）第一版就要定 | §1.3 启动流程 |
 | **RISC-V 预留** | `arch/` 目录把 `aarch64` 与 `riscv64` 都留口 | 嵌入式 ARM/RISC-V 并存，分层越早越省 | §17 |
+| **GPU / 显示框架预留** | DRM/KMS 最小接口、帧缓冲设备抽象（`/dev/fb*`）、图形内存管理（GEM/CMA 预留）、VBlank 中断；`feature = "gpu"` | 后期添加会影响内存管理与驱动模型（帧缓冲页记账、垂直同步中断、PCIe/MMIO 总线挂载），必须提前预留接口 | §6.2⑤、§13.16 |
 
 > **驱动跟着锁定的目标设备走，不预先全做**（2026-08 决策）：
 
@@ -2530,24 +2673,31 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | 完整 OTA 链路 | 下载 → 签名校验 → **A/B 分区切换** → 失败回滚（§16 只是 OCI 镜像雏形） |
 | 标准合规 | IEC 62443（工业）、ISO 26262（车用）——若目标行业是这两块，提前了解 |
 | 远程运维协议 | 轻量管理通道（非 SSH 那种重的） |
+| 用户友好的文件系统视图 | 盘符挂载点（C:/D: 用户态映射，§3.6）、用户目录（文档/下载/桌面），实现跨平台习惯迁移 —— 随 Desktop 版交付（§13.16） |
 
 ---
 
 ## 20. 交互模式（无头设备的三层通道）
 
-> 来源：`interaction.md`。设备无头（无屏幕键盘），一切交互在电脑端远程操作；开发期 QEMU = 生产期真机，交互心智完全一致。
+> 来源：`interaction.md`。**Core 版**设备无头（无屏幕键盘），一切交互在电脑端远程操作；开发期 QEMU = 生产期真机，交互心智完全一致。
+> **Desktop 版**（`feature = "gui"`）在无头通道之上**增加 GUI 交互通道**（显示器/触摸屏，§20.1），桌面环境经帧缓冲（`/dev/fb0`，§13.16）输出。
 
-### 20.1 三层交互通道
+### 20.1 交互通道
 
 | 层级 | 通道 | 电脑端工具 | 场景 | 是否连线 |
 |---|---|---|---|---|
+| GUI 层（Desktop 版） | **显示器 / 触摸屏** | 本地桌面环境（文件管理器/终端/设置/监视器） | 本地可视化操作、监控面板直显 | 设备本地 |
 | 用户层 | **Web 管理界面** | 浏览器 `http://<设备IP>` | 日常管理、拉取/运行容器、看状态 | 网络远程 |
 | 开发层 | **SSH / 串口 Console** | dropbear / PuTTY + USB 转串口 | 开发调试、救援 | SSH 远程；串口物理连线 |
 | 运维层 | **Agent 主动上联** | 云管理平台网页 | 规模化部署、远程 OTA | 设备主动连平台 |
 
-### 20.2 镜像拉取流程（"docker pull" → `novos-pull`）
+> **Desktop 版图形通道**：内核只提供帧缓冲 + DRM KMS 最小接口（§13.16），合成器把桌面内容渲染到
+> `/dev/fb0`；"文档/下载/桌面"等目录为文件管理器左侧的用户态配置（§3.6），与无头通道并存。
+> **GUI 版系统监视器**复用 top 数据源（§10.2 / §18.3），把 `/proc` 指标直接画在屏幕上。
 
-- **手动**：Web 界面点"拉取镜像" → 设备端 `novos-pull`（§16.3）连 registry（HTTPS + token 认证）→ SHA-256 校验 → 解压 → 本地镜像仓库 → 点"运行" → 界面显示状态；
+### 20.2 镜像拉取流程（"docker pull" → `shanshui-guanxin-pull`）
+
+- **手动**：Web 界面点"拉取镜像" → 设备端 `shanshui-guanxin-pull`（§16.3）连 registry（HTTPS + token 认证）→ SHA-256 校验 → 解压 → 本地镜像仓库 → 点"运行" → 界面显示状态；
 - **自动**：设备上电 → Agent 上联云平台 → 下发"部署 xx 版本" → 自动 pull/校验/运行 → 回报状态/日志 → 异常一键回滚（OCI 层复用，只传变化部分）；
 - **离线**：设备连不上公网时，可上网电脑 `docker save` 导出 tar → Web 上传或 U 盘拷入（需兼容 Docker/OCI archive 格式）。
 
@@ -2558,13 +2708,13 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 | Web 管理界面 | 轻量 HTTP 服务 + 静态前端打包进 rootfs（§5 网络栈之上） | M14 |
 | SSH | dropbear（musl 静态，§15 工具链）+ devpts/PTY（§13.4，M12 已有） | M14 |
 | Agent 上联 | 用户态交叉编译程序（§15），走 HTTPS + JSON（§18.6） | M14 |
-| 离线导入 | OCI/Docker archive 解析（复用 §16.3 `novos-pull` 的解压/校验链） | M14 |
+| 离线导入 | OCI/Docker archive 解析（复用 §16.3 `shanshui-guanxin-pull` 的解压/校验链） | M14 |
 
 ---
 
 ## 21. 用户预期管理（从 Linux 迁移的避雷设计）
 
-> 用户会用 Linux 的惯性思维使用 Novos-OS。本节把这些"预期错误"固化为**内核/用户态设计约束**，
+> 用户会用 Linux 的惯性思维使用 山水观心操作系统。本节把这些"预期错误"固化为**内核/用户态设计约束**，
 > 让错误在第一步就被明确拦截并给出可操作提示（比任何文档都更决定第一印象）。
 > 面向用户的速查版见 README"新手必踩的坑"。
 
@@ -2572,8 +2722,8 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 - **现象**：用户 `apt-get install` 或用 glibc 工具链编译的程序，启动报 `Segmentation Fault`
   （动态链接器找不到符号 / TLS 布局不兼容）。
-- **强制门槛**：`novos-check`（M11）在容器启动前扫描 ELF 的 `PT_INTERP` 段——
-  **非指向 `/novos/ld-musl` 一律拒绝启动**，报错：
+- **强制门槛**：`shanshui-guanxin-check`（M11）在容器启动前扫描 ELF 的 `PT_INTERP` 段——
+  **非指向 `/shanshui-guanxin/ld-musl` 一律拒绝启动**，报错：
   `"请使用 musl 工具链重新编译（宿主交叉编译，见 docs/nosos-sdk.md）"`。
 
 ### 21.2 Redis/服务 OOM（配置被用户覆盖）
@@ -2586,7 +2736,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 - **现象**：`mount` 现成 Ext4 盘报 `Operation not supported`（Linux 默认 `data=ordered`）。
 - **报错文案**：
-  `"Novos-OS 仅支持 Ext4 data=journal 模式；请用 tune2fs -O journal_dev /dev/sdX 转换，或不支持此特性，请备份后重新格式化。"`
+  `"山水观心操作系统仅支持 Ext4 data=journal 模式；请用 tune2fs -O journal_dev /dev/sdX 转换，或不支持此特性，请备份后重新格式化。"`
 
 ### 21.4 设备端不编译（认知纠正）
 
@@ -2601,8 +2751,8 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 ### 21.6 非 Docker CLI 兼容（明确标语）
 
 - 所有入口（Web/CLI）明示：
-  `"Novos 容器运行时遵循 OCI 镜像规范，管理方式为 novos 命令，非 Docker CLI 兼容（不支持 docker-compose）。"`
-- **`novos run` 语义对齐 OCI runtime-spec**，但命令行参数是 `novos run <image> <cmd>`，
+  `"山水观心操作系统容器运行时遵循 OCI 镜像规范，管理方式为 shanshui-guanxin 命令，非 Docker CLI 兼容（不支持 docker-compose）。"`
+- **`shanshui-guanxin run` 语义对齐 OCI runtime-spec**，但命令行参数是 `shanshui-guanxin run <image> <cmd>`，
   而非 docker run 的 `-d`/`-p` 等（通过 `config.json` 或环境变量配置）。
 
 ### 21.7 实时性需求（RT 调度）
@@ -2612,7 +2762,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ### 21.8 网络调试（tcpdump 替代）
 
-- 无 BPF；提供极简内核调试开关：`echo 1 > /proc/sys/net/novos/packet_trace`，
+- 无 BPF；提供极简内核调试开关：`echo 1 > /proc/sys/net/shanshui-guanxin/packet_trace`，
   内核在环形日志打印每个数据包**五元组 + 丢弃原因**（性能下降 ~50%，仅供调试）。
 
 ### 21.9 OTA 内核 A/B 分区
@@ -2624,7 +2774,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 ## 22. 官方软件仓库（从精选清单到应用商店）
 
-> Novos-OS 从"出色的内核"走向"成功的平台"的必经之路。对照 §21 的被动防御（`novos-check`
+> 山水观心操作系统从"出色的内核"走向"成功的平台"的必经之路。对照 §21 的被动防御（`shanshui-guanxin-check`
 > 拦截），官方仓库是**主动保障**——预编译、预配置、签名、与 musl 完全兼容，把设计哲学
 > （安全、轻量、确定）通过官方软件包传递给用户。演进节奏见 DEVELOP_EXTENSION 主线一。
 >
@@ -2636,8 +2786,8 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 | 方案 | 问题 | 官方仓库的解法 |
 |---|---|---|
-| 官网链接清单 | 依赖地狱：用户手动编译、解决依赖 | 预编译、预配置，`novos install redis` 开箱即用 |
-| `novos-check` 被动拦截 | 只能在启动前拦截不兼容程序 | 仓库内软件经官方测试 + 签名，从源头杜绝 glibc 错版 |
+| 官网链接清单 | 依赖地狱：用户手动编译、解决依赖 | 预编译、预配置，`shanshui-guanxin install redis` 开箱即用 |
+| `shanshui-guanxin-check` 被动拦截 | 只能在启动前拦截不兼容程序 | 仓库内软件经官方测试 + 签名，从源头杜绝 glibc 错版 |
 | 手工部署模板 | 普通用户不会配置 | 仓库包自动应用最佳实践（如 redis `--maxmemory 64mb`） |
 
 ### 22.2 仓库形态："小而精"的精选集合
@@ -2646,7 +2796,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 | 分类 | 内容 |
 |---|---|
-| **core（核心）** | init、shell、`novos` 命令行工具 |
+| **core（核心）** | init、shell、`shanshui-guanxin` 命令行工具 |
 | **runtime（运行时/语言）** | musl 运行时、Go/Rust 语言运行时支持 |
 | **service（数据与服务）** | Redis、SQLite、Mosquitto (MQTT) 等 |
 | **net-tools（网络工具）** | curl、wget、dropbear (SSH) 等 |
@@ -2654,30 +2804,30 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 ### 22.3 三阶段演进
 
 **阶段一：官方推荐软件清单 + 构建工具链（MVP，1.0 发布初期）**
-- 文档"Novos-OS 官方推荐软件"页：表格列出软件名称 / 功能 / 官方项目地址 / **官方验证的
+- 文档"山水观心操作系统官方推荐软件"页：表格列出软件名称 / 功能 / 官方项目地址 / **官方验证的
   musl 静态二进制下载链接**；
-- 配套 `novos-build`：参照清单一键从源码构建 Novos 兼容软件包。
+- 配套 `shanshui-guanxin-build`：参照清单一键从源码构建 山水观心操作系统兼容软件包。
 
 **阶段二：社区软件仓库（生态构建期）**
-- 简单仓库（opkg 或容器化方案）：`novos repo-add` 添加官方/第三方源，`novos install` 安装；
+- 简单仓库（opkg 或容器化方案）：`shanshui-guanxin repo-add` 添加官方/第三方源，`shanshui-guanxin install` 安装；
 - 核心包维护流程（以 Redis 为例）：官网取稳定源码 → `musl-gcc` 静态编译成无外部依赖单可执行 →
   打包二进制 + 配置 + 启动脚本 → 私钥签名 → 上传仓库服务器。
 
 **阶段三：云端原生应用商店（终极形态）**
-- 与 §21.4 云端构建深度集成：`novos deploy redis` 自动从云端拉取最新最安全镜像并部署。
+- 与 §21.4 云端构建深度集成：`shanshui-guanxin deploy redis` 自动从云端拉取最新最安全镜像并部署。
 
 ### 22.4 立即可行的行动（不等阶段三）
 
 1. **选定 Redis 版本**：Redis 7.2.4 或更新稳定版；
 2. **提供官方链接**：文档明确 Redis 官方下载地址；
-3. **编写构建指南**：《为 Novos-OS 构建 Redis》——用 `musl-gcc` 静态编译的完整流程，
+3. **编写构建指南**：《为 山水观心操作系统构建 Redis》——用 `musl-gcc` 静态编译的完整流程，
    立即解决用户"如何正确获取软件"的核心困惑。
 
 ---
 
 ## 23. 用户需求演进与路线图展望（基于 v1.0 反馈预测）
 
-> 本节列出 Novos-OS 未来版本中**由社区/真实用户驱动的高频需求**，供架构决策参考。
+> 本节列出 山水观心操作系统未来版本中**由社区/真实用户驱动的高频需求**，供架构决策参考。
 > 三大用户画像（传统嵌入式工程师 / 云原生 DevOps / 工业现场维护）的诉求集中在
 > **硬件连接性 / 服务可靠性 / 远程可运维性**三个维度。原则：**只增不减**，本节内容
 > 全部为新增能力，不改动既有设计。
@@ -2688,12 +2838,12 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 
 | 需求 | 场景 | 方案 | 版本 |
 |---|---|---|---|
-| 容器保活策略（Restart Policy） | 掉电自启后容器未自动起来，无人值守需人工 `novos run` | OCI spec `config.json` 扩展 `restartPolicy`：`always`/`on-failure`/`unless-stopped` | v1.1 |
-| Web 管理界面默认开启 | 现场施工人员不懂命令，需按钮化操作 | `novos-webui` 服务（端口 80），容器列表/启停/日志滚动/资源曲线（CPU/内存） | v1.1 |
+| 容器保活策略（Restart Policy） | 掉电自启后容器未自动起来，无人值守需人工 `shanshui-guanxin run` | OCI spec `config.json` 扩展 `restartPolicy`：`always`/`on-failure`/`unless-stopped` | v1.1 |
+| Web 管理界面默认开启 | 现场施工人员不懂命令，需按钮化操作 | `shanshui-guanxin-webui` 服务（端口 80），容器列表/启停/日志滚动/资源曲线（CPU/内存） | v1.1 |
 | 4G/5G 蜂窝上网 | 偏远变电站/现场依赖蜂窝网络 | PPP 协议栈 + USB 串口驱动（模块通信）+ wpa_supplicant 轻量移植（Wi-Fi WPA2/WPA3） | v1.5 |
 | 持久化日志落盘 + 轮转 | 半夜重启日志全丢，无法排障 OOM/crash | 关键内核日志 + 容器日志异步写 `/var/log/journal/`（Ext4），按大小轮转 + 总大小限制 | v1.5 |
-| WireGuard VPN | 公网暴露危险，需站点到站点安全连接 | `novos-vpn` 工具（WireGuard 用户态/内核模块，代码量小、32MB 环境友好） | v1.5 |
-| 存储卷独占锁 | SQLite 被两进程并发写损坏 | `novos run --volume-exclusive`（底层 flock/leases），一进程写时他进程不可打开 | v1.5 |
+| WireGuard VPN | 公网暴露危险，需站点到站点安全连接 | `shanshui-guanxin-vpn` 工具（WireGuard 用户态/内核模块，代码量小、32MB 环境友好） | v1.5 |
+| 存储卷独占锁 | SQLite 被两进程并发写损坏 | `shanshui-guanxin run --volume-exclusive`（底层 flock/leases），一进程写时他进程不可打开 | v1.5 |
 | MicroPython 运行时 | 工业数据清洗（JSON→CSV）需脚本语言，CPython 太重 | MicroPython（<256KB，契合轻量定位），作官方镜像入仓库 | v1.5 |
 | PTP/NTP 精确时间同步 | 分布式日志/Modbus 事件排序依赖统一时间 | SNTP 升级为 chrony/ntpd 轻量版（带时钟漂移补偿），评估 PTP(IEEE 1588) | v1.5 |
 
@@ -2711,33 +2861,33 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 1. **内存优先**：所有新增功能均需在 32MB（minimal）/ 40MB（full）预算内通过验收；
 2. **默认禁用**：新增功能默认不启用，用户通过配置文件或命令行显式开启；
 3. **模块化**：所有扩展均为独立二进制或内核模块（第一版不实现动态模块加载，通过 feature flag 编译时裁剪）；
-4. **只增不减**：本节为 roadmap"定心丸"——让早期用户敢于用 Novos 接真实项目，他们最怕的不是"功能没有"，而是"功能永远不会有"。
+4. **只增不减**：本节为 roadmap"定心丸"——让早期用户敢于用 山水观心操作系统接真实项目，他们最怕的不是"功能没有"，而是"功能永远不会有"。
 
 ---
 
 ## 24. 首批用户支持策略（Early Adopter Support）
 
-> 第一批用户（Early Adopters）是项目最宝贵的资产。本章定义 Novos-OS 在 v1.0 发布时，
+> 第一批用户（Early Adopters）是项目最宝贵的资产。本章定义 山水观心操作系统在 v1.0 发布时，
 > 为用户提供的**开箱即用体验、文档、工具链、调试支持和社区反馈闭环**。这些不是内核代码，
 > 而是围绕内核的交付物和服务，旨在将用户从"下载"到"运行第一个容器"的时间压缩到 **30 分钟以内**。
 
 ### 24.1 开箱即用的预构建环境
 
 - **预构建 QEMU 镜像**：提供可直接启动的完整镜像（内核 + initramfs + 基础工具），用户无需编译即可体验。
-- **一键启动脚本**：`./novos-run.sh`，自动调用 QEMU 并加载镜像，屏蔽复杂参数。
+- **一键启动脚本**：`./shanshui-guanxin-run.sh`，自动调用 QEMU 并加载镜像，屏蔽复杂参数。
 - **硬件/虚拟机支持矩阵**：明确列出当前支持的平台（QEMU/KVM、特定 x86_64 工控板），避免用户在不支持的硬件上浪费时间。
 
 ### 24.2 清晰的分层文档
 
 - **5 分钟快速开始指南**：从下载镜像到进入 shell 的完整步骤，附截图和命令示例。
-- **第一个容器指南**：手把手教用户用 `novos run` 启动 busybox 容器并执行命令。
+- **第一个容器指南**：手把手教用户用 `shanshui-guanxin run` 启动 busybox 容器并执行命令。
 - **《从 Linux 迁移避坑指南》**：集中说明 glibc vs musl、Ext4 data=journal、设备端不编译等常见误区，给出明确解决方案（对应 §21）。
 
 ### 24.3 完善的开发者工具链
 
 - **预配置的交叉编译工具链**：提供 Docker 镜像或 SDK 包，支持 `x86_64-musl` 和 `aarch64-musl` 一键交叉编译。
 - **应用模板与示例**：提供 C / Rust 的 "Hello, World" 应用模板，附 `Makefile` 或 `build.rs`。
-- **`novos-build` 命令行工具**：实现从源码到 OCI 镜像的一键构建，构建时自动运行 `novos-check` 验证兼容性（见 §15.3）。
+- **`shanshui-guanxin-build` 命令行工具**：实现从源码到 OCI 镜像的一键构建，构建时自动运行 `shanshui-guanxin-check` 验证兼容性（见 §15.3）。
 
 ### 24.4 调试与问题反馈机制
 
@@ -2756,7 +2906,7 @@ fn load_dynamic_elf(...) { Err(ENOSYS) }  // 不支持时返回 ENOSYS
 - 预构建 QEMU 镜像（.qcow2）和启动脚本
 - 快速开始指南（README + 在线文档）
 - 交叉编译 SDK（Dockerfile 或 tar 包）
-- 示例应用仓库（`novos-examples`）
+- 示例应用仓库（`shanshui-guanxin-examples`）
 - GitHub Issue 模板 + 社区沟通渠道信息
 - 官方软件仓库的"推荐清单"页面（阶段一，见 §22.3）
 
