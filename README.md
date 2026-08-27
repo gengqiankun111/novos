@@ -174,6 +174,10 @@ OSv / MirageOS 更小但牺牲了多容器隔离；Linux 通用但太重。山�
 | v2.0 | SMP 多核、L4 负载均衡、流量镜像、帧缓冲 + DRM（Desktop 阶段一） |
 | v3.0+ | Wayland 合成器 + 系统监视器（Desktop 阶段二）；v4.0 完整桌面环境 |
 
+> **M13 进行中**：完整 /proc 视图（`/proc/self/{maps,status,exe,fd}` + `/proc/{mounts,filesystems,cpuinfo,health}`）✅；
+> 信号子系统（`rt_sigaction` SA_SIGINFO/SA_ONSTACK、用户态 #PF→SIGSEGV 投递、`sigaltstack` 备用栈、`sigprocmask` 阻塞 + `kill`）✅；
+> 均经 QEMU `sigtest`/`sigmasktest` 集成验证。剩余：timerfd/signalfd、实时信号、JVM 冒烟、内存基线（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
+
 ---
 
 ## 文档索引

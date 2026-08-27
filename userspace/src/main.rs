@@ -43,7 +43,9 @@ const SYS_READLINK: u64 = 89;   // M13-03：读取符号链接目标
 const SYS_FUTEX: u64 = 202;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_RT_SIGACTION: u64 = 13;   // M13-06：注册信号 handler
+const SYS_RT_SIGPROCMASK: u64 = 14; // M13-08：阻塞/解除阻塞信号
 const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
+const SYS_KILL: u64 = 62;           // M13-08：投递信号
 const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
@@ -320,6 +322,18 @@ extern "C" fn segv_handler(signo: i32, info: *mut SigInfo, uctx: *mut UContext) 
     loop {}
 }
 
+/// 纯记录 handler（sigmasktest，M13-08）：不重定向恢复点——kill 投递无触发指令
+/// 需跳过，rt_sigreturn 直接回到被中断的指令后继续。
+extern "C" fn segv_handler_plain(signo: i32, info: *mut SigInfo, _uctx: *mut UContext) -> ! {
+    // SAFETY: 内核保证参数有效；单核测试环境。
+    unsafe {
+        HANDLED_SIGNOS = signo as u64;
+        HANDLED_ADDR = (*info).addr;
+    }
+    syscall3(SYS_RT_SIGRETURN, 0, 0, 0);
+    loop {}
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     print("PANIC: userspace\n");
@@ -434,7 +448,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigmasktest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2149,10 +2163,52 @@ fn exec(cmd: &[u8]) {
                 }
             }
         }
+        b"sigmasktest" => {
+            // M13-08：sigprocmask 阻塞 → kill 自投递（挂起不投递）→ 解除阻塞
+            // → syscall 返回路径投递 → handler（不重定向）→ 回到本指令后验证。
+            // SAFETY: 单核测试环境。
+            unsafe { SIG_ACTIVE = false; }
+            let act = SigAction { handler: segv_handler_plain as usize as u64, flags: SA_SIGINFO, restorer: 0, mask: 0 };
+            let rc = syscall6(SYS_RT_SIGACTION, SIGSEGV, &act as *const SigAction as u64, 0, 8, 0, 0);
+            print("sigmasktest: sigaction rc=");
+            print_u64(rc);
+            print("\n");
+            let set: u64 = 1 << 10; // SIGSEGV-1
+            // 阻塞 SIGSEGV
+            let rc = syscall6(SYS_RT_SIGPROCMASK, 0 /*BLOCK*/, &set as *const u64 as u64, 0, 8, 0, 0);
+            print("sigmasktest: block rc=");
+            print_u64(rc);
+            print("\n");
+            // kill 自投递 → 被阻塞保持挂起（handler 不应运行）
+            let krc = syscall3(SYS_KILL, 1, SIGSEGV, 0);
+            let handled_before = unsafe { HANDLED_SIGNOS };
+            print("sigmasktest: kill rc=");
+            print_u64(krc);
+            print(" handled_before_unblock=");
+            print_u64(handled_before);
+            print("\n");
+            // 解除阻塞 → 投递发生在本 syscall 返回路径；handler 记录后 rt_sigreturn
+            // 回到本行之后的指令继续（无触发指令需跳过，故不重定向）。
+            let rc2 = syscall6(SYS_RT_SIGPROCMASK, 1 /*UNBLOCK*/, &set as *const u64 as u64, 0, 8, 0, 0);
+            print("sigmasktest: unblock rc=");
+            print_u64(rc2);
+            print("\n");
+            // 验证 handler 收到 SIGSEGV
+            print("sigmasktest: resumed, handled=");
+            // SAFETY: 单核测试环境。
+            print_u64(unsafe { HANDLED_SIGNOS });
+            print("\n");
+            if unsafe { HANDLED_SIGNOS } == SIGSEGV {
+                print("sigmasktest: sigprocmask ok\n");
+            } else {
+                print("sigmasktest: sigprocmask FAIL\n");
+            }
+        }
         b"sigtest" => {
             // M13-06/07：sigaction + sigaltstack 全链路——注册 SA_ONSTACK handler、
             // 配置备用信号栈 → 触发用户态 #PF → handler 在备用栈上运行 → rt_sigreturn 恢复。
             // SAFETY: 单核测试环境。
+            unsafe { SIG_ACTIVE = false; }
             let alt_base = unsafe { ALT_STACK.as_ptr() as u64 };
             let alt = StackT { ss_sp: alt_base, ss_flags: 0, _pad: 0, ss_size: 8192 };
             let mut old = StackT { ss_sp: 0, ss_flags: 0, _pad: 0, ss_size: 0 };
