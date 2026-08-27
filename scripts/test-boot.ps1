@@ -113,7 +113,7 @@ if ($Mode -eq "boot") {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
         # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
         # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nmemtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`nsigreent`ntfdtest`nsftest`nsigtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nmemtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`nsigreent`ntfdtest`nsftest`njvmsmoke`nsigtest`n"
         foreach ($one in ($cmd -split "`n")) {
             if ($one.Length -eq 0) { continue }
             $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
@@ -287,7 +287,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | jvmsmoke | exit",
         "Shanshui-guanxin userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -438,10 +438,13 @@ if ($Mode -eq "boot") {
         "sigtest: sigaltstack rc=0",          # M13-07：备用信号栈设置成功
         "sigtest: handler ran, signos=11 addr=0", # M13-06/07：handler 收到 SIGSEGV + si_addr=0
         "addr=0 on_altstack=1",               # M13-07：handler 在备用栈上运行
-        "sigtest: SIGSEGV handled on altstack ok" # M13-07：rt_sigreturn 后安全恢复
-        # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
-        # 会在客户端连接前丢弃启动早期日志。
+        "sigtest: SIGSEGV handled on altstack ok",  # M13-07：rt_sigreturn 后安全恢复
+        "jvmsmoke: epoll got=1",              # M13-13：JVM 事件循环面
+        "jvmsmoke: signal handled=10",        # M13-13：JVM 信号面
+        "jvmsmoke: JVM runtime surface ok"    # M13-13：组合通过
     )
+    # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
+    # 会在客户端连接前丢弃启动早期日志。
 }
 
 # 断言
