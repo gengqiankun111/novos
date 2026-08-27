@@ -362,6 +362,29 @@ pub fn status_inode() -> Arc<Inode> {
     ino
 }
 
+/// /proc/self/exe（M13-03）：当前进程可执行文件路径（readlink 读取）。
+pub fn exe_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    *ino.data.lock() = b"/init\0".to_vec();
+    ino
+}
+
+/// readlink 语义：读取"链接目标"（当前仅 /proc/self/exe 这类路径文件）。
+/// 目标为路径形态（以 `/` 开头）才返回；末尾 NUL 剥离（readlink 约定）。
+pub fn read_link(path: &str, buf: &mut [u8]) -> Result<usize, i64> {
+    let ino = resolve(path, false).map_err(|_| -2i64)?; // ENOENT
+    let data = ino.data.lock().clone();
+    if !data.starts_with(b"/") {
+        return Err(-22i64); // EINVAL（非链接）
+    }
+    let mut n = core::cmp::min(data.len(), buf.len());
+    if n > 0 && data[n - 1] == 0 {
+        n -= 1; // 剥离 NUL
+    }
+    buf[..n].copy_from_slice(&data[..n]);
+    Ok(n)
+}
+
 /// /proc/self/status 启动自测（M13-02）：字段齐全、相对顺序正确、数值可解析、
 /// Threads=1、单用户 root（Uid/Gid=0）。QEMU boot 模式断言 `fs/proc: status self-test PASS`。
 pub fn status_self_test() {
@@ -534,6 +557,12 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
         // M13-02：/proc/self/status → 当前进程状态
         if proc_self && *comp == "status" {
             cur = status_inode();
+            proc_self = false;
+            continue;
+        }
+        // M13-03：/proc/self/exe → 当前进程可执行文件路径
+        if proc_self && *comp == "exe" {
+            cur = exe_inode();
             proc_self = false;
             continue;
         }
@@ -972,11 +1001,12 @@ fn visible_children(ino: &Inode) -> Vec<Dentry> {
         kids.push(Dentry { name: String::from("cpuinfo"), inode: Inode::file() });
         return kids;
     }
-    // M13-01/02：/proc/self 下 maps + status
+    // M13-01/02/03：/proc/self 下 maps + status + exe
     if ino as *const Inode as usize == Arc::as_ptr(&SELF_DIR) as usize {
         return alloc::vec![
             Dentry { name: String::from("maps"), inode: Inode::file() },
             Dentry { name: String::from("status"), inode: Inode::file() },
+            Dentry { name: String::from("exe"), inode: Inode::file() },
         ];
     }
     if let Some(merged) = overlay_merged_children(ino) {

@@ -46,6 +46,7 @@ pub const SYS_MOUNT: u64 = 165;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
+pub const SYS_READLINK: u64 = 89;   // M13-03：读取符号链接目标
 pub const SYS_FUTEX: u64 = 202;
 /// arch_prctl：TLS 段基址（FS base）设置/查询（M11-切片2）。
 pub const SYS_ARCH_PRCTL: u64 = 158;
@@ -194,6 +195,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_UNLINK => sys_unlink(a1),
         SYS_GETCWD => sys_getcwd(a1, a2),
         SYS_CHDIR => sys_chdir(a1),
+        SYS_READLINK => sys_readlink(a1, a2, a3),
         SYS_FUTEX => sys_futex(a1, a2, a3, a4, a5),
         SYS_ARCH_PRCTL => sys_arch_prctl(a1, a2),
         SYS_RT_SIGACTION => crate::signal::sys_rt_sigaction(a1, a2, a3, a4) as u64,
@@ -381,6 +383,25 @@ fn sys_chdir(path: u64) -> u64 {
             }
         }
         Ok(_) => (-20i64) as u64, // ENOTDIR
+        Err(e) => e as u64,
+    }
+}
+
+/// readlink(path, buf, bufsiz)：读取符号链接目标（M13-03，/proc/self/exe）。
+fn sys_readlink(path: u64, buf: u64, bufsiz: u64) -> u64 {
+    let name = match copy_path(path) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    // SAFETY: buf 为用户地址且已映射；write 侧最多 bufsiz 字节。
+    let mut tmp = [0u8; 128];
+    match crate::fs::read_link(&name, &mut tmp) {
+        Ok(n) => {
+            let n = core::cmp::min(n, bufsiz as usize);
+            // SAFETY: 用户页已映射（恒等映射可写）。
+            unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n) };
+            n as u64
+        }
         Err(e) => e as u64,
     }
 }
