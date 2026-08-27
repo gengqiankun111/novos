@@ -40,5 +40,6 @@ pub mod socket;
 pub mod sync;
 pub mod syscall;
 pub mod task;
+pub mod timer;
 pub mod vga;
 pub mod vmm;

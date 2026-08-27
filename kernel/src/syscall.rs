@@ -55,6 +55,9 @@ pub const SYS_RT_SIGPROCMASK: u64 = 14; // M13-08：阻塞/解除阻塞信号
 pub const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
 pub const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 pub const SYS_KILL: u64 = 62;           // M13-08：投递信号
+pub const SYS_TIMERFD_CREATE: u64 = 283; // M13-11：创建 timerfd
+pub const SYS_TIMERFD_SETTIME: u64 = 286; // M13-11：设/重调度 timerfd
+pub const SYS_TIMERFD_GETTIME: u64 = 287; // M13-11：查询 timerfd
 /// 山水观心操作系统扩展：添加 NAT 端口映射规则（网关控制面）。
 pub const SYS_NAT_ADD: u64 = 501;
 /// 山水观心操作系统扩展：读 conntrack 统计 { 条目数, 命中数 }。
@@ -204,6 +207,9 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_RT_SIGPROCMASK => crate::signal::sys_rt_sigprocmask(a1, a2, a3, a4) as u64,
         SYS_KILL => crate::signal::sys_kill(a1, a2) as u64,
         SYS_SIGALTSTACK => crate::signal::sys_sigaltstack(a1, a2) as u64,
+        SYS_TIMERFD_CREATE => crate::timer::timerfd_create(a1, a2) as u64,
+        SYS_TIMERFD_SETTIME => crate::timer::timerfd_settime(a1 as usize, a2, a3, a4) as u64,
+        SYS_TIMERFD_GETTIME => crate::timer::timerfd_gettime(a1 as usize, a2) as u64,
         SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
         SYS_CT_STAT => sys_ct_stat(a1),
         SYS_FW_ADD => sys_fw_add(a1, a2, a3),
@@ -263,6 +269,10 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
 /// read(fd, buf, len)：经 fd 表路由到文件；非阻塞，无数据返回 0。
 /// 临时缓冲 512B 上限（文件按 len 读；uart 逐字节）。
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
+    // M13-11：timerfd → 读回到期次数（u64）
+    if fd >= crate::timer::TIMER_FD_BASE as u64 {
+        return crate::timer::timer_read(fd as usize, buf) as u64;
+    }
     let mut tmp = [0u8; 512];
     let want = core::cmp::min(len as usize, tmp.len());
     match crate::fs::fd_get(fd as usize) {
@@ -294,7 +304,9 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> u64 {
 
 /// close(fd)：关闭并回收 fd；成功返回 0。
 fn sys_close(fd: u64) -> u64 {
-    if fd >= crate::socket::EPOLL_FD_BASE as u64 {
+    if fd >= crate::timer::TIMER_FD_BASE as u64 {
+        crate::timer::timer_close(fd as usize) as u64
+    } else if fd >= crate::socket::EPOLL_FD_BASE as u64 {
         crate::socket::epoll_close(fd as usize) as u64
     } else if fd >= crate::socket::TCP_FD_BASE as u64 {
         crate::socket::tcp_close(fd as usize) as u64
@@ -573,12 +585,13 @@ fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, event: u64) -> u64 {
     crate::socket::epoll_ctl(epfd as usize, op as u32, fd as usize, events) as u64
 }
 
-/// epoll_wait(epfd, events, maxevents, timeout)：非阻塞轮询就绪项。
-fn sys_epoll_wait(epfd: u64, events: u64, maxevents: u64, _timeout: u64) -> u64 {
+/// epoll_wait(epfd, events, maxevents, timeout_ms)：阻塞等待就绪项（timerfd 到期等）。
+fn sys_epoll_wait(epfd: u64, events: u64, maxevents: u64, timeout_ms: u64) -> u64 {
     crate::socket::epoll_wait(
         epfd as usize,
         events as *mut u8,
         core::cmp::min(maxevents, 64) as usize,
+        timeout_ms,
     ) as u64
 }
 
