@@ -17,9 +17,13 @@ pub const P_HUGE: u64 = 1 << 7; // 2MB 大页（PS）
 pub const USER_STACK_VADDR: u64 = 0x80_0000_0000 + 0x20_00000;
 
 // boot.asm 导出的内核 PDPT（恒等映射 0~1GB）。
+#[cfg(not(test))]
 extern "C" {
     static pdpt: u8;
 }
+// host 单测桩：boot.asm 不参与测试链接，提供同名静态占位。
+#[cfg(test)]
+pub static pdpt: u8 = 0;
 
 /// 用户进程页表。
 pub struct UserPageTable {

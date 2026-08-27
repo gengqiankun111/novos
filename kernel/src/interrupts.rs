@@ -94,10 +94,16 @@ pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 // boot.asm 导出的异常 stub 表基址（每个 stub 恰好 16 字节）。
+#[cfg(not(test))]
 extern "C" {
     static stub_base: u8;
     static irq_stub_base: u8;
 }
+// host 单测桩：boot.asm 不参与测试链接，提供同名静态占位。
+#[cfg(test)]
+pub static stub_base: u8 = 0;
+#[cfg(test)]
+pub static irq_stub_base: u8 = 0;
 
 /// 异常保存的寄存器帧（对应 boot.asm `exception_common` 的压栈顺序）。
 #[repr(C)]

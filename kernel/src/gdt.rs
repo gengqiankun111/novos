@@ -18,12 +18,22 @@ pub const KERNEL_DATA_SEL: u16 = 0x10;
 pub const TSS_SEL: u16 = 0x28;
 
 // boot.asm 导出的符号。
+#[cfg(not(test))]
 extern "C" {
     static syscall_stack_top: u8;
     static tss_rsp0: u64;
     static gdt64: u8;
     static tss: u8;
 }
+// host 单测桩：boot.asm 不参与测试链接，提供同名静态占位（仅编译期需要符号存在）。
+#[cfg(test)]
+pub static syscall_stack_top: u8 = 0;
+#[cfg(test)]
+pub static tss_rsp0: u64 = 0;
+#[cfg(test)]
+pub static gdt64: u8 = 0;
+#[cfg(test)]
+pub static tss: u8 = 0;
 
 /// TSS 描述符在 GDT 中的偏移（index 5 × 8）。
 const TSS_DESC_OFF: usize = 5 * 8;
