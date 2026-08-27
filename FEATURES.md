@@ -54,7 +54,7 @@
 | 动态链接 | ELF PT_INTERP + ld-musl + MAP_SHARED | ◻ | M11 | DESIGN §13.6 |
 | futex | WAIT/WAKE/REQUEUE，**逻辑键**（Inode/虚拟区）+ **COW 等待队列迁移** | ◻ | M11/M4 | DESIGN §13.7/勘误§2 |
 | TLS | arch_prctl(ARCH_SET_FS) + 上下文切换恢复 | ◻ | M11 | DESIGN §13.8 |
-| 设备框架 | devtmpfs + devpts + `/dev/null/zero/urandom` + PTY | ◻ | M12 | DESIGN §13.4 |
+| 设备框架 | devtmpfs + devpts + `/dev/null/zero/urandom`（✅ 子集：null 写丢弃读 EOF、zero 读全零、urandom xorshift 伪随机）+ PTY | ◻ | M12 | DESIGN §13.4 |
 | Capabilities | Linux capability 集（permitted/effective/...） | ◻ | M12 | DESIGN §13.5 |
 | Seccomp BPF | 最小解释器 + **高风险调用参数值匹配**（mount/ptrace/openat/execve/reboot/clone） | ◻ | M12 | DESIGN §13.5/勘误§12 |
 | 完整 /proc | /proc/self/{maps,status,exe,fd} + cpuinfo/mounts/filesystems + **meminfo**（✅ M13-14 内存基线：buddy/slab 台账 + used+free==total 守恒）（**maps ✅ M13-01、status ✅ M13-02、exe ✅ M13-03、fd ✅ M13-04、mounts/filesystems ✅ M13-05**） | ◻ | M13 | DESIGN §13.12 |

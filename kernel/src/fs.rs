@@ -104,6 +104,12 @@ pub static ROOT: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| {
 pub enum File {
     /// /dev/uart：read = 非阻塞串口读，write = 串口输出（镜像 VGA）。
     Uart,
+    /// /dev/null（M12）：读 EOF、写丢弃。
+    DevNull,
+    /// /dev/zero（M12）：读全零。
+    DevZero,
+    /// /dev/urandom（M12）：读伪随机字节（xorshift）。
+    DevUrandom,
     /// 常规文件（ramfs）：inode + 当前读写偏移。
     Reg {
         inode: Arc<Inode>,
@@ -132,6 +138,18 @@ impl File {
                     0
                 }
             }
+            File::DevNull => 0, // 读 EOF
+            File::DevZero => {
+                buf.fill(0);
+                buf.len()
+            }
+            File::DevUrandom => {
+                let n = buf.len();
+                for b in buf.iter_mut() {
+                    *b = urandom_byte();
+                }
+                n
+            }
             File::Reg { inode, offset } => {
                 // M13：packet_trace 开关文件——读回环形日志（动态刷新）
                 if Arc::as_ptr(inode) == Arc::as_ptr(&SYSCTL_PACKET_TRACE) {
@@ -157,6 +175,9 @@ impl File {
                 crate::print!("{}", s);
                 data.len()
             }
+            File::DevNull => data.len(), // 写丢弃
+            File::DevZero => data.len(),
+            File::DevUrandom => data.len(),
             File::Reg { inode, offset } => {
                 // M13：packet_trace 开关文件——写 "1"/"0" 切换调试开关
                 if Arc::as_ptr(inode) == Arc::as_ptr(&SYSCTL_PACKET_TRACE) {
@@ -180,6 +201,21 @@ impl File {
             File::Dir { .. } => 0,
         }
     }
+}
+
+/// /dev/urandom 的 xorshift64 PRNG（种子取 tick，可加熵）。
+fn urandom_byte() -> u8 {
+    static mut S: u64 = 0x9E37_79B9_7F4A_7C15;
+    // SAFETY: 单核，静态变量独占访问。
+    let s = unsafe {
+        let mut x = S;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        S = x;
+        (x ^ crate::task::ticks()) as u8
+    };
+    s
 }
 
 /// 挂载点：挂载路径 → 独立文件系统根（M4-切片4：tmpfs 简化实现）。
@@ -1175,6 +1211,16 @@ fn visible_children(ino: &Inode) -> Vec<Dentry> {
 pub fn open_path(name: &str, flags: u64) -> Result<Arc<File>, i64> {
     if name == "/dev/uart" {
         return Ok(Arc::new(File::Uart));
+    }
+    // M12：设备框架子集——/dev/null、/dev/zero、/dev/urandom。
+    if name == "/dev/null" {
+        return Ok(Arc::new(File::DevNull));
+    }
+    if name == "/dev/zero" {
+        return Ok(Arc::new(File::DevZero));
+    }
+    if name == "/dev/urandom" {
+        return Ok(Arc::new(File::DevUrandom));
     }
     let create = flags & O_CREAT != 0;
     let mut inode = resolve(name, create).map_err(|_| -2i64)?; // ENOENT
