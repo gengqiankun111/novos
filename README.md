@@ -183,7 +183,7 @@ OSv / MirageOS 更小但牺牲了多容器隔离；Linux 通用但太重。山�
 > JVM 冒烟（`jvmsmoke`：timerfd+epoll 事件循环 + sigaltstack 信号组合面）✅；
 > 均经 QEMU `sigtest`/`sigmasktest`/`sigreent`/`tfdtest`/`sftest`/`pktracetest`/`memtest`/`jvmsmoke` 集成验证。**M13 完整达成**，进入 M14（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 >
-> **M14 进行中**：最小记录锁（`fcntl F_SETLK/F_SETLKW/F_GETLK/F_UNLCK` 字节区间锁，SQLite 依赖，`fcntltest` 双进程冲突/解锁/重锁验证）✅；剩余：OCI 镜像/容器运行时/OTA/gateway。
+> **M14 进行中**：最小记录锁（`fcntl F_SETLK/F_SETLKW/F_GETLK/F_UNLCK` 字节区间锁，SQLite 依赖，`fcntltest` 双进程冲突/解锁/重锁验证）✅；设备框架子集（`/dev/null`/`/dev/zero`/`/dev/urandom`，`devtest`）✅；剩余：OCI 镜像/容器运行时/OTA/gateway。
 
 ---
 

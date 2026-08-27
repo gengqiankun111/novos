@@ -591,7 +591,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | fcntltest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | jvmsmoke | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | devtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | fcntltest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | jvmsmoke | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -611,6 +611,57 @@ fn exec(cmd: &[u8]) {
                 print("fdtest: close rc=");
                 print_u64(r);
                 print("\n");
+            }
+        }
+        b"devtest" => {
+            // M12：设备框架——/dev/null 写丢弃+读 EOF；/dev/zero 读全零；
+            // /dev/urandom 读伪随机（非全零且两次不同）。
+            let mut ok = true;
+            // 1) /dev/null
+            let nfd = syscall3(SYS_OPEN, b"/dev/null\0".as_ptr() as u64, 1, 0);
+            let wr = syscall3(SYS_WRITE, nfd, b"discard me".as_ptr() as u64, 10);
+            let mut rb = [0u8; 8];
+            let rd = syscall3(SYS_READ, nfd, rb.as_mut_ptr() as u64, 8);
+            syscall3(SYS_CLOSE, nfd, 0, 0);
+            print("devtest: null wr=");
+            print_u64(wr);
+            print(" rd=");
+            print_u64(rd);
+            print("\n");
+            ok &= wr == 10 && rd == 0;
+            // 2) /dev/zero
+            let zfd = syscall3(SYS_OPEN, b"/dev/zero\0".as_ptr() as u64, 0, 0);
+            let mut zb = [0xFFu8; 16];
+            let zr = syscall3(SYS_READ, zfd, zb.as_mut_ptr() as u64, 16);
+            syscall3(SYS_CLOSE, zfd, 0, 0);
+            let zall_zero = zr == 16 && zb.iter().all(|&b| b == 0);
+            print("devtest: zero rd=");
+            print_u64(zr);
+            print(" allzero=");
+            print_u64(zall_zero as u64);
+            print("\n");
+            ok &= zall_zero;
+            // 3) /dev/urandom
+            let ufd = syscall3(SYS_OPEN, b"/dev/urandom\0".as_ptr() as u64, 0, 0);
+            let mut u1 = [0u8; 16];
+            let mut u2 = [0u8; 16];
+            let u1r = syscall3(SYS_READ, ufd, u1.as_mut_ptr() as u64, 16);
+            let u2r = syscall3(SYS_READ, ufd, u2.as_mut_ptr() as u64, 16);
+            syscall3(SYS_CLOSE, ufd, 0, 0);
+            let nonzero = u1r == 16 && u1.iter().any(|&b| b != 0);
+            let differs = u1 != u2;
+            print("devtest: urandom rd=");
+            print_u64(u1r);
+            print(" nonzero=");
+            print_u64(nonzero as u64);
+            print(" differs=");
+            print_u64(differs as u64);
+            print("\n");
+            ok &= u2r == 16 && nonzero && differs;
+            if ok {
+                print("devtest: devices ok\n");
+            } else {
+                print("devtest: devices FAIL\n");
             }
         }
         b"fstest" => {
