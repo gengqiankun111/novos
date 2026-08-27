@@ -1,4 +1,4 @@
-# Novos-OS 功能说明书
+# 山水观心操作系统功能说明书
 
 > **定位**：面向内存受限设备（256MB–2GB）的微型容器宿主 —— RTOS 的占地，Linux 的生态，Rust 的安全。
 > **本文件**：功能/特性清单说明书（"支持什么"），状态随实现推进更新。
@@ -74,10 +74,10 @@
 | Go 交叉编译 | `GOOS=linux CGO_ENABLED=0`，宿主机编译 → OTA 下发 | ◻ | M11 | DESIGN §15.1 |
 | Rust 交叉编译 | `x86_64-unknown-linux-musl` 现成 target（宿主机） | ◻ | M11 | DESIGN §15.1 |
 | C++ 交叉编译 | musl-cross + `-static -static-libstdc++ -static-libgcc`（宿主机） | ◻ | M11 | DESIGN §15.1 |
-| **Novos-SDK 基础镜像** | ld-musl + 头文件 + linker script，`--dynamic-linker` 指向 Novos 专用路径 | ◻ | M11 | DESIGN §15.2 |
+| **Novos-SDK 基础镜像** | ld-musl + 头文件 + linker script，`--dynamic-linker` 指向 `/novos/` 专用路径 | ◻ | M11 | DESIGN §15.2 |
 | **novos-check 工具** | ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）——应用合入门槛；**启动前扫描 PT_INTERP，非 `/novos/ld-musl` 拒绝启动并提示（glibc 拦截）** | ◻ | M11 | DESIGN §15.3/§21.1 |
 | **官方软件仓库** | "小而精"精选集合（core/runtime/service/net-tools），预编译 + 预配置 + 签名 + musl 完全兼容；`novos install redis` 开箱即用，内置部署模板（DESIGN §22） | ◻ | M11（清单）/ 长期 | DESIGN §22 |
-| **`novos-build` 工具** | 一键从源码构建 Novos 兼容软件包（阶段一）；源码 → OCI 镜像 + 自动 `novos-check` 验证（阶段二） | ◻ | M11 | DESIGN §22.3 |
+| **`novos-build` 工具** | 一键从源码构建 山水观心操作系统兼容软件包（阶段一）；源码 → OCI 镜像 + 自动 `novos-check` 验证（阶段二） | ◻ | M11 | DESIGN §22.3 |
 | **`novos` 软件仓库 CLI** | `novos repo-add`/`novos install`（阶段二社区仓库）/`novos deploy redis`（阶段三云端商店） | ◻ | 长期 | DESIGN §22.3 |
 | ABI 契约文档 | `docs/abi.md`：syscall 白/黑/灰名单 + 结构体/errno/调用约定 | ◻ | M11 | DESIGN §15.3 |
 | Lua / MicroPython / QuickJS | 轻量脚本运行时 | ○ | M14 | DESIGN §18.2 |
@@ -133,7 +133,7 @@
 | 能力 | 原因 |
 |---|---|
 | glibc 生态（mysql / rabbitmq / kafka / PostgreSQL） | 掉进"glibc 兼容层"陷阱，价值递减（DESIGN §14） |
-| 任意 Docker 镜像兼容（daemon/CLI） | 只跑"为 Novos 编译"的 musl 镜像（DESIGN §16） |
+| 任意 Docker 镜像兼容（daemon/CLI） | 只跑"为 山水观心操作系统编译"的 musl 镜像（DESIGN §16） |
 | 桌面 / 手机 / 平板 | 无 GPU/触摸/应用生态 |
 | 高负载服务器 | Linux 更合适，内存优势无用武之地 |
 | MCU 级（ESP32/STM32） | 内存 KB 级，跑不了 MMU 内核 |
