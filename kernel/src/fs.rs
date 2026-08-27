@@ -1153,11 +1153,23 @@ mod status_tests {
 
     #[test]
     fn vmpeak_tracks_rss() {
-        // 当前 VmPeak 以 RSS 计（无历史峰值跟踪）
+        // 当前 VmPeak 以 RSS 计（无历史峰值跟踪）——比较数值而非整行（前缀不同）
         let s = status_body("init", 1, 196, 0);
-        let peak = s.lines().find(|l| l.starts_with("VmPeak:")).unwrap();
-        let rss = s.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
-        assert_eq!(peak, rss, "VmPeak 应与 VmRSS 一致");
+        let peak = s
+            .lines()
+            .find(|l| l.starts_with("VmPeak:"))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        let rss = s
+            .lines()
+            .find(|l| l.starts_with("VmRSS:"))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        assert_eq!(peak, rss, "VmPeak 应与 VmRSS 数值一致");
     }
 
     #[test]

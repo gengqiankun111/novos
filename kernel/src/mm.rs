@@ -361,7 +361,14 @@ unsafe impl GlobalAlloc for KernelAlloc {
     }
 }
 
+// 内核 buddy/slab 分配器作为全局分配器——仅真实内核构建（非 test）：
+// host `cargo test` 由测试二进制链接 std，需用系统分配器，否则未初始化的
+// 内核堆（mm::init 未运行）会接管测试自身分配导致死循环。
+#[cfg(not(test))]
 #[global_allocator]
+static ALLOC: KernelAlloc = KernelAlloc::new();
+// host 单测桩：仅提供符号供 mm 运行期函数编译引用（单测不调用这些函数）。
+#[cfg(test)]
 static ALLOC: KernelAlloc = KernelAlloc::new();
 
 // ---- 初始化与自测 ----

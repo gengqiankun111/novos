@@ -436,8 +436,14 @@ pub fn current_cr3() -> usize {
 // ---- fork / exit / waitpid（M2 切片3）----
 
 /// fork 汇编桩（boot.asm）：把返回地址传给 `rust_fork_impl`。
+#[cfg(not(test))]
 extern "C" {
     fn fork_wrapper() -> u32;
+}
+// host 单测桩：boot.asm 不参与测试链接（fork 不会被单测调用，返回 0 占位）。
+#[cfg(test)]
+fn fork_wrapper() -> u32 {
+    0
 }
 
 /// fork 当前任务：父返回子任务 id，子返回 0（Unix 语义）。

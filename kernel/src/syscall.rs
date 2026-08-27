@@ -65,9 +65,13 @@ pub const SYS_BLK_RW: u64 = 506;
 pub const SYS_BLKFS: u64 = 507;
 
 /// boot.asm 导出的 syscall 入口。
+#[cfg(not(test))]
 extern "C" {
     fn syscall_entry();
 }
+// host 单测桩：boot.asm 不参与测试链接（init 不会被测试调用，仅需符号可解析）。
+#[cfg(test)]
+fn syscall_entry() {}
 
 fn wrmsr(msr: u32, value: u64) {
     // SAFETY: wrmsr 为特权指令；msr 为合法编号。
