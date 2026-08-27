@@ -29,6 +29,8 @@ pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
 /// `SA_*` flags。
 pub const SA_SIGINFO: u64 = 0x4;
+/// `SA_NODEFER`：handler 期间不阻塞本信号（M13-09）。
+pub const SA_NODEFER: u64 = 0x4000_0000;
 /// `SA_ONSTACK`：handler 在备用信号栈上运行（配合 sigaltstack，M13-07）。
 pub const SA_ONSTACK: u64 = 0x0800_0000;
 /// `stack_t.ss_flags`。
@@ -236,6 +238,10 @@ pub fn deliver(f: &mut ExceptionFrame, signo: u64, si_code: u64, si_addr: u64) -
     }
     // 有用户 handler：构建信号帧并改写 f
     st.pending &= !bit;
+    // M13-09：handler 执行期间阻塞 sigaction mask + 本信号（SA_NODEFER 豁免），
+    // 帧 uc_sigmask 保存投递前阻塞集，rt_sigreturn 据此恢复（防重入）。
+    let old_blocked = st.blocked;
+    st.blocked = old_blocked | st.mask | (if st.flags & SA_NODEFER == 0 { bit } else { 0 });
     // M13-07：SA_ONSTACK 且备用栈有效 → 帧放备用栈顶端（栈向下生长），否则主栈
     let use_alt = st.flags & SA_ONSTACK != 0
         && st.alt_flags & SS_DISABLE == 0
@@ -255,7 +261,7 @@ pub fn deliver(f: &mut ExceptionFrame, signo: u64, si_code: u64, si_addr: u64) -
                 uc_stack_sp: 0,
                 uc_stack_flags: 0,
                 uc_stack_size: 0,
-                uc_sigmask: st.mask,
+                uc_sigmask: old_blocked,
                 saved: *f,
                 si_signo: signo,
                 si_errno: 0,
@@ -297,6 +303,10 @@ pub fn sys_rt_sigreturn(f: &mut ExceptionFrame) {
     if frame_addr == 0 {
         return; // 无信号帧：忽略
     }
+    // M13-09：恢复投递前阻塞集（帧 uc_sigmask，+0x30）。
+    // SAFETY: 用户栈信号帧已映射。
+    let sigmask = unsafe { core::ptr::read_volatile((frame_addr + 0x30) as *const u64) };
+    cur_state().blocked = sigmask;
     let saved_addr = frame_addr + 0x38; // SigFrame.saved 偏移
     // SAFETY: 用户栈信号帧已映射。
     let saved: ExceptionFrame = unsafe { core::ptr::read_volatile(saved_addr as *const ExceptionFrame) };

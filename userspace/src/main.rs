@@ -313,6 +313,10 @@ static mut HANDLED_SIGNOS: u64 = 0;
 static mut HANDLED_ADDR: u64 = 0;
 /// handler 入口 rsp（验证是否在备用信号栈上，M13-07）。
 static mut HANDLED_RSP: u64 = 0;
+/// handler 内查询到的阻塞 mask（sigreent，M13-09）。
+static mut HANDLED_MASK: u64 = 0;
+/// handler 运行次数（sigreent，M13-09：验证不重入）。
+static mut HANDLED_COUNT: u64 = 0;
 /// 信号已触发（首次运行置位；handler 恢复后据此跳过触发段）。
 static mut SIG_ACTIVE: bool = false;
 /// setjmp 式恢复点（jmp_set 保存）。
@@ -372,6 +376,21 @@ extern "C" fn segv_handler_plain(signo: i32, info: *mut SigInfo, _uctx: *mut UCo
     unsafe {
         HANDLED_SIGNOS = signo as u64;
         HANDLED_ADDR = (*info).addr;
+    }
+    syscall3(SYS_RT_SIGRETURN, 0, 0, 0);
+    loop {}
+}
+
+/// 纯记录 handler（sigreent，M13-09）：查询当前阻塞 mask（应含本信号位——
+/// handler 期间同信号被阻塞）后 rt_sigreturn 返回。
+extern "C" fn usr1_handler(signo: i32, _info: *mut SigInfo, _uctx: *mut UContext) -> ! {
+    // SAFETY: 内核保证参数有效；单核测试环境。
+    unsafe {
+        HANDLED_SIGNOS = signo as u64;
+        let mut cur: u64 = 0;
+        syscall6(SYS_RT_SIGPROCMASK, 2 /*SIG_SETMASK*/, 0, &mut cur as *mut u64 as u64, 8, 0, 0);
+        HANDLED_MASK = cur;
+        HANDLED_COUNT += 1;
     }
     syscall3(SYS_RT_SIGRETURN, 0, 0, 0);
     loop {}
@@ -533,7 +552,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigmasktest | tfdtest | sftest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2473,6 +2492,48 @@ fn exec(cmd: &[u8]) {
                 print("sigmasktest: sigprocmask ok\n");
             } else {
                 print("sigmasktest: sigprocmask FAIL\n");
+            }
+        }
+        b"sigreent" => {
+            // M13-09：handler 期间阻塞本信号（SA_NODEFER 豁免）→ rt_sigreturn
+            // 恢复投递前 mask。注册 SIGUSR1 handler → kill 自投递 → handler 内
+            // 查询 mask（应含 SIGUSR1 位）→ 返回后 mask 应回到投递前值。
+            // SAFETY: 单核测试环境。
+            unsafe { HANDLED_COUNT = 0; HANDLED_MASK = 0; }
+            const SIGUSR1: u64 = 10;
+            let act = SigAction { handler: usr1_handler as usize as u64, flags: SA_SIGINFO, restorer: 0, mask: 0 };
+            let rc = syscall6(SYS_RT_SIGACTION, SIGUSR1, &act as *const SigAction as u64, 0, 8, 0, 0);
+            print("sigreent: sigaction rc=");
+            print_u64(rc);
+            print("\n");
+            // 投递前 mask 基线
+            let mut base: u64 = 0;
+            syscall6(SYS_RT_SIGPROCMASK, 2 /*SETMASK*/, 0, &mut base as *mut u64 as u64, 8, 0, 0);
+            print("sigreent: pre_mask=");
+            print_u64(base);
+            print("\n");
+            // kill 自投递 → handler 运行（期间 SIGUSR1 被阻塞）
+            let krc = syscall3(SYS_KILL, 1, SIGUSR1, 0);
+            print("sigreent: kill rc=");
+            print_u64(krc);
+            print("\n");
+            // 恢复后 mask 应回到投递前
+            let mut post: u64 = 0;
+            syscall6(SYS_RT_SIGPROCMASK, 2 /*SETMASK*/, 0, &mut post as *mut u64 as u64, 8, 0, 0);
+            // SAFETY: 单核测试环境。
+            let in_handler = unsafe { HANDLED_MASK };
+            let count = unsafe { HANDLED_COUNT };
+            print("sigreent: in_handler_mask=");
+            print_u64(in_handler);
+            print(" post_mask=");
+            print_u64(post);
+            print("\n");
+            let blocked_ok = (in_handler & (1 << (SIGUSR1 - 1))) != 0;
+            let restored_ok = post == base;
+            if rc == 0 && krc == 0 && count == 1 && blocked_ok && restored_ok {
+                print("sigreent: mask semantics ok\n");
+            } else {
+                print("sigreent: mask semantics FAIL\n");
             }
         }
         b"sigtest" => {
