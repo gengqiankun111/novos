@@ -203,7 +203,15 @@
 - [ ] 看门狗 + 掉电保护（日志原子写 / FS 一致性）。
 - [ ] **环形日志落盘**：内核日志异步写 `/var/log/kernel.log`，内存缓冲 → 批量写 Ext4（§10.1→§19.2 衔接）。
 - [ ] **健康指标暴露**：`/proc/health` 输出 JSON：内存 used/free、fd 数、容器数、CPU 负载。
-- [ ] **top 系统监控工具**：Rust 静态编译（<100KB），读 `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat`（DESIGN §10.2/§18.3）。
+- [ ] **top 数据源（/proc 扩展）**：
+  - [ ] **`/proc/stat`**：CPU 总时间 / 各态时间、中断计数、上下文切换次数（DESIGN §10.2）；
+  - [ ] **`/proc/loadavg`**：1/5/15 分钟负载平均值；
+  - [ ] **`/proc/<pid>/stat`**：每进程 pid、状态、utime/stime、rss、vsize。
+- [ ] **编写 top 命令**（Rust，静态编译，<100KB，`--features top`）：
+  - 循环读取 `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat`，计算进程 CPU 占用率；
+  - 交互式界面（crossterm 或简单 ANSI 转义），刷新间隔 1s；
+  - 支持按 CPU/内存排序、按键 `q` 退出、`h` 帮助。
+- [ ] 将 top 放入默认 rootfs（`/bin/top`），在 M15 用户文档中说明使用方法。
 - [ ] 可观测性：环形日志 + 落盘 + 健康指标（内存/fd/CPU）。
 
 **验收标准**：
@@ -222,6 +230,7 @@
 
 - [ ] `BlockDevice` trait + virtio-blk 驱动。
 - [ ] BIO 层（简单队列 + 同步 I/O + **错误重试：读失败返回 EIO，写失败重试 3 次（间隔 10ms），超时 5s**）。
+- [ ] **电梯调度（Deadline，可选）**：READ 优先 + 写 LBA 合并的极简 Deadline（`--features block-scheduler`，对应 M13 评估项）。
 - [ ] Page Cache（`AddressSpace`：文件偏移 → 物理页，可 shrink）。
 - [ ] ext4 驱动：`data=journal` 完整模式（防掉电损坏）。
 - [ ] `mmap MAP_SHARED` 文件映射（多进程共享物理页）。
@@ -240,7 +249,8 @@
 - [ ] futex 系统调用（WAIT/WAKE/REQUEUE，**逻辑键索引**，支持 COW 迁移）。
 - [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR。
 - [ ] **宿主机交叉编译工具链**：musl-cross + `crt1.o` + linker script。
-- [ ] **`novos-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（M14 应用合入门槛）；**启动前扫描 `PT_INTERP`，非 `/novos/ld-musl` 拒绝启动并提示**（glibc 拦截，DESIGN §21.1）。
+- [ ] **`novos-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（RSS+虚拟内存），不通过禁止合入；**启动前扫描 `PT_INTERP`，非 `/novos/ld-musl` 拒绝启动并提示**（glibc 拦截，DESIGN §21.1）。
+- [ ] **动态链接依赖检查**：`novos-check` 解析 `DT_NEEDED` 依赖链，确认 ld.so 均位于 `/novos/` 下（`/novos/ld-musl-x86_64.so.1` 路径校验）。
 - [ ] **官方推荐软件清单（阶段一）**：文档页表格列出软件/功能/官方地址/官方验证 musl 静态二进制链接（core/runtime/service/net-tools 四类，DESIGN §22）；配套 `novos-build` 一键构建；**立即产出《为 山水观心操作系统构建 Redis》musl 静态编译指南**（Redis 7.2.4+）。
 
 **验收标准**：
@@ -253,6 +263,7 @@
 **目标**：Docker 安全模型 + 完整设备文件。
 
 - [ ] **驱动框架定型**：bus→device→driver + BSP + 中断分发。
+- [ ] **设备类型增加 GPU（BusType::Gpu）**：为 M16 图形版预留接口（`feature = "gpu"`，DESIGN §6.2⑤/§13.16）。
 - [ ] 标准设备：`/dev/null`、`/dev/zero`、`/dev/urandom`、`/dev/ptmx`。
 - [ ] Capabilities：`TaskCreds`（permitted/effective/inheritable/bounding）。
 - [ ] Seccomp BPF：参数值匹配（eq/ne/masked_eq，覆盖 mount/ptrace/openat 等 10 个高风险调用）。
@@ -288,8 +299,14 @@
 - [ ] **Redis 部署模板**：预置只读 `/etc/redis/redis.conf`（Immutable），`--maxmemory 64mb`、禁 RDB、只开 AOF——用户无法 `-c` 覆盖导致 OOM（DESIGN §21.2）。
 - [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖）。
 - [ ] 移植 **SQLite**（musl 静态，CRUD + WAL） + **Redis**（**部署模板强制**：`--maxmemory 64mb`、禁 RDB、只开 AOF）。
+- [ ] **实现 novos-gateway**（`--features gateway`，Rust 静态编译，纯用户态）：
+  - [ ] **配置格式**（TOML）：监听端口、上游服务、路由规则、TLS 证书路径（示例 `/etc/novos/gateway.toml`）；
+  - [ ] **HTTP/1.1 服务**（基于 M5 TCP/socket）+ **TLS（rustls）**（80/443）；
+  - [ ] **反向代理核心**：`ProxyPass` 转发到容器后端，注入 `X-Forwarded-For`，keep-alive 连接池；
+  - [ ] **WebSocket 升级**（用于 Web 管理界面的实时日志）；
+  - [ ] **系统服务集成**：`novos gateway start/stop/status`，支持守护进程（fork/daemonize）；
+  - [ ] **默认配置**：监听 80/443，`/api/` 转发容器后端，静态文件服务 `/ui/`（Web 管理界面）。
 - [ ] （值得）内置 Web 管理界面 + SSH（dropbear）+ Agent 主动上联。
-- [ ] **novos-gateway**：HTTP/1.1 + TLS（rustls）+ 反向代理 + WebSocket 升级，承载 Web 管理界面（DESIGN §18.3，`--features gateway`，纯用户态，不依赖内核新功能）。
 
 **验收标准**：
 - `novos run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问。
@@ -338,13 +355,53 @@
 > 与 Core（M0–M15）**独立核算**：图形版内存目标 **≥128MB**（DESIGN §2.4），不适用 32MB/40MB 断言。
 > 阶段规划见 DESIGN_EXTENSION §4.1（主线四），内核侧最小显示子集见 DESIGN §13.16。
 
-| 阶段 | 任务 | 设计依据 | 依赖 | 验收 |
-|---|---|---|---|---|
-| M16-1 | `/dev/fb*` 帧缓冲设备 + `/dev/tty0` 虚拟终端（`feature = "framebuffer"`） | DESIGN §13.16 | M12 设备框架 | QEMU `-vga virtio` 下 `/dev/fb0` mmap 写像素可见 |
-| M16-2 | DRM KMS 最小子集：`mode_set` / `page_flip` / VBlank（`feature = "drm"`，virtio-gpu/bochs-drm） | DESIGN §6.2⑤、§13.16 | M16-1 | 模式切换 + 页翻转无撕裂；VBlank 中断计数正确 |
-| M16-3 | 用户态 Wayland 合成器（weston 精简版或自定义） + 最小窗口管理 | DESIGN §13.16 | M16-2 | 两个窗口叠加渲染到帧缓冲 |
-| M16-4 | 图形库（minifb/egui/fltk 选型）+ 系统监视器（GUI 版 top） | DESIGN §13.16、§10.2 | M16-3 + M9 top | 实时显示 CPU/内存曲线 |
-| M16-5 | 桌面应用：文件管理器（左侧"文档/下载/桌面"）+ 终端 + 设置面板 | DESIGN §3.6、§19.3、§20.1 | M16-4 | 文件管理器浏览/复制/删除；盘符视图（C:/D:）可用 |
+#### M16-1：帧缓冲设备（`/dev/fb*`，`feature = "framebuffer"`）
+
+- [ ] 实现 **fbdev 框架**：注册帧缓冲设备，提供 `open/read/write/mmap/ioctl` 接口；
+- [ ] 支持 **FBIOGET_VSCREENINFO / FBIOPUT_VSCREENINFO**：查询/设置分辨率与色深；
+- [ ] QEMU `-vga virtio` 下初始化 **virtio-gpu**（或 bochs-display）设备；
+- [ ] 分配**线性帧缓冲内存**（DMA 区），暴露给用户态 `mmap`；
+- [ ] 命令行冒烟：`dd if=/dev/zero of=/dev/fb0 bs=1024 count=1024` 清屏；
+- [ ] `/dev/tty0` 虚拟终端（`console=tty0`），与 UART 输出并存。
+
+**验收**：QEMU 下 `/dev/fb0` mmap 写像素可见；`FBIOGET_VSCREENINFO` 返回正确分辨率。
+
+#### M16-2：DRM KMS 最小子集（`feature = "drm"`）
+
+- [ ] **drm 核心**：设备注册、`drm_open`、`drm_ioctl` 分发；
+- [ ] **KMS 接口**：`drm_mode_set_crtc`、`drm_mode_page_flip`、VBlank 中断处理；
+- [ ] virtio-gpu 3D 加速（可选，可先只做 2D scanout）；
+- [ ] 测试程序：设置分辨率、执行 page flip，观察画面无撕裂。
+
+**验收**：模式切换 + 页翻转无撕裂；VBlank 中断计数正确（DESIGN §6.2⑤ GPU trait）。
+
+#### M16-3：用户态 Wayland 合成器（轻量）
+
+- [ ] 移植或编写**简化版 Wayland 合成器**（weston 精简配置或自定义轻量实现）；
+- [ ] 实现 `wl_display` / `wl_compositor` 接口，支持创建 `wl_surface` 与 `wl_shell`；
+- [ ] 在帧缓冲上渲染**两个窗口**（终端 + 系统监视器），支持拖动与调整大小（最小化）。
+
+**验收**：两个窗口叠加渲染到帧缓冲，窗口可拖动/缩放。
+
+#### M16-4：图形库 + 系统监视器 GUI
+
+- [ ] 图形库选型：推荐 **egui 或 fltk-rs**（轻量）；
+- [ ] 实现 **novos-monitor**：CPU 曲线、内存柱状图、进程列表；
+- [ ] 与 top **共享数据源**（读 `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat`），可视化实时刷新。
+
+**验收**：实时显示 CPU/内存曲线与进程列表（数据与 top 一致）。
+
+#### M16-5：桌面应用 – 文件管理器（novos-fm）+ 盘符视图
+
+- [ ] **novos-fm**（用户态）：
+  - 左侧固定显示 **"文档/下载/桌面"** 三个目录（用户家目录下创建）；
+  - 右侧显示当前目录文件列表（图标 + 名称 + 大小 + 修改时间）；
+  - 单击进入子目录，双击打开文件（调用默认程序）；
+  - 地址栏显示路径，支持输入路径跳转；
+- [ ] **盘符模拟（C:/ D:）**：绑定挂载 `/mnt/c` → `/C`，在文件管理器界面映射为 `C:` 标签（用户态，DESIGN §3.6）；
+- [ ] 文件**复制/移动/删除**（经系统调用）。
+
+**验收**：文件管理器浏览/复制/删除可用；盘符视图（C:/D:）与"文档/下载/桌面"快捷入口可用。
 
 **内存断言**：`--features full,gui` 构建后 `kernel_used ≤ 128MB`（DESIGN §5.3、§10.3），
 与 minimal/full 断言互不混用。
