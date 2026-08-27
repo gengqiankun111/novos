@@ -56,6 +56,7 @@ if ($Mode -eq "boot") {
         "elf/dyn: bad-magic rejected ok",      # M11-切片5：坏镜像拒绝
         "elf/dyn: self-test PASS",             # M11-切片5：解析自测通过
         "fs/proc: status self-test PASS",      # M13-02：/proc/self/status 自测通过
+        "m13/mem: baseline total=",            # M13-14：内存基线（受管区守恒）
         "m3/elf: static (no PT_INTERP)",       # M11-切片5：init 为静态 ELF
         "m3/elf: no PT_DYNAMIC (static)",      # M11-切片5：无动态段
         "m3/elf: user stack",                  # M11-切片5：辅助向量栈帧
@@ -112,7 +113,7 @@ if ($Mode -eq "boot") {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
         # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
         # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`nsigreent`ntfdtest`nsftest`nsigtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nmemtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`nsigreent`ntfdtest`nsftest`nsigtest`n"
         foreach ($one in ($cmd -split "`n")) {
             if ($one.Length -eq 0) { continue }
             $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
@@ -286,7 +287,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit",
         "Shanshui-guanxin userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -364,6 +365,8 @@ if ($Mode -eq "boot") {
         "healthtest: cpuinfo online=1 ok",    # M9-切片1：/proc/cpuinfo 多核报告
         "healthtest: container counted ok",   # M9-切片1：容器存活期间 containers=1
         "healthtest: reaped=",                # M9-切片1：容器回收
+        "memtest: total=",                    # M13-14：/proc/meminfo 字段
+        "memtest: memory baseline ok",        # M13-14：used+free==total 守恒
         "blktest: write rc=0",                # M10-切片1：BIO 写扇区成功
         "blktest: read rc=0 data=blk-hello-shanshui-guanxin", # M10-切片1：读回一致
         "blktest: sector roundtrip ok",       # M10-切片1：扇区往返验证

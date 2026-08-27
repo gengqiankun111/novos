@@ -77,13 +77,19 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
     shanshui_guanxin_kernel::elf::self_test();
     // M13-02 自测：/proc/self/status 字段齐全 + 顺序 + 数值可解析。
     shanshui_guanxin_kernel::fs::status_self_test();
+    // M13-14：内存基线——受管区守恒校验（used + free == total）。
     let stats = mm::mem_stats();
+    let managed = mm::MEM_END - mm::MEM_START;
+    let used = stats.buddy_pages + stats.slab_pages;
+    let free = mm::free_page_count();
+    let conserve = used + free == managed / 4096;
     println!(
-        "mm stats: buddy_pages={} slab_pages={} kernel_used={} B free_pages={}",
-        stats.buddy_pages,
-        stats.slab_pages,
-        stats.kernel_used_bytes,
-        mm::free_page_count()
+        "m13/mem: baseline total={}kB used={}kB free={}kB slab={}kB conserve={}",
+        managed / 1024,
+        used * 4096 / 1024,
+        free * 4096 / 1024,
+        stats.slab_pages * 4096 / 1024,
+        conserve
     );
 
     // M4 切片3：dcache（FNV-1a + LRU + shrink）
