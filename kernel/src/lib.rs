@@ -22,6 +22,7 @@ pub mod dcache;
 pub mod block;
 pub mod elf;
 pub mod ext4;
+pub mod flock;
 pub mod fs;
 pub mod futex;
 pub mod gdt;
