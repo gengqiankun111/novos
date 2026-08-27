@@ -349,4 +349,104 @@ mod tests {
         }
         assert!(t.is_empty());
     }
+
+    #[test]
+    fn empty_tree_queries() {
+        let t = RbTree::new();
+        assert!(t.is_empty());
+        assert_eq!(t.min(), None);
+        assert_eq!(t.count, 0);
+    }
+
+    #[test]
+    fn single_node_roundtrip() {
+        let mut t = RbTree::new();
+        t.insert(0, 100);
+        assert!(!t.is_empty());
+        assert_eq!(t.count, 1);
+        assert_eq!(t.min(), Some(0));
+        t.remove(0);
+        assert!(t.is_empty());
+        assert_eq!(t.min(), None);
+        assert_eq!(t.count, 0);
+    }
+
+    #[test]
+    fn duplicate_keys_both_retained() {
+        let mut t = RbTree::new();
+        t.insert(0, 5);
+        t.insert(1, 5);
+        t.insert(2, 9);
+        assert_eq!(t.count, 3);
+        // 等键走右分支：min 恒为第一个插入者（id 0）
+        assert_eq!(t.min(), Some(0));
+        t.remove(0);
+        assert_eq!(t.min(), Some(1));
+        t.remove(1);
+        assert_eq!(t.min(), Some(2));
+        t.remove(2);
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn extreme_keys_min() {
+        let mut t = RbTree::new();
+        t.insert(0, u64::MAX);
+        t.insert(1, 0); // u64::MIN
+        t.insert(2, u64::MAX / 2);
+        assert_eq!(t.count, 3);
+        assert_eq!(t.min(), Some(1));
+        black_height(&t, t.root);
+        t.remove(1);
+        assert_eq!(t.min(), Some(2)); // 剩 MAX/2 与 MAX
+        black_height(&t, t.root);
+    }
+
+    #[test]
+    fn full_pool_roundtrip() {
+        let mut t = RbTree::new();
+        // 填满 16 槽，key 乱序
+        let keys = [4u64, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225, 256, 1];
+        for (i, k) in keys.iter().enumerate() {
+            t.insert(i, *k);
+        }
+        assert_eq!(t.count, MAX_RB_NODES);
+        black_height(&t, t.root);
+        assert_eq!(t.min(), Some(15)); // key 1 最小
+        for i in 0..MAX_RB_NODES {
+            t.remove(i);
+        }
+        assert!(t.is_empty());
+        assert_eq!(t.count, 0);
+    }
+
+    #[test]
+    fn remove_min_repeatedly_ascends() {
+        let mut t = RbTree::new();
+        let keys = [50u64, 30, 70, 20, 40, 60, 80, 10];
+        for (i, k) in keys.iter().enumerate() {
+            t.insert(i, *k);
+        }
+        // key 升序 → 节点：10→7, 20→3, 30→1, 40→4, 50→0, 60→5, 70→2, 80→6
+        for expect in [7, 3, 1, 4, 0, 5, 2, 6] {
+            assert_eq!(t.min(), Some(expect), "删除后 min 应逐级上升");
+            t.remove(expect);
+        }
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn min_untouched_by_removing_largest() {
+        let mut t = RbTree::new();
+        let keys = [50u64, 30, 70, 20, 40];
+        for (i, k) in keys.iter().enumerate() {
+            t.insert(i, *k);
+        }
+        t.remove(0); // key 50
+        t.remove(2); // key 70
+        assert_eq!(t.min(), Some(3)); // key 20 不受影响
+        black_height(&t, t.root);
+        t.remove(3);
+        assert_eq!(t.min(), Some(1)); // key 30
+    }
 }
