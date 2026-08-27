@@ -204,6 +204,48 @@ pub fn wake(id: usize) {
     }
 }
 
+/// 唤醒阻塞/睡眠任务（M11-切片4：futex 带超时等待被显式 WAKE 时用）。
+pub fn wake_any(id: usize) {
+    // SAFETY: 单核写；cli 保护树操作。
+    unsafe {
+        if id != 0
+            && (TASKS[id].state == TaskState::Blocked || TASKS[id].state == TaskState::Sleeping)
+        {
+            TASKS[id].state = TaskState::Ready;
+            if !TASKS[id].in_rq {
+                crate::smp::cpu_rq(0).rbt.insert(id, TASKS[id].vruntime);
+                TASKS[id].in_rq = true;
+            }
+        }
+    }
+}
+
+/// 带截止时刻的阻塞（M11-切片4：futex WAIT 超时）：置 Sleeping + sleep_until，
+/// hlt 直到被 tick 唤醒（截止到）或 futex WAKE 显式唤醒。
+pub fn sleep_deadline(deadline: u64) {
+    // SAFETY: 任务上下文，单核。
+    unsafe {
+        crate::sync::cli();
+        let cur = CURRENT;
+        TASKS[cur].sleep_until = deadline;
+        TASKS[cur].state = TaskState::Sleeping;
+        if TASKS[cur].in_rq {
+            crate::smp::cpu_rq(0).rbt.remove(cur);
+            TASKS[cur].in_rq = false;
+        }
+        crate::sync::sti();
+        // hlt 可被任何中断唤醒后返回；未到截止/未被 WAKE 时继续等。
+        // state 用 volatile 读：hlt 带 options(nomem)，否则编译器会把
+        // TASKS[cur].state 提升到循环外（tick 唤醒不再可见）→ 死循环。
+        while unsafe {
+            core::ptr::read_volatile(core::ptr::addr_of!(TASKS[cur].state) as *const TaskState)
+        } == TaskState::Sleeping
+        {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
+    }
+}
+
 /// 创建内核线程（栈经 mm 分配；任务函数必须永不返回，结束前自行停机/睡眠）。
 pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static str> {
     // SAFETY: 创建线程仅在启动阶段（单核、无并发）调用。
@@ -298,7 +340,7 @@ pub unsafe fn on_timer_tick(frame: *mut ExceptionFrame) -> *mut ExceptionFrame {
 
     // 唤醒到期睡眠任务并入树（clamp 到最小 vruntime 防饿死）
     let min_vruntime = rq.rbt.min().map(|id| TASKS[id].vruntime);
-    for i in 1..TASK_COUNT {
+    for i in 1..MAX_TASKS {
         if TASKS[i].state == TaskState::Sleeping && TASKS[i].sleep_until <= now {
             TASKS[i].state = TaskState::Ready;
             if let Some(m) = min_vruntime {
@@ -535,7 +577,7 @@ pub fn exit() {
         if TASKS[cur].flags & 0x0020_0000 != 0 && tidp != 0 {
             // SAFETY: 用户地址恒等映射。
             unsafe { core::ptr::write_volatile(tidp as *mut u32, 0) };
-            crate::futex::futex(tidp, 1, 1); // WAKE 1 个
+            crate::futex::futex(tidp, 1, 1, 0, 0); // WAKE 1 个
         }
         crate::vmm::release_as(cur);
         TASKS[cur].state = TaskState::Exited;

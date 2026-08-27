@@ -182,7 +182,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_UNLINK => sys_unlink(a1),
         SYS_GETCWD => sys_getcwd(a1, a2),
         SYS_CHDIR => sys_chdir(a1),
-        SYS_FUTEX => sys_futex(a1, a2, a3),
+        SYS_FUTEX => sys_futex(a1, a2, a3, a4, a5),
         SYS_ARCH_PRCTL => sys_arch_prctl(a1, a2),
         SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
         SYS_CT_STAT => sys_ct_stat(a1),
@@ -371,10 +371,11 @@ fn sys_chdir(path: u64) -> u64 {
     }
 }
 
-/// futex(addr, op, val)：共享内存同步（M11-切片1）。
-fn sys_futex(uaddr: u64, op: u64, val: u64) -> u64 {
+/// futex(addr, op, val, arg4, arg5)：共享内存同步（M11-切片1/4）。
+/// WAIT 时 arg4 为超时 tick（0 = 无限）；REQUEUE/CMP_REQUEUE 用 arg4/arg5。
+fn sys_futex(addr: u64, op: u64, val: u64, arg4: u64, arg5: u64) -> u64 {
     // SAFETY: 用户地址恒等映射，由 futex 模块校验语义。
-    unsafe { crate::futex::futex(uaddr, op, val) }
+    unsafe { crate::futex::futex(addr, op, val, arg4, arg5) }
 }
 
 /// arch_prctl(code, addr)：TLS 段基址（FS base）设置/查询（M11-切片2）。
