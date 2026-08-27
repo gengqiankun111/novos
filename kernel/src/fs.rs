@@ -347,6 +347,28 @@ pub fn filesystems_inode() -> Arc<Inode> {
 /// /proc/self（M13-01：当前任务视图，指针相等判定）。
 pub static SELF_DIR: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| Inode::dir());
 
+/// /proc/self/fd（M13-04）：当前进程打开的文件描述符目录。
+pub static SELF_FD_DIR: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| Inode::dir());
+
+/// 打开中的 fd 列表（M13-04）。
+pub fn open_fds() -> alloc::vec::Vec<usize> {
+    let tbl = FD_TABLE.lock();
+    let mut v = alloc::vec::Vec::new();
+    for (i, s) in tbl.slots.iter().enumerate() {
+        if s.is_some() {
+            v.push(i);
+        }
+    }
+    v
+}
+
+/// /proc/self/fd/N 链接 inode（内容 = 目标路径，readlink 可读）。
+pub fn fd_link_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    *ino.data.lock() = b"/dev/uart\0".to_vec();
+    ino
+}
+
 /// /proc/self/maps（M13-01）：当前进程地址空间映射。
 pub fn maps_inode() -> Arc<Inode> {
     let ino = Inode::file();
@@ -529,9 +551,11 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     let mut cur = ROOT.clone();
     // overlay 遍历状态：(upper 当前目录(可 None), lower 当前目录(可 None))
     let mut ov: Option<(Option<Arc<Inode>>, Option<Arc<Inode>>)> = None;
-    // proc 挂载内标记（M9-切片1：health/cpuinfo 特殊文件；M13-01：self/maps）
+    // proc 挂载内标记（M9-切片1：health/cpuinfo 特殊文件；M13-01：self/maps；
+    // M13-02：status；M13-03：exe；M13-04：fd）
     let mut proc_active = false;
     let mut proc_self = false;
+    let mut proc_self_fd = false;
     let mut acc = String::from("/"); // 累积路径（挂载点匹配）
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     for (i, comp) in comps.iter().enumerate() {
@@ -594,6 +618,22 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
             cur = exe_inode();
             proc_self = false;
             continue;
+        }
+        // M13-04：/proc/self/fd → 打开的文件描述符目录；fd/N → 链接
+        if proc_self && *comp == "fd" {
+            cur = SELF_FD_DIR.clone();
+            proc_self = false;
+            proc_self_fd = true;
+            continue;
+        }
+        if proc_self_fd {
+            if let Ok(fd) = comp.parse::<u64>() {
+                if open_fds().contains(&(fd as usize)) {
+                    cur = fd_link_inode();
+                    proc_self_fd = false;
+                    continue;
+                }
+            }
         }
         // overlay 内：upper 优先，其次 lower；.wh.* 白标记视为已删除（M7-切片2）
         if let Some((up, low)) = ov.take() {
@@ -1033,13 +1073,21 @@ fn visible_children(ino: &Inode) -> Vec<Dentry> {
         kids.push(Dentry { name: String::from("filesystems"), inode: Inode::file() });
         return kids;
     }
-    // M13-01/02/03：/proc/self 下 maps + status + exe
+    // M13-01/02/03/04：/proc/self 下 maps + status + exe + fd
     if ino as *const Inode as usize == Arc::as_ptr(&SELF_DIR) as usize {
         return alloc::vec![
             Dentry { name: String::from("maps"), inode: Inode::file() },
             Dentry { name: String::from("status"), inode: Inode::file() },
             Dentry { name: String::from("exe"), inode: Inode::file() },
+            Dentry { name: String::from("fd"), inode: SELF_FD_DIR.clone() },
         ];
+    }
+    // M13-04：/proc/self/fd 列出打开的文件描述符
+    if ino as *const Inode as usize == Arc::as_ptr(&SELF_FD_DIR) as usize {
+        return open_fds()
+            .iter()
+            .map(|fd| Dentry { name: alloc::format!("{}", fd), inode: Inode::file() })
+            .collect();
     }
     if let Some(merged) = overlay_merged_children(ino) {
         return merged;
