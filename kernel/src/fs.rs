@@ -325,17 +325,12 @@ pub fn maps_inode() -> Arc<Inode> {
     ino
 }
 
-/// /proc/self/status（M13-02）：当前进程状态（VmRSS/VmPeak/Threads/Uid/Gid）。
+/// 生成 `/proc/self/status` 文本（纯函数，便于单元测试）。
+/// 字段为 Linux 对齐子集：Name/State/Tgid/Pid/PPid/Uid/Gid/VmPeak/VmSize/VmRSS/Threads 等。
 /// 注：第一版单用户（Uid/Gid=0）；Threads=1（无 tgid 跟踪，进程级视图）；
 /// VmPeak 暂以当前 RSS 计（无历史峰值跟踪）。
-pub fn status_inode() -> Arc<Inode> {
-    let ino = Inode::file();
-    let pid = crate::task::current_pid();
-    let name = crate::task::current_name();
-    let cr3 = crate::task::current_cr3();
-    let rss_kb = (crate::page_table::count_user_pages(cr3) * crate::vmm::PAGE_SIZE) / 1024;
-    let vsize_kb = crate::vmm::vsize_bytes() / 1024;
-    let body = alloc::format!(
+fn status_body(name: &str, pid: u32, rss_kb: usize, vsize_kb: usize) -> alloc::string::String {
+    alloc::format!(
         "Name:\t{}\nState:\tR (running)\nTgid:\t{}\nPid:\t{}\nPPid:\t0\nTracerPid:\t0\n\
          Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nFDSize:\t256\nGroups:\t0\n\
          VmPeak:\t{:>6} kB\nVmSize:\t{:>6} kB\nVmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t{:>6} kB\nVmRSS:\t{:>6} kB\n\
@@ -352,9 +347,87 @@ pub fn status_inode() -> Arc<Inode> {
         rss_kb,
         rss_kb,
         rss_kb
-    );
-    *ino.data.lock() = body.into_bytes();
+    )
+}
+
+/// /proc/self/status（M13-02）：当前进程状态（VmRSS/VmPeak/Threads/Uid/Gid）。
+pub fn status_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    let pid = crate::task::current_pid();
+    let name = crate::task::current_name();
+    let cr3 = crate::task::current_cr3();
+    let rss_kb = (crate::page_table::count_user_pages(cr3) * crate::vmm::PAGE_SIZE) / 1024;
+    let vsize_kb = crate::vmm::vsize_bytes() / 1024;
+    *ino.data.lock() = status_body(name, pid, rss_kb, vsize_kb).into_bytes();
     ino
+}
+
+/// /proc/self/status 启动自测（M13-02）：字段齐全、相对顺序正确、数值可解析、
+/// Threads=1、单用户 root（Uid/Gid=0）。QEMU boot 模式断言 `fs/proc: status self-test PASS`。
+pub fn status_self_test() {
+    let ino = status_inode();
+    let data = ino.data.lock().clone();
+    let s = core::str::from_utf8(&data).unwrap_or("");
+    let mut ok = true;
+    let mut check = |cond: bool, label: &str, ok: &mut bool| {
+        if cond {
+            crate::println!("fs/proc: {label} ok");
+        } else {
+            crate::println!("fs/proc: {label} FAIL");
+            *ok = false;
+        }
+    };
+    // 字段齐全（Linux 必需子集）
+    let fields = [
+        "Name:", "State:", "Tgid:", "Pid:", "PPid:", "Uid:", "Gid:", "FDSize:",
+        "VmPeak:", "VmSize:", "VmRSS:", "Threads:", "Seccomp:",
+    ];
+    for f in fields {
+        check(s.contains(f), &alloc::format!("field {f}"), &mut ok);
+    }
+    // 相对顺序：Name < Uid < VmRSS < Threads
+    let name = s.find("Name:").unwrap_or(usize::MAX);
+    let uid = s.find("Uid:").unwrap_or(usize::MAX);
+    let vmrss = s.find("VmRSS:").unwrap_or(usize::MAX);
+    let threads = s.find("Threads:").unwrap_or(usize::MAX);
+    check(
+        name < uid && uid < vmrss && vmrss < threads,
+        "field order Name<Uid<VmRSS<Threads",
+        &mut ok,
+    );
+    // Threads 固定为 1（进程级视图）
+    check(s.contains("Threads:\t1\n"), "Threads=1", &mut ok);
+    // 单用户 root
+    check(
+        s.contains("Uid:\t0\t0\t0\t0\n") && s.contains("Gid:\t0\t0\t0\t0\n"),
+        "Uid/Gid=root",
+        &mut ok,
+    );
+    // VmRSS / VmSize 数值可解析（"VmRSS:\t   N kB"）
+    let rss = s.find("VmRSS:").and_then(|p| {
+        let line = &s[p..];
+        let n = line.find('\n')?;
+        line[..n].split_whitespace().nth(1)?.parse::<u64>().ok()
+    });
+    let vsize = s.find("VmSize:").and_then(|p| {
+        let line = &s[p..];
+        let n = line.find('\n')?;
+        line[..n].split_whitespace().nth(1)?.parse::<u64>().ok()
+    });
+    check(rss.is_some(), "VmRSS numeric", &mut ok);
+    check(vsize.is_some(), "VmSize numeric", &mut ok);
+    // VmPeak 当前以 RSS 计
+    let peak = s.find("VmPeak:").and_then(|p| {
+        let line = &s[p..];
+        let n = line.find('\n')?;
+        line[..n].split_whitespace().nth(1)?.parse::<u64>().ok()
+    });
+    check(peak == rss, "VmPeak==VmRSS", &mut ok);
+    if ok {
+        crate::println!("fs/proc: status self-test PASS");
+    } else {
+        crate::println!("fs/proc: status self-test FAIL");
+    }
 }
 
 /// 挂载 overlay：lower = source 目录（只读），upper = 新建可写层。
@@ -1025,4 +1098,87 @@ pub fn fd_close(fd: usize) -> bool {
 /// 取 fd 对应文件。
 pub fn fd_get(fd: usize) -> Option<Arc<File>> {
     FD_TABLE.lock().get(fd)
+}
+
+// ---- /proc/self/status 单元测试（M13-02）----
+//
+// 说明：内核为 no_std 裸机，host `cargo test` 无法编译（boot.asm 的 .note.Xen），
+// 本模块与 rbtree 的 `#[cfg(test)]` 同属"可独立验证的纯逻辑单测"约定；
+// 运行期可执行验证走 QEMU 启动自测 `status_self_test`（boot 模式断言 PASS）。
+#[cfg(test)]
+mod status_tests {
+    use super::status_body;
+
+    #[test]
+    fn has_all_fields() {
+        let s = status_body("init", 1, 196, 8192);
+        for f in [
+            "Name:", "State:", "Tgid:", "Pid:", "PPid:", "Uid:", "Gid:", "FDSize:",
+            "VmPeak:", "VmSize:", "VmRSS:", "RssAnon:", "Threads:", "Seccomp:",
+            "Cpus_allowed:", "voluntary_ctxt_switches:",
+        ] {
+            assert!(s.contains(f), "missing field {f}");
+        }
+    }
+
+    #[test]
+    fn embeds_name_pid() {
+        let s = status_body("init", 42, 0, 0);
+        assert!(s.starts_with("Name:\tinit\n"), "Name 行应为首行");
+        assert!(s.contains("Tgid:\t42\n"), "Tgid 行");
+        assert!(s.contains("Pid:\t42\n"), "Pid 行");
+        assert!(s.contains("PPid:\t0\n"), "PPid 行");
+    }
+
+    #[test]
+    fn field_order_is_linux_like() {
+        let s = status_body("init", 1, 0, 0);
+        let name = s.find("Name:").unwrap();
+        let uid = s.find("Uid:").unwrap();
+        let vmrss = s.find("VmRSS:").unwrap();
+        let threads = s.find("Threads:").unwrap();
+        assert!(name < uid, "Name 应在 Uid 前");
+        assert!(uid < vmrss, "Uid 应在 VmRSS 前");
+        assert!(vmrss < threads, "VmRSS 应在 Threads 前");
+    }
+
+    #[test]
+    fn rss_and_vsize_values_are_numeric() {
+        let s = status_body("init", 1, 196, 8192);
+        let rss_line = s.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
+        assert_eq!(rss_line.split_whitespace().nth(1).unwrap().parse::<u64>().unwrap(), 196);
+        let vs_line = s.lines().find(|l| l.starts_with("VmSize:")).unwrap();
+        assert_eq!(vs_line.split_whitespace().nth(1).unwrap().parse::<u64>().unwrap(), 8192);
+    }
+
+    #[test]
+    fn vmpeak_tracks_rss() {
+        // 当前 VmPeak 以 RSS 计（无历史峰值跟踪）
+        let s = status_body("init", 1, 196, 0);
+        let peak = s.lines().find(|l| l.starts_with("VmPeak:")).unwrap();
+        let rss = s.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
+        assert_eq!(peak, rss, "VmPeak 应与 VmRSS 一致");
+    }
+
+    #[test]
+    fn threads_is_one() {
+        let s = status_body("init", 1, 0, 0);
+        assert!(s.contains("Threads:\t1\n"), "Threads 应固定为 1（进程级视图）");
+    }
+
+    #[test]
+    fn uid_gid_are_root() {
+        let s = status_body("init", 1, 0, 0);
+        assert!(s.contains("Uid:\t0\t0\t0\t0\n"), "Uid 应全 0（单用户 root）");
+        assert!(s.contains("Gid:\t0\t0\t0\t0\n"), "Gid 应全 0（单用户 root）");
+    }
+
+    #[test]
+    fn every_line_has_field_colon() {
+        // 结构健全性：每行均为 "字段:\t值" 形态，无空行/缺冒号
+        let s = status_body("init", 1, 0, 0);
+        for line in s.lines() {
+            assert!(line.contains(':'), "行缺少冒号: {line}");
+        }
+    }
 }
