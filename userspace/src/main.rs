@@ -43,6 +43,7 @@ const SYS_FUTEX: u64 = 202;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_RT_SIGACTION: u64 = 13;   // M13-06：注册信号 handler
 const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
+const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
 const SYS_FW_ADD: u64 = 503;
@@ -187,10 +188,24 @@ fn scan_bytes(hay: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-// ---- M13-06：信号测试（sigtest）----
+// ---- M13-06/07：信号测试（sigtest）----
 // 信号帧 ABI 与 kernel/src/signal.rs 严格对齐（SigFrame 布局）。
 const SIGSEGV: u64 = 11;
 const SA_SIGINFO: u64 = 0x4;
+const SA_ONSTACK: u64 = 0x0800_0000;
+const SS_DISABLE: u64 = 2;
+
+/// `struct stack_t`（与内核 StackT 对齐，24 字节）。
+#[repr(C)]
+struct StackT {
+    ss_sp: u64,
+    ss_flags: u32,
+    _pad: u32,
+    ss_size: u64,
+}
+
+/// 备用信号栈缓冲（M13-07：handler 在其上运行，验证不溢出主栈）。
+static mut ALT_STACK: [u8; 8192] = [0; 8192];
 
 #[repr(C)]
 struct SigAction {
@@ -252,6 +267,8 @@ struct SigInfo {
 
 static mut HANDLED_SIGNOS: u64 = 0;
 static mut HANDLED_ADDR: u64 = 0;
+/// handler 入口 rsp（验证是否在备用信号栈上，M13-07）。
+static mut HANDLED_RSP: u64 = 0;
 /// 信号已触发（首次运行置位；handler 恢复后据此跳过触发段）。
 static mut SIG_ACTIVE: bool = false;
 /// setjmp 式恢复点（jmp_set 保存）。
@@ -288,6 +305,10 @@ fn jmp_set() {
 extern "C" fn segv_handler(signo: i32, info: *mut SigInfo, uctx: *mut UContext) -> ! {
     // SAFETY: 内核保证三参数有效；单核测试环境。
     unsafe {
+        // 记录 handler 入口 rsp（判断是否在备用栈上）
+        let rsp: u64;
+        core::arch::asm!("mov {0}, rsp", out(reg) rsp);
+        HANDLED_RSP = rsp;
         HANDLED_SIGNOS = signo as u64;
         HANDLED_ADDR = (*info).addr;
         (*uctx).mcontext.rsp = JB_RSP;
@@ -1986,11 +2007,21 @@ fn exec(cmd: &[u8]) {
             }
         }
         b"sigtest" => {
-            // M13-06：注册 SIGSEGV handler → 触发用户态 #PF → handler 改恢复点 →
-            // rt_sigreturn → 回到 sigtest 继续验证（内核不 panic）。
+            // M13-06/07：sigaction + sigaltstack 全链路——注册 SA_ONSTACK handler、
+            // 配置备用信号栈 → 触发用户态 #PF → handler 在备用栈上运行 → rt_sigreturn 恢复。
+            // SAFETY: 单核测试环境。
+            let alt_base = unsafe { ALT_STACK.as_ptr() as u64 };
+            let alt = StackT { ss_sp: alt_base, ss_flags: 0, _pad: 0, ss_size: 8192 };
+            let mut old = StackT { ss_sp: 0, ss_flags: 0, _pad: 0, ss_size: 0 };
+            let rc = syscall6(SYS_SIGALTSTACK, &alt as *const StackT as u64, &mut old as *mut StackT as u64, 0, 0, 0, 0);
+            print("sigtest: sigaltstack rc=");
+            print_u64(rc);
+            print(" old_sp=");
+            print_u64(old.ss_sp);
+            print("\n");
             let act = SigAction {
                 handler: segv_handler as usize as u64,
-                flags: SA_SIGINFO,
+                flags: SA_SIGINFO | SA_ONSTACK,
                 restorer: 0,
                 mask: 0,
             };
@@ -2013,13 +2044,17 @@ fn exec(cmd: &[u8]) {
             // SAFETY: 单核测试环境。
             let signos = unsafe { HANDLED_SIGNOS };
             let addr = unsafe { HANDLED_ADDR };
+            let hrsp = unsafe { HANDLED_RSP };
+            let on_alt = hrsp >= alt_base && hrsp < alt_base + 8192;
             print("sigtest: handler ran, signos=");
             print_u64(signos);
             print(" addr=");
             print_u64(addr);
+            print(" on_altstack=");
+            print_u64(on_alt as u64);
             print("\n");
-            if signos == SIGSEGV && addr == 0 {
-                print("sigtest: SIGSEGV handled ok\n");
+            if signos == SIGSEGV && addr == 0 && on_alt {
+                print("sigtest: SIGSEGV handled on altstack ok\n");
             } else {
                 print("sigtest: SIGSEGV MISMATCH\n");
             }
