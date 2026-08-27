@@ -33,7 +33,7 @@
 | 同步原语 | Spinlock（关中断自旋）+ 阻塞 Mutex（**内置优先级继承 PIP**，等待者提升持锁者、解锁恢复）；锁序编译期编码 + **RT 强制自旋锁 + CFS 关抢占**（勘误 §11 后续切片） | ✅ 切片 / ◻ 完整 | M2 | DESIGN §3.9/勘误§11 |
 | 定时器/时钟 | PIT 8254 tick（100Hz）已接入调度；最小堆 + 时钟源抽象 + RTC + monotonic + **分层时间轮（评估）** | ✅ 切片 / ◻ 完整 | M2/M9 | DESIGN §6.2⑥/勘误§5 |
 | 系统调用 + init/shell | syscall 表 + ELF 加载 + 用户态 shell + **PID 1 崩溃自愈（rescue_init + watchdog 复位）** | ◻ | M3 | DESIGN §1.2/勘误§3 |
-| VFS + ramfs/tmpfs | Inode/Dentry/SuperBlock + dcache LRU + **最小记录锁** | ◻ | M4 | DESIGN §3.6 |
+| VFS + ramfs/tmpfs | Inode/Dentry/SuperBlock + dcache LRU + **最小记录锁**（✅ M14：`fcntl F_SETLK/F_SETLKW/F_GETLK/F_UNLCK` 字节区间锁，SQLite 依赖） | ◻ | M4 | DESIGN §3.6 |
 | 网络栈 | 完整 TCP/IP（重传/拥塞控制）+ UDP/ICMP/ARP + epoll + **SNTP 客户端** + **零拷贝 Skb 内存池（评估）** | ◻ | M5 | DESIGN §3.8/勘误§4 |
 | Namespace | pid/mnt/net/uts/ipc/user/cgroup 七类 | ◻ | M6 | DESIGN §3.4 |
 | Cgroup v2 | memory/pids/cpu 控制器 + OOM-kill（容器内） | ◻ | M6 | DESIGN §3.5 |
