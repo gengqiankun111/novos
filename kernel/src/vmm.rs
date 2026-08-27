@@ -271,3 +271,12 @@ pub fn maps_content() -> alloc::string::String {
     }
     s
 }
+
+/// 进程虚拟地址空间总大小（VmSize，字节）：MAPS 注册表各段长度之和。
+pub fn vsize_bytes() -> usize {
+    let mut sum = 0usize;
+    for e in MAPS.lock().iter() {
+        sum += (e.end - e.start) as usize;
+    }
+    sum
+}

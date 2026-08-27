@@ -1,11 +1,11 @@
-# Novos-OS 构建/运行（M0 已通过 QEMU 验证）
+# 山水观心操作系统构建/运行（M0 已通过 QEMU 验证）
 #
 # 启动链路：自包含 multiboot1 扁平镜像（objcopy）→ QEMU -kernel。
 # 也支持：GRUB multiboot2（.multiboot2 头）、QEMU PVH ELF（.note.Xen）。
 
 KERNEL_TARGET := x86_64-unknown-none
-KERNEL_ELF    := target/$(KERNEL_TARGET)/release/novos-kernel
-KERNEL_BIN    := target/novos-kernel.bin
+KERNEL_ELF    := target/$(KERNEL_TARGET)/release/shanshui-guanxin-kernel
+KERNEL_BIN    := target/shanshui-guanxin-kernel.bin
 
 # rustup 安装的 cargo 路径（便携 make 的 MSYS bash 会丢弃 Windows PATH 中的
 # 部分条目；cargo bin 目录需显式补到 PATH。MSYS bash 只认 /c/... 风格路径，
@@ -42,7 +42,7 @@ build-userspace:
 
 # 内核链接参数用 RUSTFLAGS env（根 .cargo/config.toml 已清空，避免泄漏进 userspace）
 build: build-userspace
-	$(RUST_PATH) RUSTFLAGS="-C link-arg=-Tkernel/linker.ld -C relocation-model=static -C relro-level=off" cargo build -p novos-kernel --target $(KERNEL_TARGET) --release
+	$(RUST_PATH) RUSTFLAGS="-C link-arg=-Tkernel/linker.ld -C relocation-model=static -C relro-level=off" cargo build -p shanshui-guanxin-kernel --target $(KERNEL_TARGET) --release
 
 # ELF → 扁平二进制（QEMU multiboot loader 需要非 ELF 文件）
 image: build

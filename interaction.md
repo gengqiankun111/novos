@@ -12,13 +12,13 @@
 | 开发层 | **SSH / 串口 Console** | 终端 + dropbear / PuTTY + USB 转串口 | 开发调试、救援 | SSH 远程；串口需物理连线 |
 | 运维层 | **Agent 主动上联** | 云管理平台网页 | 规模化部署、远程 OTA | 设备主动连平台 |
 
-### 镜像拉取（docker pull → novos-pull）执行流程
+### 镜像拉取（docker pull → shanshui-guanxin-pull）执行流程
 
 **手动模式**（设备在内网，人在旁边）
 
 1. 浏览器打开 `http://<设备IP>` 进入 Web 管理界面
 2. 点 "拉取镜像"，输入镜像名
-3. 设备端 novos-pull 连 registry（HTTPS + token 认证）
+3. 设备端 shanshui-guanxin-pull 连 registry（HTTPS + token 认证）
 4. 拉取镜像层 → SHA-256 校验 → 解压 → 存入本地镜像仓库
 5. 界面显示完成 → 点 "运行"
 6. 设备创建容器（namespace/cgroup/overlayfs）→ 运行 → 界面显示状态
@@ -37,5 +37,5 @@
 ### 关键结论
 
 - 交互心智统一：开发期在 Windows 上操作 QEMU 里的 山水观心操作系统，生产期在浏览器 / 平台操作真实设备，**完全一致**
-- "docker pull" = 设备端 "novos-pull"，从 Web 界面点一下或平台下发指令，设备端自动完成 拉取→校验→解压→运行
+- "docker pull" = 设备端 "shanshui-guanxin-pull"，从 Web 界面点一下或平台下发指令，设备端自动完成 拉取→校验→解压→运行
 - 三层通道（Web / SSH + 串口 / Agent）覆盖 用户→开发者→运维 全角色

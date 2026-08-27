@@ -1,4 +1,4 @@
-/* Novos-OS 内核链接脚本（x86-64，multiboot2 + PVH，加载基址 1MB） */
+/* 山水观心操作系统内核链接脚本（x86-64，multiboot2 + PVH，加载基址 1MB） */
 ENTRY(_start)
 
 PHDRS {

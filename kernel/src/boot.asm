@@ -1,4 +1,4 @@
-# Novos-OS 启动汇编（x86-64）
+# 山水观心操作系统启动汇编（x86-64）
 # DESIGN.md §1.3 Phase 1：设栈 → 读取 multiboot2 参数 → 建直接映射页表（2MB 大页）→ 进入长模式
 # 同时包含异常 stub 表（供 interrupts.rs 填充 IDT）。
 

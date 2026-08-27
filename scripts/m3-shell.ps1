@@ -2,7 +2,7 @@
 # -> read shell output -> screendump -> quit.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/m3-shell.ps1
 param(
-    [string]$Kernel = "target/novos-kernel.bin",
+    [string]$Kernel = "target/shanshui-guanxin-kernel.bin",
     [string]$OutDir = "images/m3",
     [string]$LogFile = "target/m3-shell.log",
     [int]$SerialPort = 4549,

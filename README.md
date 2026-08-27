@@ -1,6 +1,6 @@
-# 山水观心操作系统（Novos-OS）
+# 山水观心操作系统（Shanshui-guanxin）
 
-> **山水观心操作系统**（英文名 **Novos-OS**，CLI 代号 `novos`）：在内存受限的边缘设备上，跑起真实容器服务的最小化操作系统。
+> **山水观心操作系统**（英文名 **Shanshui-guanxin**，CLI 代号 `shanshui-guanxin`）：在内存受限的边缘设备上，跑起真实容器服务的最小化操作系统。
 
 山水观心操作系统是一个用 Rust 从零编写的嵌入式操作系统，瞄准 FreeRTOS 与嵌入式 Linux 之间一块真实存在、但一直没人占住的缝隙：
 在 **256MB–2GB 内存**的边缘设备（工业网关 / 工控盒子 / IoT 节点 / SD-WAN CPE）上，用 **≤32MB 内核常驻内存**跑起多服务隔离的容器环境。
@@ -29,7 +29,7 @@
 | 人群 | 你用它做什么 |
 |---|---|
 | **嵌入式 / 边缘设备工程师**（主目标） | 给网关、工控盒、IoT 设备选型 OS、移植到板子、把服务容器化部署上去 |
-| **云原生 / 应用开发者** | 用 Go / Rust / C++ 写容器化服务，宿主机交叉编译，`novos-pull` 部署到设备 |
+| **云原生 / 应用开发者** | 用 Go / Rust / C++ 写容器化服务，宿主机交叉编译，`shanshui-guanxin-pull` 部署到设备 |
 | **设备运维 / 方案集成商** | 规模化部署、远程 OTA、Web 界面 / SSH / 云端平台统一管理 |
 
 **不适合**（Core 标准版）：通用 Linux 发行版替代、桌面/图形工作站、高吞吐存储服务器、需要 glibc 生态（MySQL / Kafka 等）、MCU 级设备（ESP32/STM32）、GPU 强依赖设备 —— 桌面/图形需求请选 **Desktop 图形版**（见下方"产品线"）。
@@ -40,7 +40,7 @@
 
 **你能用它做什么：**
 - **在 256MB–2GB 设备上运行容器化服务**：多服务隔离（Namespace + Cgroup）、可更新、低延迟
-- **当网络网关用**：完整 TCP/IP + NAT + conntrack + 基础防火墙 + **novos-gateway**（HTTP/1.1 + TLS + 反向代理）
+- **当网络网关用**：完整 TCP/IP + NAT + conntrack + 基础防火墙 + **shanshui-guanxin-gateway**（HTTP/1.1 + TLS + 反向代理）
 - **秒级冷启动 + 确定性调度**：低抖动、可预测的延迟
 - **OTA 升级与回滚**（full 模式）：层增量拉取、镜像版本切换
 - **可观测性**：`top` 系统监控（Rust 静态编译 <100KB）+ 健康指标 + Web 版 `/top`（远期）
@@ -56,7 +56,7 @@
 | **Desktop**（图形桌面版） | full + gui | ≥128MB | 容器宿主 + 帧缓冲/DRM + Wayland + 桌面应用 | 需要本地可视化、监控面板直显、图形化配置 |
 
 **内置生态（规划/推进中）：**
-- 🟢 必支持：Redis、SQLite、**novos-gateway**（HTTP/反向代理）、**top**（系统监控）、busybox、musl 交叉工具链、JSON/CSV、MQTT 客户端
+- 🟢 必支持：Redis、SQLite、**shanshui-guanxin-gateway**（HTTP/反向代理）、**top**（系统监控）、busybox、musl 交叉工具链、JSON/CSV、MQTT 客户端
 - 🟢 值得：Mosquitto（MQTT broker）、Modbus 工业协议、内置 Web 管理界面、轻量 TLS、Lua / MicroPython / QuickJS
 - **语言**：C / Rust / Go（musl 静态）优先；Lua / MicroPython / QuickJS 可选
 - **典型价值闭环**：Modbus 采集 → JSON → MQTT/HTTP 上报 → Web 界面监控
@@ -84,7 +84,7 @@ make run
 > Windows 上可以在 QEMU 里跑山水观心操作系统做开发/演示，生产负载放 Linux/KVM。开发期与生产期的交互完全一致。
 
 **部署一个容器（以 Redis 为例）：**
-- **手动**：Web 界面点"拉取镜像"（或设备端 `novos-pull` 连 registry，HTTPS + token + SHA-256 校验）→ 解压到本地镜像仓库 → 点"运行"查看状态；
+- **手动**：Web 界面点"拉取镜像"（或设备端 `shanshui-guanxin-pull` 连 registry，HTTPS + token + SHA-256 校验）→ 解压到本地镜像仓库 → 点"运行"查看状态；
 - **自动**：设备上电 → Agent 上联云平台 → 下发"部署 xx 版本" → 自动 pull/校验/运行 → 回报状态/日志 → 异常一键回滚；
 - **离线**：可上网的电脑 `docker save` 导出 tar，Web 上传或 U 盘拷入。
 
@@ -112,15 +112,15 @@ make run
 
 这三个点最反直觉，决定第一印象：
 
-1. **只支持 musl，不支持 glibc** —— 用 `apt-get install` 或 Ubuntu 工具链编译的程序会直接段错误。必须用宿主机交叉编译（Go/Rust/C++ 现成 target）。容器启动前 `novos-check` 会扫描，非 musl 一律拒绝启动并提示。
+1. **只支持 musl，不支持 glibc** —— 用 `apt-get install` 或 Ubuntu 工具链编译的程序会直接段错误。必须用宿主机交叉编译（Go/Rust/C++ 现成 target）。容器启动前 `shanshui-guanxin-check` 会扫描，非 musl 一律拒绝启动并提示。
 2. **Ext4 只认 `data=journal`** —— 现成 Linux 默认 `data=ordered` 的盘 mount 会报 `Operation not supported`。用 `tune2fs -O journal_dev` 转换或重新格式化。
 3. **设备端不能编译** —— 设备上没有 go/rustc/g++（内存装不下）。别在设备上 `go build`（会卡死/OOM）。
 
 **其他预期管理：**
-- 容器管理是 `novos` 命令，**不是 Docker CLI**（不支持 docker-compose）；
+- 容器管理是 `shanshui-guanxin` 命令，**不是 Docker CLI**（不支持 docker-compose）；
 - Redis 预置只读配置（防 OOM-kill 数据丢失）；
 - `/proc/cpuinfo` 报告硬件核心数但 online 只有 1（v1.0 单核，SMP 见[路线图](#路线图)）；
-- 网络排查：`echo 1 > /proc/sys/net/novos/packet_trace`（无需 tcpdump）。
+- 网络排查：`echo 1 > /proc/sys/net/shanshui-guanxin/packet_trace`（无需 tcpdump）。
 
 ---
 
@@ -167,10 +167,10 @@ OSv / MirageOS 更小但牺牲了多容器隔离；Linux 通用但太重。山�
 |---|---|
 | M0–M8 | 从"能启动"到"跑起第一个容器"（内核 → 网络栈 → 隔离 → OverlayFS → 容器运行时 + 网关） |
 | M9 | 内存基线 ≤32MB + 长期稳定版（生产可用）+ top 系统监控 |
-| M10–M14 | ext4 磁盘持久化、动态链接、Docker 安全模型、OCI 镜像 + OTA（Redis/SQLite）、novos-gateway、full 模式 ≤40MB |
+| M10–M14 | ext4 磁盘持久化、动态链接、Docker 安全模型、OCI 镜像 + OTA（Redis/SQLite）、shanshui-guanxin-gateway、full 模式 ≤40MB |
 | M15+ | ARM64 / RISC-V 评估、电源/Flash/调试等功能级补强 |
 | M16（Desktop） | 帧缓冲 `/dev/fb0` → DRM KMS → Wayland 合成器 → 桌面应用（≥128MB，独立产品线） |
-| v1.1 / v1.5 | 容器保活、novos-gateway、Web 界面默认开启、4G/5G 蜂窝、WireGuard、PTP/NTP 时间同步 |
+| v1.1 / v1.5 | 容器保活、shanshui-guanxin-gateway、Web 界面默认开启、4G/5G 蜂窝、WireGuard、PTP/NTP 时间同步 |
 | v2.0 | SMP 多核、L4 负载均衡、流量镜像、帧缓冲 + DRM（Desktop 阶段一） |
 | v3.0+ | Wayland 合成器 + 系统监视器（Desktop 阶段二）；v4.0 完整桌面环境 |
 

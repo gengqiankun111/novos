@@ -1,4 +1,4 @@
-﻿//! M3 切片4 + M11 切片5：ELF 加载器（静态 ET_EXEC / 动态判定）→ 用户地址空间 → ring3。
+//! M3 切片4 + M11 切片5：ELF 加载器（静态 ET_EXEC / 动态判定）→ 用户地址空间 → ring3。
 //!
 //! 加载对象为嵌入内核镜像的用户态 init/shell（`include_bytes!`），
 //! 链接基址 0x80_0000_0000（见 userspace/linker.ld）。流程：
@@ -16,7 +16,7 @@ use crate::page_table::{UserPageTable, P_PRESENT, P_USER, P_WRITABLE, USER_STACK
 /// 嵌入的用户态 init/shell 二进制（Makefile 先构建 userspace 再构建内核，
 /// 后续 `cargo build` 会因 `include_bytes!` 自动跟踪该文件变化而重链内核）。
 static INIT_ELF: &[u8] =
-    include_bytes!("../../userspace/target/x86_64-unknown-none/release/novos-init");
+    include_bytes!("../../userspace/target/x86_64-unknown-none/release/shanshui-guanxin-init");
 
 // ---- ELF64 头字段偏移 ----
 const EI_CLASS: usize = 4; // 2 = ELF64
@@ -489,7 +489,7 @@ fn mk_dynamic_elf(with_interp: bool) -> [u8; 380] {
     // phdr[1] PT_INTERP（可选）
     let interp_off = 340usize;
     if with_interp {
-        put_phdr(&mut b, 120, PT_INTERP, 4, interp_off as u64, 0, 27, 27);
+        put_phdr(&mut b, 120, PT_INTERP, 4, interp_off as u64, 0, 38, 38);
     }
     // phdr[2]（或无 interp 时 phdr[1]）PT_DYNAMIC
     let dyn_off = if with_interp { 176 } else { 120 };
@@ -511,7 +511,7 @@ fn mk_dynamic_elf(with_interp: bool) -> [u8; 380] {
     b[strtab_off as usize..strtab_off as usize + 22].copy_from_slice(b"libc.so\0libpthread.so\0");
     // interp 字符串
     if with_interp {
-        b[interp_off..interp_off + 27].copy_from_slice(b"/novos/ld-musl-x86_64.so.1\0");
+        b[interp_off..interp_off + 38].copy_from_slice(b"/shanshui-guanxin/ld-musl-x86_64.so.1\0");
     }
     b
 }
@@ -550,7 +550,7 @@ pub fn self_test() {
     match inspect(&d) {
         Ok(i) => check(
             i.e_type == 3
-                && i.interp == Some("/novos/ld-musl-x86_64.so.1")
+                && i.interp == Some("/shanshui-guanxin/ld-musl-x86_64.so.1")
                 && i.dyn_vaddr.is_some()
                 && i.needed.len() == 2
                 && i.needed[0] == "libc.so"

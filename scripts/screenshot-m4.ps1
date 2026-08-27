@@ -4,7 +4,7 @@
 # NOTE: ASCII-only comments (UTF-8 Chinese comments break PS 5.1 ANSI parsing).
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/screenshot-m4.ps1
 param(
-    [string]$Kernel = "target/novos-kernel.bin",
+    [string]$Kernel = "target/shanshui-guanxin-kernel.bin",
     [int]$SerialPort = 4551,
     [int]$MonPort = 4552,
     [string]$OutDir = "target/screens"
@@ -233,9 +233,9 @@ $c.Close()
 # needle checks (M4 functional assertions)
 $ok = $true
 $needles = @(
-    "Novos-OS: boot ok",
+    "Shanshui-guanxin: boot ok",
     "m3: loading embedded userspace init",
-    "Novos-OS M3 userspace shell (init)",
+    "Shanshui-guanxin M3 userspace shell (init)",
     "fstest: read 17B: hello from ramfs",
     "etc/",
     "data/",

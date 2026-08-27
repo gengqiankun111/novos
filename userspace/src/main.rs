@@ -1,4 +1,4 @@
-//! Novos-OS 用户态 init/shell（M3 切片4）。
+//! 山水观心操作系统用户态 init/shell（M3 切片4）。
 //!
 //! no_std + no_main 的 freestanding 静态 ELF（ET_EXEC），由内核 ELF 加载器
 //! 映射到 0x80_0000_0000 后经 `iretq` 进入。所有 I/O 走 Linux x86_64 ABI 的
@@ -299,10 +299,10 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exit\n");
         }
         b"version" => {
-            print("Novos-OS userspace init v0.3.0 (M3)\n");
+            print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
         }
         b"fdtest" => {
             // 验证 fd 表 + open/close：打开 /dev/uart（应得 fd 3），写入，关闭
@@ -377,7 +377,7 @@ fn exec(cmd: &[u8]) {
                 da[0..2].copy_from_slice(&2u16.to_le_bytes());
                 da[2..4].copy_from_slice(&12345u16.to_be_bytes());
                 da[4..8].copy_from_slice(&[10, 0, 2, 2]);
-                let msg1 = b"hello udp from novos";
+                let msg1 = b"hello udp from shanshui-guanxin";
                 let rc = syscall6(
                     SYS_SENDTO,
                     fd,
@@ -392,7 +392,7 @@ fn exec(cmd: &[u8]) {
                 print("\n");
                 // 2) sendto 10.0.2.2:12344（规则 12344→19999 回环，15B）
                 da[2..4].copy_from_slice(&12344u16.to_be_bytes());
-                let msg2 = b"pong from novos";
+                let msg2 = b"pong from shanshui-guanxin";
                 let rc2 = syscall6(
                     SYS_SENDTO,
                     fd,
@@ -542,9 +542,9 @@ fn exec(cmd: &[u8]) {
                 print("httptest: got request ");
                 print_u64(rn);
                 print("B\n");
-                // 响应 HTTP 200（body 25B "<h1>Novos-OS HTTP OK</h1>"）
+                // 响应 HTTP 200（body 25B "<h1>Shanshui-guanxin HTTP OK</h1>"）
                 let resp =
-                    b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 25\r\nConnection: close\r\n\r\n<h1>Novos-OS HTTP OK</h1>";
+                    b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 25\r\nConnection: close\r\n\r\n<h1>Shanshui-guanxin HTTP OK</h1>";
                 let sn = syscall6(SYS_SENDTO, afd, resp.as_ptr() as u64, resp.len() as u64, 0, 0, 0);
                 print("httptest: served ");
                 print_u64(sn);
@@ -635,7 +635,7 @@ fn exec(cmd: &[u8]) {
                 print("\n");
                 syscall3(SYS_EXIT, 0, 0, 0);
             } else {
-                // 父：等子退出后打印自身 hostname（应仍是 novos）
+                // 父：等子退出后打印自身 hostname（应仍是 shanshui-guanxin）
                 let mut w = 0u64;
                 let mut n = 0u32;
                 while w == 0 && n < 200000 {
@@ -879,7 +879,7 @@ fn exec(cmd: &[u8]) {
                 print("\n");
             }
         }
-        b"novos" => {
+        b"shanshui-guanxin" => {
             // M8-切片1：容器运行时骨架——overlay rootfs 组装 + ns/cgroup 隔离 +
             // 生命周期回收（类 runC 流程：准备镜像 → 挂 rootfs → clone 进 ns → 执行 → 回收）。
             // 1) 准备镜像 lower：/img/app.txt（宿主侧"镜像层"）
@@ -894,17 +894,17 @@ fn exec(cmd: &[u8]) {
             // 2) overlay rootfs：lower=/img, upper=新建, target=/containers/c0/rootfs
             let rc = syscall5(SYS_MOUNT, b"/img\0".as_ptr() as u64, b"/containers/c0/rootfs\0".as_ptr() as u64, b"overlay\0".as_ptr() as u64, 0, 0);
             if rc != 0 {
-                print("novos run: mount rc=");
+                print("shanshui-guanxin run: mount rc=");
                 print_u64(rc);
                 print("\n");
             } else {
-                print("novos run: rootfs mounted\n");
+                print("shanshui-guanxin run: rootfs mounted\n");
                 // 3) 容器进程：CLONE_NEWPID | CLONE_NEWUTS（pid/uts 隔离）
                 let r = syscall3(SYS_CLONE, 0x2000_0000 | 0x0400_0000, 0, 0);
                 if r == 0 {
                     // 容器 init（子进程）：新 pid ns 内 pid=1，独立 hostname
                     syscall3(SYS_SETHOSTNAME, b"c0\0".as_ptr() as u64, 2, 0);
-                    print("novos run: container init pid=");
+                    print("shanshui-guanxin run: container init pid=");
                     print_u64(syscall3(SYS_GETPID, 0, 0, 0));
                     print(" host=");
                     print_hostname();
@@ -913,7 +913,7 @@ fn exec(cmd: &[u8]) {
                     let cr = syscall3(SYS_CHDIR, b"/containers/c0/rootfs\0".as_ptr() as u64, 0, 0);
                     let mut cwdb = [0u8; 64];
                     let cn = syscall3(SYS_GETCWD, cwdb.as_mut_ptr() as u64, 64, 0);
-                    print("novos run: chdir rc=");
+                    print("shanshui-guanxin run: chdir rc=");
                     print_u64(cr);
                     print(" cwd=");
                     print(unsafe { core::str::from_utf8_unchecked(&cwdb[..cn as usize]) });
@@ -924,11 +924,11 @@ fn exec(cmd: &[u8]) {
                         let mut rb = [0u8; 32];
                         let n = syscall3(SYS_READ, fd2, rb.as_mut_ptr() as u64, 32);
                         syscall3(SYS_CLOSE, fd2, 0, 0);
-                        print("novos run: rootfs read: ");
+                        print("shanshui-guanxin run: rootfs read: ");
                         print(unsafe { core::str::from_utf8_unchecked(&rb[..n as usize]) });
                         print("\n");
                     } else {
-                        print("novos run: rootfs read FAILED\n");
+                        print("shanshui-guanxin run: rootfs read FAILED\n");
                     }
                     // 6) 容器写：/var/log 目录 + 日志文件（进 upper 层，镜像层不变）
                     syscall3(SYS_MKDIR, b"var\0".as_ptr() as u64, 0o755, 0);
@@ -941,11 +941,11 @@ fn exec(cmd: &[u8]) {
                     let mut rb2 = [0u8; 32];
                     let n2 = syscall3(SYS_READ, fd4, rb2.as_mut_ptr() as u64, 32);
                     syscall3(SYS_CLOSE, fd4, 0, 0);
-                    print("novos run: container log: ");
+                    print("shanshui-guanxin run: container log: ");
                     print(unsafe { core::str::from_utf8_unchecked(&rb2[..n2 as usize]) });
                     print("\n");
                     // 7) cgroup 记账（容器进程计入根 cgroup，pids+1 / mem+64KB）
-                    print_cg("novos run: cg ");
+                    print_cg("shanshui-guanxin run: cg ");
                     syscall3(SYS_EXIT, 0, 0, 0);
                 } else {
                     // 宿主（父）：等容器 init 退出并回收
@@ -959,20 +959,20 @@ fn exec(cmd: &[u8]) {
                             s += 1;
                         }
                     }
-                    print("novos run: reaped=");
+                    print("shanshui-guanxin run: reaped=");
                     print_u64(w);
                     print("\n");
                     // 8) 回收后 cgroup 回到基线（无泄漏）
-                    print_cg("novos run: after reap ");
+                    print_cg("shanshui-guanxin run: after reap ");
                     // 镜像层不被容器写污染
                     let fd5 = syscall3(SYS_OPEN, b"/img/app.txt\0".as_ptr() as u64, 0, 0);
                     let mut rb3 = [0u8; 32];
                     let n3 = syscall3(SYS_READ, fd5, rb3.as_mut_ptr() as u64, 32);
                     syscall3(SYS_CLOSE, fd5, 0, 0);
-                    print("novos run: image intact: ");
+                    print("shanshui-guanxin run: image intact: ");
                     print(unsafe { core::str::from_utf8_unchecked(&rb3[..n3 as usize]) });
                     print("\n");
-                    print("novos run: container exited\n");
+                    print("shanshui-guanxin run: container exited\n");
                 }
             }
         }
@@ -1326,7 +1326,7 @@ fn exec(cmd: &[u8]) {
         b"blktest" => {
             // M10-切片1：virtio-blk + BIO——写扇区 → 读回验证（真实块设备介质）。
             let mut wbuf = [0u8; 512];
-            let msg = b"blk-hello-novos";
+            let msg = b"blk-hello-shanshui-guanxin";
             wbuf[..msg.len()].copy_from_slice(msg);
             // 写 sector 2（0/1 留给后续文件系统）
             let wr = syscall6(SYS_BLK_RW, 2, wbuf.as_mut_ptr() as u64, msg.len() as u64, 1, 0, 0);
@@ -1816,6 +1816,62 @@ fn exec(cmd: &[u8]) {
                 }
             }
         }
+        b"statustest" => {
+            // M13-02：/proc/self/status——进程状态（VmRSS/VmPeak/Threads/Uid/Gid）。
+            let fd = syscall3(SYS_OPEN, b"/proc/self/status\0".as_ptr() as u64, 0, 0);
+            if fd >= 10000 {
+                // SYS_OPEN 失败：错误码为负值按 u64 是大数
+                print("statustest: open failed rc=");
+                print_u64(fd);
+                print("\n");
+            } else {
+                let mut total = 0usize;
+                // SAFETY: 单核测试环境。
+                let buf: &mut [u8; 4096] = unsafe { &mut *core::ptr::addr_of_mut!(MAP_BUF) };
+                loop {
+                    // 内核 SYS_READ 每次最多 512B，须按偏移累积，避免覆盖已读内容
+                    let n = syscall3(
+                        SYS_READ,
+                        fd,
+                        (buf.as_mut_ptr() as u64) + total as u64,
+                        (4096 - total) as u64,
+                    );
+                    if n <= 0 {
+                        break;
+                    }
+                    total += n as usize;
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+                let has_name = scan_bytes(&buf[..total], b"Name:");
+                let has_uid = scan_bytes(&buf[..total], b"Uid:");
+                let has_vmrss = scan_bytes(&buf[..total], b"VmRSS:");
+                let has_threads = scan_bytes(&buf[..total], b"Threads:");
+                print("statustest: bytes=");
+                print_u64(total as u64);
+                print(" name=");
+                print_u64(has_name as u64);
+                print(" uid=");
+                print_u64(has_uid as u64);
+                print(" vmrss=");
+                print_u64(has_vmrss as u64);
+                print(" threads=");
+                print_u64(has_threads as u64);
+                print("\n");
+                // 打印 VmRSS 行（关键指标）
+                let s = core::str::from_utf8(&buf[..total]).unwrap_or("");
+                if let Some(pos) = s.find("VmRSS:") {
+                    let end = s[pos..].find('\n').map(|e| pos + e).unwrap_or(total);
+                    print("statustest: ");
+                    print(&s[pos..end]);
+                    print("\n");
+                }
+                if has_name && has_uid && has_vmrss && has_threads {
+                    print("statustest: status ok\n");
+                } else {
+                    print("statustest: status FAIL\n");
+                }
+            }
+        }
         b"exit" => {
             print("bye\n");
             syscall3(SYS_EXIT, 0, 0, 0);
@@ -1935,7 +1991,7 @@ fn exec(cmd: &[u8]) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    print("\nNovos-OS M3 userspace shell (init)\n");
+    print("\nShanshui-guanxin M3 userspace shell (init)\n");
     print("type 'help' for commands\n");
 
     let mut line = [0u8; 128];

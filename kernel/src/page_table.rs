@@ -122,6 +122,53 @@ fn alloc_table() -> usize {
     p
 }
 
+/// 统计用户地址空间中 `P_USER` 置位的 4K 页数（RSS 页数，/proc/self/status 用）。
+/// 跳过内核恒等映射（PML4[0] 为 supervisor，无 `P_USER`）。
+pub fn count_user_pages(pml4: usize) -> usize {
+    if pml4 == 0 {
+        return 0;
+    }
+    let mut n = 0usize;
+    // SAFETY: pml4 为当前用户进程页表根，恒等映射下可读。
+    unsafe {
+        for l4 in 0..512usize {
+            let e4 = *((pml4 as *const u64).add(l4));
+            if e4 & P_PRESENT == 0 || e4 & P_USER == 0 {
+                continue; // 未映射或内核映射
+            }
+            let l3t = (e4 & !0xFFF) as *const u64;
+            for l3 in 0..512usize {
+                let e3 = *l3t.add(l3);
+                if e3 & P_PRESENT == 0 {
+                    continue;
+                }
+                if e3 & P_HUGE != 0 {
+                    n += 1;
+                    continue;
+                }
+                let l2t = (e3 & !0xFFF) as *const u64;
+                for l2 in 0..512usize {
+                    let e2 = *l2t.add(l2);
+                    if e2 & P_PRESENT == 0 {
+                        continue;
+                    }
+                    if e2 & P_HUGE != 0 {
+                        n += 1;
+                        continue;
+                    }
+                    let l1t = (e2 & !0xFFF) as *const u64;
+                    for l1 in 0..512usize {
+                        if *l1t.add(l1) & P_PRESENT != 0 {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
 /// 切换到用户页表并 `iretq` 进入 ring3（不返回）。
 ///
 /// # Safety

@@ -1,8 +1,8 @@
-# Novos-OS milestone screenshot helper: boot QEMU -> wait -> screendump -> quit.
+# Shanshui-guanxin milestone screenshot helper: boot QEMU -> wait -> screendump -> quit.
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts/screenshot.ps1 -OutDir images/m1
 param(
     [Parameter(Mandatory = $true)][string]$OutDir,
-    [string]$Kernel = "target/novos-kernel.bin",
+    [string]$Kernel = "target/shanshui-guanxin-kernel.bin",
     [string]$LogFile = "target/boot.log",
     [int]$WaitSec = 4,
     [int]$Port = 4545
