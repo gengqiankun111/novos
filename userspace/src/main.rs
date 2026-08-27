@@ -49,6 +49,7 @@ const SYS_KILL: u64 = 62;           // M13-08：投递信号
 const SYS_TIMERFD_CREATE: u64 = 283; // M13-11：创建 timerfd
 const SYS_TIMERFD_SETTIME: u64 = 286; // M13-11：设/重调度 timerfd
 const SYS_TIMERFD_GETTIME: u64 = 287; // M13-11：查询 timerfd
+const SYS_SIGNALFD4: u64 = 289;       // M13-12：创建/更新 signalfd
 const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 const SYS_NAT_ADD: u64 = 501;
 const SYS_CT_STAT: u64 = 502;
@@ -217,6 +218,19 @@ struct Itimerspec {
     int_nsec: i64,
     val_sec: i64,
     val_nsec: i64,
+}
+
+/// signalfd_siginfo 前 32 字节（M13-12，与内核布局一致）。
+#[repr(C)]
+struct SignalfdSiginfo {
+    signo: u32,
+    errno: i32,
+    code: i32,
+    pid: u32,
+    uid: u32,
+    fd: i32,
+    tid: u32,
+    band: u32,
 }
 
 /// 备用信号栈缓冲（M13-07：handler 在其上运行，验证不溢出主栈）。
@@ -460,7 +474,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigmasktest | tfdtest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigmasktest | tfdtest | sftest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2162,6 +2176,51 @@ fn exec(cmd: &[u8]) {
                     print("tfdtest: timerfd FAIL\n");
                 }
                 syscall3(SYS_CLOSE, tfd, 0, 0);
+                syscall3(SYS_CLOSE, epfd, 0, 0);
+            }
+        }
+        b"sftest" => {
+            // M13-12：signalfd4(-1, mask{SIGUSR1}) → kill(SIGUSR1) 被 signalfd
+            // 消费 → epoll 就绪 → read 读回 signalfd_siginfo(signo=10, pid=自 pid)。
+            const SIGUSR1: u64 = 10;
+            const EPOLLIN: u32 = 1;
+            let sfd = syscall3(SYS_SIGNALFD4, u64::MAX, 1u64 << (SIGUSR1 - 1), 0);
+            print("sftest: signalfd_create fd=");
+            print_u64(sfd);
+            print("\n");
+            if sfd < 500 {
+                print("sftest: create FAIL\n");
+            } else {
+                let pid = syscall3(SYS_GETPID, 0, 0, 0);
+                let krc = syscall3(SYS_KILL, pid, SIGUSR1, 0);
+                print("sftest: kill rc=");
+                print_u64(krc);
+                print("\n");
+                // epoll 监听：信号已同步入队 → 立即就绪
+                let epfd = syscall3(SYS_EPOLL_CREATE, 1, 0, 0);
+                let ev = [EPOLLIN, 0, 0, 0, 0, 0];
+                syscall5(SYS_EPOLL_CTL, epfd, 1 /*ADD*/, sfd, ev.as_ptr() as u64, 0);
+                let mut events = [0u8; 12];
+                let wn = syscall5(SYS_EPOLL_WAIT, epfd, events.as_mut_ptr() as u64, 1, 200, 0);
+                print("sftest: epoll_wait got=");
+                print_u64(wn);
+                print("\n");
+                // read 32 字节 siginfo
+                let mut si = SignalfdSiginfo { signo: 0, errno: 0, code: 0, pid: 0, uid: 0, fd: 0, tid: 0, band: 0 };
+                let n = syscall3(SYS_READ, sfd, &mut si as *mut SignalfdSiginfo as u64, 32);
+                print("sftest: read rc=");
+                print_u64(n);
+                print(" signo=");
+                print_u64(si.signo as u64);
+                print(" pid=");
+                print_u64(si.pid as u64);
+                print("\n");
+                if krc == 0 && wn == 1 && n == 32 && si.signo == SIGUSR1 as u32 && si.pid == pid as u32 {
+                    print("sftest: signalfd ok\n");
+                } else {
+                    print("sftest: signalfd FAIL\n");
+                }
+                syscall3(SYS_CLOSE, sfd, 0, 0);
                 syscall3(SYS_CLOSE, epfd, 0, 0);
             }
         }

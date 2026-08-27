@@ -58,6 +58,7 @@ pub const SYS_KILL: u64 = 62;           // M13-08：投递信号
 pub const SYS_TIMERFD_CREATE: u64 = 283; // M13-11：创建 timerfd
 pub const SYS_TIMERFD_SETTIME: u64 = 286; // M13-11：设/重调度 timerfd
 pub const SYS_TIMERFD_GETTIME: u64 = 287; // M13-11：查询 timerfd
+pub const SYS_SIGNALFD4: u64 = 289;       // M13-12：创建/更新 signalfd
 /// 山水观心操作系统扩展：添加 NAT 端口映射规则（网关控制面）。
 pub const SYS_NAT_ADD: u64 = 501;
 /// 山水观心操作系统扩展：读 conntrack 统计 { 条目数, 命中数 }。
@@ -210,6 +211,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_TIMERFD_CREATE => crate::timer::timerfd_create(a1, a2) as u64,
         SYS_TIMERFD_SETTIME => crate::timer::timerfd_settime(a1 as usize, a2, a3, a4) as u64,
         SYS_TIMERFD_GETTIME => crate::timer::timerfd_gettime(a1 as usize, a2) as u64,
+        SYS_SIGNALFD4 => crate::signalfd::signalfd4(a1, a2, a3) as u64,
         SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
         SYS_CT_STAT => sys_ct_stat(a1),
         SYS_FW_ADD => sys_fw_add(a1, a2, a3),
@@ -269,7 +271,10 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
 /// read(fd, buf, len)：经 fd 表路由到文件；非阻塞，无数据返回 0。
 /// 临时缓冲 512B 上限（文件按 len 读；uart 逐字节）。
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
-    // M13-11：timerfd → 读回到期次数（u64）
+    // M13-12：signalfd → 读回 signalfd_siginfo（32B）；M13-11：timerfd → 到期次数。
+    if fd >= crate::signalfd::SIGNALFD_FD_BASE as u64 {
+        return crate::signalfd::signalfd_read(fd as usize, buf) as u64;
+    }
     if fd >= crate::timer::TIMER_FD_BASE as u64 {
         return crate::timer::timer_read(fd as usize, buf) as u64;
     }
@@ -304,7 +309,9 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> u64 {
 
 /// close(fd)：关闭并回收 fd；成功返回 0。
 fn sys_close(fd: u64) -> u64 {
-    if fd >= crate::timer::TIMER_FD_BASE as u64 {
+    if fd >= crate::signalfd::SIGNALFD_FD_BASE as u64 {
+        crate::signalfd::signalfd_close(fd as usize) as u64
+    } else if fd >= crate::timer::TIMER_FD_BASE as u64 {
         crate::timer::timer_close(fd as usize) as u64
     } else if fd >= crate::socket::EPOLL_FD_BASE as u64 {
         crate::socket::epoll_close(fd as usize) as u64
