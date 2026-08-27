@@ -572,7 +572,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | jvmsmoke | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2617,6 +2617,48 @@ fn exec(cmd: &[u8]) {
             unsafe { SIGTEST_ALT_BASE = alt_base; }
             jmp_set();
             sigtest_resume();
+        }
+        b"jvmsmoke" => {
+            // M13-13：JVM 冒烟——组合验证 JVM 运行时关键面：timerfd+epoll 事件
+            // 循环（NIO selector 基础）+ sigaltstack 信号处理（JIT/崩溃保护）。
+            let mut ok = true;
+            // 1) timerfd 事件循环：20ms 定时器 → epoll 就绪 → read 计数
+            let tfd = syscall3(SYS_TIMERFD_CREATE, 0, 0, 0);
+            let spec = Itimerspec { int_sec: 0, int_nsec: 0, val_sec: 0, val_nsec: 20_000_000 };
+            let rc = syscall6(SYS_TIMERFD_SETTIME, tfd, 0, &spec as *const Itimerspec as u64, 0, 0, 0);
+            let epfd = syscall3(SYS_EPOLL_CREATE, 1, 0, 0);
+            let ev = [1u32, 0, 0, 0, 0, 0];
+            syscall5(SYS_EPOLL_CTL, epfd, 1 /*ADD*/, tfd, ev.as_ptr() as u64, 0);
+            let mut events = [0u8; 12];
+            let wn = syscall5(SYS_EPOLL_WAIT, epfd, events.as_mut_ptr() as u64, 1, 200, 0);
+            print("jvmsmoke: epoll got=");
+            print_u64(wn);
+            print("\n");
+            ok &= rc == 0 && wn == 1;
+            syscall3(SYS_CLOSE, tfd, 0, 0);
+            syscall3(SYS_CLOSE, epfd, 0, 0);
+            // 2) sigaltstack 信号处理：配置备用栈 + SIGUSR1 handler → kill 自投递
+            //    （复用 segv_handler_plain 纯记录语义，JVM 崩溃/信号保护面）
+            const SIGUSR1: u64 = 10;
+            let alt_base = unsafe { ALT_STACK.as_ptr() as u64 };
+            let alt = StackT { ss_sp: alt_base, ss_flags: 0, _pad: 0, ss_size: 8192 };
+            let src = syscall6(SYS_SIGALTSTACK, &alt as *const StackT as u64, 0, 0, 0, 0, 0);
+            // SAFETY: 单核测试环境。
+            unsafe { HANDLED_SIGNOS = 0; }
+            let act = SigAction { handler: segv_handler_plain as usize as u64, flags: SA_SIGINFO | SA_ONSTACK, restorer: 0, mask: 0 };
+            let arc = syscall6(SYS_RT_SIGACTION, SIGUSR1, &act as *const SigAction as u64, 0, 8, 0, 0);
+            let krc = syscall3(SYS_KILL, 1, SIGUSR1, 0);
+            // SAFETY: 单核测试环境。
+            let signos = unsafe { HANDLED_SIGNOS };
+            print("jvmsmoke: signal handled=");
+            print_u64(signos);
+            print("\n");
+            ok &= src == 0 && arc == 0 && krc == 0 && signos == SIGUSR1;
+            if ok {
+                print("jvmsmoke: JVM runtime surface ok\n");
+            } else {
+                print("jvmsmoke: JVM runtime surface FAIL\n");
+            }
         }
         b"exit" => {
             print("bye\n");

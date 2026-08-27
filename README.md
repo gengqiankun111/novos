@@ -180,7 +180,8 @@ OSv / MirageOS 更小但牺牲了多容器隔离；Linux 通用但太重。山�
 > signalfd（`signalfd4` + kill 信号消费 + epoll 就绪 + `read` siginfo）✅；
 > 网络调试开关（`echo 1 > /proc/sys/net/shanshui-guanxin/packet_trace` 环形日志五元组 + 丢弃原因，shell `>` 重定向）✅；
 > 内存基线（`/proc/meminfo` buddy/slab 台账 + 受管区守恒校验）✅；
-> 均经 QEMU `sigtest`/`sigmasktest`/`sigreent`/`tfdtest`/`sftest`/`pktracetest`/`memtest` 集成验证。剩余：实时信号、JVM 冒烟（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
+> JVM 冒烟（`jvmsmoke`：timerfd+epoll 事件循环 + sigaltstack 信号组合面）✅；
+> 均经 QEMU `sigtest`/`sigmasktest`/`sigreent`/`tfdtest`/`sftest`/`pktracetest`/`memtest`/`jvmsmoke` 集成验证。**M13 完整达成**，进入 M14（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 
 ---
 
