@@ -318,11 +318,39 @@ pub fn cpuinfo_inode() -> Arc<Inode> {
     ino
 }
 
+/// /proc/meminfo（M13-14：内存基线）——buddy/slab 台账导出，含守恒校验：
+/// MemUsed + MemFree == MemTotal（受管区 2MB..64MB）。
+pub fn meminfo_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    let page = 4096usize;
+    let st = crate::mm::mem_stats();
+    let managed = crate::mm::MEM_END - crate::mm::MEM_START;
+    // 守恒：used_pages + free_pages == 受管页数（buddy_pages/slab_pages 均为已分配）。
+    let used_pages = st.buddy_pages + st.slab_pages;
+    let free_pages = (managed / page).saturating_sub(used_pages);
+    let body = alloc::format!(
+        "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemUsed:        {:>8} kB\n\
+         Slab:           {:>8} kB\nKernelData:     {:>8} kB\nPageTables:     {:>8} kB\n\
+         BuddyPages:     {:>8}\nSlabPages:      {:>8}\n",
+        managed / 1024,
+        free_pages * page / 1024,
+        used_pages * page / 1024,
+        st.slab_pages * page / 1024,
+        st.buddy_pages * page / 1024,
+        st.kernel_used_bytes / 1024,
+        st.buddy_pages,
+        st.slab_pages,
+    );
+    *ino.data.lock() = body.into_bytes();
+    ino
+}
+
 /// 判断 proc 子文件（health/cpuinfo）——resolve 用。
 fn proc_special_file(name: &str) -> Option<Arc<Inode>> {
     match name {
         "health" => Some(health_inode()),
         "cpuinfo" => Some(cpuinfo_inode()),
+        "meminfo" => Some(meminfo_inode()),
         "mounts" => Some(mounts_inode()),
         "filesystems" => Some(filesystems_inode()),
         _ => None,

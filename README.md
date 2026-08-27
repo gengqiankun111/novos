@@ -179,7 +179,8 @@ OSv / MirageOS 更小但牺牲了多容器隔离；Linux 通用但太重。山�
 > timerfd（`timerfd_create/settime/gettime` + epoll 阻塞监听 + `read` 到期计数）✅；
 > signalfd（`signalfd4` + kill 信号消费 + epoll 就绪 + `read` siginfo）✅；
 > 网络调试开关（`echo 1 > /proc/sys/net/shanshui-guanxin/packet_trace` 环形日志五元组 + 丢弃原因，shell `>` 重定向）✅；
-> 均经 QEMU `sigtest`/`sigmasktest`/`sigreent`/`tfdtest`/`sftest`/`pktracetest` 集成验证。剩余：实时信号、JVM 冒烟、内存基线（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
+> 内存基线（`/proc/meminfo` buddy/slab 台账 + 受管区守恒校验）✅；
+> 均经 QEMU `sigtest`/`sigmasktest`/`sigreent`/`tfdtest`/`sftest`/`pktracetest`/`memtest` 集成验证。剩余：实时信号、JVM 冒烟（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 
 ---
 
