@@ -38,6 +38,10 @@ pub const SS_DISABLE: u64 = 2;
 pub const MINSIGSTKSZ: u64 = 2048;
 /// siginfo 的 si_code（SIGSEGV）。
 pub const SEGV_MAPERR: u64 = 1;
+/// sigprocmask 的 how（M13-08）。
+pub const SIG_BLOCK: u64 = 0;
+pub const SIG_UNBLOCK: u64 = 1;
+pub const SIG_SETMASK: u64 = 2;
 
 /// 每任务信号状态（下标 = 任务 id，见 task::MAX_TASKS）。
 #[derive(Clone, Copy)]
@@ -52,6 +56,8 @@ pub struct SigState {
     pub alt_sp: u64,
     pub alt_size: u64,
     pub alt_flags: u64,
+    /// 阻塞信号位图（sigprocmask，M13-08）。
+    pub blocked: u64,
 }
 const fn sig_state() -> SigState {
     SigState {
@@ -63,6 +69,7 @@ const fn sig_state() -> SigState {
         alt_sp: 0,
         alt_size: 0,
         alt_flags: SS_DISABLE,
+        blocked: 0,
     }
 }
 static mut SIG: [SigState; task::MAX_TASKS] = [sig_state(); task::MAX_TASKS];
@@ -168,12 +175,49 @@ pub fn sys_rt_sigaction(sig: u64, act: u64, oldact: u64, _sigsetsize: u64) -> i6
     0
 }
 
+/// `rt_sigprocmask(how, set, oldset, sigsetsize)`：设置/查询阻塞信号集（M13-08）。
+pub fn sys_rt_sigprocmask(how: u64, set: u64, oldset: u64, _sigsetsize: u64) -> i64 {
+    let st = cur_state();
+    if oldset != 0 {
+        // SAFETY: oldset 为已映射用户地址。
+        unsafe { core::ptr::write_volatile(oldset as *mut u64, st.blocked) };
+    }
+    if set != 0 {
+        // SAFETY: set 为已映射用户地址。
+        let newset = unsafe { core::ptr::read_volatile(set as *const u64) };
+        match how {
+            SIG_BLOCK => st.blocked |= newset,
+            SIG_UNBLOCK => st.blocked &= !newset,
+            SIG_SETMASK => st.blocked = newset,
+            _ => return -22, // EINVAL
+        }
+    }
+    0
+}
+
+/// `kill(pid, sig)`：向进程投递信号（M13-08，仅支持自投递/pid 0）。
+pub fn sys_kill(pid: u64, sig: u64) -> i64 {
+    if sig == 0 || sig > 31 {
+        return -22; // EINVAL
+    }
+    let cur = task::current_pid() as u64;
+    if pid != cur && pid != 0 {
+        return -3; // ESRCH（仅支持自投递）
+    }
+    cur_state().pending |= 1u64 << (sig - 1);
+    0
+}
+
 /// 投递信号：改 `f` 使返回用户态时进入 handler。
-/// 返回 true = 已投递（f 已被改写）；false = 未投递（忽略/无挂起）。
+/// 返回 true = 已投递（f 已被改写）；false = 未投递（忽略/阻塞/无挂起）。
 pub fn deliver(f: &mut ExceptionFrame, signo: u64, si_code: u64, si_addr: u64) -> bool {
     let st = cur_state();
     let bit = 1u64 << (signo - 1);
     st.pending |= bit;
+    // M13-08：信号被阻塞 → 保持挂起，不投递
+    if st.blocked & bit != 0 {
+        return false;
+    }
     // SIGSEGV 不可忽略（Linux 语义：忽略等价默认终止）
     if st.handler == SIG_IGN && signo != SIGSEGV {
         st.pending &= !bit;
