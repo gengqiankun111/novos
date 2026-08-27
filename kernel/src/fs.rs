@@ -133,6 +133,10 @@ impl File {
                 }
             }
             File::Reg { inode, offset } => {
+                // M13：packet_trace 开关文件——读回环形日志（动态刷新）
+                if Arc::as_ptr(inode) == Arc::as_ptr(&SYSCTL_PACKET_TRACE) {
+                    *inode.data.lock() = crate::net::trace_content().into_bytes();
+                }
                 let data = inode.data.lock();
                 let mut off = offset.lock();
                 let start = *off as usize;
@@ -154,6 +158,14 @@ impl File {
                 data.len()
             }
             File::Reg { inode, offset } => {
+                // M13：packet_trace 开关文件——写 "1"/"0" 切换调试开关
+                if Arc::as_ptr(inode) == Arc::as_ptr(&SYSCTL_PACKET_TRACE) {
+                    let s = core::str::from_utf8(data).unwrap_or("");
+                    let on = s.trim().parse::<u32>().unwrap_or(0) != 0;
+                    crate::net::trace_set(on);
+                    *inode.data.lock() = if on { b"1\n".to_vec() } else { b"0\n".to_vec() };
+                    return data.len();
+                }
                 let mut off = offset.lock();
                 let start = *off as usize;
                 let mut d = inode.data.lock();
@@ -346,6 +358,14 @@ pub fn filesystems_inode() -> Arc<Inode> {
 
 /// /proc/self（M13-01：当前任务视图，指针相等判定）。
 pub static SELF_DIR: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| Inode::dir());
+
+/// /proc/sys/net/shanshui-guanxin/packet_trace（M13：网络调试开关，可读写）。
+/// 写 "1"/"0" 开/关；读回环形日志内容。
+pub static SYSCTL_PACKET_TRACE: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| {
+    let ino = Inode::file();
+    *ino.data.lock() = b"0\n".to_vec();
+    ino
+});
 
 /// /proc/self/fd（M13-04）：当前进程打开的文件描述符目录。
 pub static SELF_FD_DIR: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| Inode::dir());
@@ -552,10 +572,12 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
     // overlay 遍历状态：(upper 当前目录(可 None), lower 当前目录(可 None))
     let mut ov: Option<(Option<Arc<Inode>>, Option<Arc<Inode>>)> = None;
     // proc 挂载内标记（M9-切片1：health/cpuinfo 特殊文件；M13-01：self/maps；
-    // M13-02：status；M13-03：exe；M13-04：fd）
+    // M13-02：status；M13-03：exe；M13-04：fd；M13：sys/net/.../packet_trace）
     let mut proc_active = false;
     let mut proc_self = false;
     let mut proc_self_fd = false;
+    // M13：/proc/sys/net/shanshui-guanxin/packet_trace 路径深度（1=sys 2=net 3=shanshui-guanxin）
+    let mut proc_sys = 0u8;
     let mut acc = String::from("/"); // 累积路径（挂载点匹配）
     let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     for (i, comp) in comps.iter().enumerate() {
@@ -633,6 +655,29 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
                     proc_self_fd = false;
                     continue;
                 }
+            }
+        }
+        // M13：/proc/sys/net/shanshui-guanxin/packet_trace（可读写调试开关）
+        if proc_active || proc_sys > 0 {
+            match (proc_sys, *comp) {
+                (0, "sys") => {
+                    proc_sys = 1;
+                    continue;
+                }
+                (1, "net") => {
+                    proc_sys = 2;
+                    continue;
+                }
+                (2, "shanshui-guanxin") => {
+                    proc_sys = 3;
+                    continue;
+                }
+                (3, "packet_trace") => {
+                    cur = SYSCTL_PACKET_TRACE.clone();
+                    proc_sys = 0;
+                    continue;
+                }
+                _ => {}
             }
         }
         // overlay 内：upper 优先，其次 lower；.wh.* 白标记视为已删除（M7-切片2）

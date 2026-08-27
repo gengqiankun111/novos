@@ -10,6 +10,132 @@
 
 use crate::mm;
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
+
+// ---- M13：packet_trace 调试开关（DESIGN §21.8，tcpdump 替代）----
+// `echo 1 > /proc/sys/net/shanshui-guanxin/packet_trace` 开启后，内核把每个
+// 数据包的五元组 + 丢弃原因写入环形日志（可经同一文件读回；性能降 ~50%）。
+
+/// 开关（默认关）。
+pub static PACKET_TRACE: AtomicBool = AtomicBool::new(false);
+/// 环形日志容量。
+const TRACE_CAP: usize = 64;
+
+/// 丢弃/状态原因。
+pub const TRACE_OK: u8 = 0;
+pub const TRACE_RX: u8 = 0;
+pub const TRACE_TX: u8 = 1;
+pub const TRACE_CSUM: u8 = 2;
+pub const TRACE_FW_DROP: u8 = 3;
+pub const TRACE_NOT_FOR_US: u8 = 4;
+pub const TRACE_SHORT: u8 = 5;
+
+/// 单条跟踪记录：五元组 + 方向 + 原因。
+#[derive(Clone, Copy)]
+pub struct TraceEntry {
+    pub proto: u8,
+    pub src_ip: [u8; 4],
+    pub sport: u16,
+    pub dst_ip: [u8; 4],
+    pub dport: u16,
+    pub dir: u8,
+    pub reason: u8,
+}
+
+static TRACE_RING: Mutex<alloc::vec::Vec<TraceEntry>> =
+    Mutex::new(alloc::vec::Vec::new());
+
+/// 开关 + 清空环形日志。
+pub fn trace_set(on: bool) {
+    PACKET_TRACE.store(on, Ordering::Relaxed);
+    if on {
+        TRACE_RING.lock().clear();
+    }
+}
+
+pub fn trace_on() -> bool {
+    PACKET_TRACE.load(Ordering::Relaxed)
+}
+
+/// 记录一条（仅开关开启时有效）；环形满则丢弃最旧。
+pub fn trace_log(
+    proto: u8,
+    src_ip: [u8; 4],
+    sport: u16,
+    dst_ip: [u8; 4],
+    dport: u16,
+    dir: u8,
+    reason: u8,
+) {
+    if !trace_on() {
+        return;
+    }
+    let mut r = TRACE_RING.lock();
+    if r.len() >= TRACE_CAP {
+        r.remove(0);
+    }
+    r.push(TraceEntry { proto, src_ip, sport, dst_ip, dport, dir, reason });
+    crate::println!(
+        "pkt-trace: {} {} {}:{} -> {}:{} ({})",
+        if dir == TRACE_TX { "tx" } else { "rx" },
+        proto,
+        fmt_ip(&src_ip),
+        sport,
+        fmt_ip(&dst_ip),
+        dport,
+        trace_reason_str(reason)
+    );
+}
+
+fn trace_reason_str(reason: u8) -> &'static str {
+    match reason {
+        TRACE_OK => "ok",
+        TRACE_CSUM => "csum-fail",
+        TRACE_FW_DROP => "fw-drop",
+        TRACE_NOT_FOR_US => "not-for-us",
+        TRACE_SHORT => "short",
+        _ => "?",
+    }
+}
+
+/// 环形日志内容（/proc/sys/.../packet_trace 读回）。
+pub fn trace_content() -> alloc::string::String {
+    let r = TRACE_RING.lock();
+    if r.is_empty() {
+        return alloc::string::String::from("(empty)\n");
+    }
+    let mut s = alloc::string::String::from("proto src:sport -> dst:dport dir reason\n");
+    for e in r.iter() {
+        s.push_str(&alloc::format!(
+            "{} {}:{} -> {}:{} {} {}\n",
+            e.proto,
+            fmt_ip(&e.src_ip),
+            e.sport,
+            fmt_ip(&e.dst_ip),
+            e.dport,
+            if e.dir == TRACE_TX { "tx" } else { "rx" },
+            trace_reason_str(e.reason)
+        ));
+    }
+    s
+}
+
+/// 从 L4 载荷前 4 字节取端口对（TCP/UDP 同布局；ICMP 为 0）。
+fn l4_ports(proto: u8, payload: &[u8]) -> (u16, u16) {
+    if proto == 6 || proto == 17 {
+        if payload.len() >= 4 {
+            (
+                u16::from_be_bytes([payload[0], payload[1]]),
+                u16::from_be_bytes([payload[2], payload[3]]),
+            )
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    }
+}
 
 // ---- PCI ----
 const PCI_CONFIG_ADDR: u16 = 0xCF8;
@@ -238,11 +364,14 @@ impl VirtioNet {
         let proto = ip[9];
         let src = [ip[12], ip[13], ip[14], ip[15]];
         let dst = [ip[16], ip[17], ip[18], ip[19]];
-        // M8-切片2：网关接受本机地址与容器虚拟地址（DNAT 目标）。
+        let payload = &ip[ihl..core::cmp::min(total_len, ip.len())];
+        // M13：packet_trace——非本机地址丢弃
         if dst != OUR_IP && dst != CONTAINER_IP {
+            trace_log(proto, src, 0, dst, 0, TRACE_RX, TRACE_NOT_FOR_US);
             return;
         }
-        let payload = &ip[ihl..core::cmp::min(total_len, ip.len())];
+        let (sport, dport) = l4_ports(proto, payload);
+        trace_log(proto, src, sport, dst, dport, TRACE_RX, TRACE_OK);
         match proto {
             1 => self.handle_icmp(payload, src), // ICMP
             6 => self.handle_tcp(payload, src),   // TCP（M5-切片4）
@@ -267,10 +396,12 @@ impl VirtioNet {
         // 校验：伪头 + 段（checksum 字段按 0 参与计算）
         let calc = tcp_checksum(src_ip, OUR_IP, src_port, dst_port, tcp);
         if calc != csum {
+            trace_log(6, src_ip, src_port, OUR_IP, dst_port, TRACE_RX, TRACE_CSUM);
             return; // 校验失败丢弃
         }
         // M8-切片3：基础防火墙——DROP 规则命中则丢弃
         if !fw_filter(6, dst_port) {
+            trace_log(6, src_ip, src_port, OUR_IP, dst_port, TRACE_RX, TRACE_FW_DROP);
             return;
         }
         // M8-切片2：DNAT——网关监听端口 → 容器端口（命中登记 conntrack）
@@ -306,9 +437,11 @@ impl VirtioNet {
         if udp.len() < 8 {
             return;
         }
+        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
         let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
         // M8-切片3：基础防火墙——DROP 规则命中则丢弃
         if !fw_filter(17, dst_port) {
+            trace_log(17, [0, 0, 0, 0], src_port, OUR_IP, dst_port, TRACE_RX, TRACE_FW_DROP);
             return;
         }
         let ulen = u16::from_be_bytes([udp[4], udp[5]]) as usize;
@@ -369,6 +502,9 @@ impl VirtioNet {
         let cs = checksum(&pkt[..20]);
         pkt[10..12].copy_from_slice(&cs.to_be_bytes()); // header checksum
         pkt[20..20 + payload.len()].copy_from_slice(payload);
+        // M13：packet_trace——发包五元组
+        let (sport, dport) = l4_ports(proto, payload);
+        trace_log(proto, OUR_IP, sport, dst_ip, dport, TRACE_TX, TRACE_OK);
         self.send_frame(dst_mac, ETH_TYPE_IP, &pkt[..total]);
     }
 
