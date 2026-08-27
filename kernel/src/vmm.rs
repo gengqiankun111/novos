@@ -223,3 +223,51 @@ pub fn release_as(id: usize) {
         as_.count = 0;
     }
 }
+
+// ---- M13-01：/proc/self/maps 映射注册表 ----
+
+/// 地址空间映射条目（maps 一行：范围/权限/偏移/路径）。
+pub struct MapEntry {
+    pub start: u64,
+    pub end: u64,
+    /// 4 字节权限位："r-xp" / "rw-p" 等。
+    pub perms: [u8; 4],
+    pub offset: u64,
+    /// NUL 结尾路径（"/init" 或 "[stack]"）。
+    pub path: [u8; 32],
+}
+
+/// 当前进程地址空间映射（`elf::load_and_run` 注册；`/proc/self/maps` 读取）。
+pub static MAPS: spin::Lazy<spin::Mutex<alloc::vec::Vec<MapEntry>>> =
+    spin::Lazy::new(|| spin::Mutex::new(alloc::vec::Vec::new()));
+
+/// 注册一段映射（ELF PT_LOAD 段 / 用户栈）。
+pub fn register_map(start: u64, end: u64, perms: [u8; 4], offset: u64, path: &str) {
+    let mut p = [0u8; 32];
+    let n = core::cmp::min(path.len(), 31);
+    p[..n].copy_from_slice(&path.as_bytes()[..n]);
+    MAPS.lock().push(MapEntry {
+        start,
+        end,
+        perms,
+        offset,
+        path: p,
+    });
+}
+
+/// 生成 `/proc/self/maps` 内容（Linux 风格：`范围 权限 偏移 设备 inode 路径`）。
+pub fn maps_content() -> alloc::string::String {
+    let mut s = alloc::string::String::new();
+    for e in MAPS.lock().iter() {
+        let perms = core::str::from_utf8(&e.perms).unwrap_or("????");
+        let path = match e.path.iter().position(|&b| b == 0) {
+            Some(n) => core::str::from_utf8(&e.path[..n]).unwrap_or(""),
+            None => "",
+        };
+        s.push_str(&alloc::format!(
+            "{:016x}-{:016x} {} {:08x} 00:00 0 {}\n",
+            e.start, e.end, perms, e.offset, path
+        ));
+    }
+    s
+}

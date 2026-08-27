@@ -73,6 +73,9 @@ static mut RQ_RDY_B: u32 = 0; // B 已阻塞到 cv 的握手标志
 static mut RQ_TM: u32 = 0; // 超时测试
 static mut RQ_WOKE: u32 = 0; // 被唤醒计数
 
+// M13-01：/proc/self/maps 测试缓冲
+static mut MAP_BUF: [u8; 4096] = [0; 4096];
+
 /// 通用 syscall（3 参数，Linux x86_64 约定：rax=nr, rdi/rsi/rdx=arg1-3）。
 fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
@@ -165,6 +168,21 @@ fn print_u64(v: u64) {
     }
     // SAFETY: buf[i..] 全为 ASCII 数字。
     print(unsafe { core::str::from_utf8_unchecked(&buf[i..]) });
+}
+
+/// 字节子串查找（maptest 用）。
+fn scan_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.len() > hay.len() {
+        return false;
+    }
+    let mut i = 0usize;
+    while i + needle.len() <= hay.len() {
+        if &hay[i..i + needle.len()] == needle {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 #[panic_handler]
@@ -281,7 +299,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1737,6 +1755,64 @@ fn exec(cmd: &[u8]) {
                         print_u64(wc);
                         print("\n");
                     }
+                }
+            }
+        }
+        b"maptest" => {
+            // M13-01：/proc/self/maps——当前进程地址空间映射（ELF 段 + 用户栈）。
+            // 注：proctest 已挂载 /proc；这里直接读取。
+            let fd = syscall3(SYS_OPEN, b"/proc/self/maps\0".as_ptr() as u64, 0, 0);
+            if fd >= 10000 {
+                // SYS_OPEN 失败：错误码为负值按 u64 是大数
+                print("maptest: open failed rc=");
+                print_u64(fd);
+                print("\n");
+            } else {
+                let mut total = 0usize;
+                // SAFETY: 单核测试环境。
+                let buf: &mut [u8; 4096] = unsafe { &mut *core::ptr::addr_of_mut!(MAP_BUF) };
+                loop {
+                    let n = syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, 4096);
+                    if n <= 0 {
+                        break;
+                    }
+                    total += n as usize;
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+                // 统计行数与关键内容
+                let mut lines = 0u64;
+                let mut i = 0usize;
+                while i < total {
+                    if buf[i] == b'\n' {
+                        lines += 1;
+                    }
+                    i += 1;
+                }
+                let has_init = scan_bytes(&buf[..total], b"/init");
+                let has_stack = scan_bytes(&buf[..total], b"[stack]");
+                let has_rxp = scan_bytes(&buf[..total], b"r-xp");
+                print("maptest: bytes=");
+                print_u64(total as u64);
+                print(" lines=");
+                print_u64(lines);
+                print(" init=");
+                print_u64(has_init as u64);
+                print(" stack=");
+                print_u64(has_stack as u64);
+                print("\n");
+                // 打印首行（映射范围 + 权限）
+                let mut j = 0usize;
+                while j < total && buf[j] != b'\n' {
+                    j += 1;
+                }
+                print("maptest: first=");
+                // SAFETY: 首行全为 ASCII。
+                print(unsafe { core::str::from_utf8_unchecked(&buf[..j]) });
+                print("\n");
+                if lines >= 6 && has_init && has_stack && has_rxp {
+                    print("maptest: maps ok\n");
+                } else {
+                    print("maptest: maps FAIL\n");
                 }
             }
         }
