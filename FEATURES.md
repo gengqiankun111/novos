@@ -58,7 +58,7 @@
 | Capabilities | Linux capability 集（permitted/effective/...） | ◻ | M12 | DESIGN §13.5 |
 | Seccomp BPF | 最小解释器 + **高风险调用参数值匹配**（mount/ptrace/openat/execve/reboot/clone） | ◻ | M12 | DESIGN §13.5/勘误§12 |
 | 完整 /proc | /proc/self/{maps,status,exe,fd} + cpuinfo/mounts/filesystems（**maps ✅ M13-01、status ✅ M13-02、exe ✅ M13-03、fd ✅ M13-04、mounts/filesystems ✅ M13-05**） | ◻ | M13 | DESIGN §13.12 |
-| 完整信号 | sigaction(SA_SIGINFO/SA_ONSTACK) + **SIGSEGV 投递**（用户态 #PF → handler/终止，✅ M13-06/10）+ **sigaltstack 备用栈**（✅ M13-07）+ **sigprocmask 阻塞语义 + kill 投递**（✅ M13-08）、实时信号 | ◻ | M13 | DESIGN §13.10 |
+| 完整信号 | sigaction(SA_SIGINFO/SA_ONSTACK) + **SIGSEGV 投递**（用户态 #PF → handler/终止，✅ M13-06/10）+ **sigaltstack 备用栈**（✅ M13-07）+ **sigprocmask 阻塞语义 + kill 投递**（✅ M13-08）+ **sigreturn 增强**（handler 期间阻塞本信号 SA_NODEFER 豁免 + rt_sigreturn 恢复 mask，✅ M13-09）、实时信号 | ◻ | M13 | DESIGN §13.10 |
 | timerfd / signalfd | 事件循环 fd（**timerfd ✅ M13-11**：create/settime/gettime + epoll EPOLLIN + read 计数；**signalfd ✅ M13-12**：signalfd4 + kill 消费 + read siginfo） | ◻ | M13 | DESIGN §13.11 |
 | **OCI 镜像** | `shanshui-guanxin-pull`：registry HTTPS + SHA-256 校验 + 层解压 | ◻ | M14 | DESIGN §16 |
 | **轻量容器运行时** | 生命周期 + overlayfs 组装（不做 docker daemon/CLI） | ◻ | M14 | DESIGN §16 |

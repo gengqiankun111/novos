@@ -175,11 +175,11 @@ OSv / MirageOS 更小但牺牲了多容器隔离；Linux 通用但太重。山�
 | v3.0+ | Wayland 合成器 + 系统监视器（Desktop 阶段二）；v4.0 完整桌面环境 |
 
 > **M13 进行中**：完整 /proc 视图（`/proc/self/{maps,status,exe,fd}` + `/proc/{mounts,filesystems,cpuinfo,health}`）✅；
-> 信号子系统（`rt_sigaction` SA_SIGINFO/SA_ONSTACK、用户态 #PF→SIGSEGV 投递、`sigaltstack` 备用栈、`sigprocmask` 阻塞 + `kill`）✅；
+> 信号子系统（`rt_sigaction` SA_SIGINFO/SA_ONSTACK、用户态 #PF→SIGSEGV 投递、`sigaltstack` 备用栈、`sigprocmask` 阻塞 + `kill`、sigreturn 增强防重入）✅；
 > timerfd（`timerfd_create/settime/gettime` + epoll 阻塞监听 + `read` 到期计数）✅；
 > signalfd（`signalfd4` + kill 信号消费 + epoll 就绪 + `read` siginfo）✅；
 > 网络调试开关（`echo 1 > /proc/sys/net/shanshui-guanxin/packet_trace` 环形日志五元组 + 丢弃原因，shell `>` 重定向）✅；
-> 均经 QEMU `sigtest`/`sigmasktest`/`tfdtest`/`sftest`/`pktracetest` 集成验证。剩余：实时信号、JVM 冒烟、内存基线（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
+> 均经 QEMU `sigtest`/`sigmasktest`/`sigreent`/`tfdtest`/`sftest`/`pktracetest` 集成验证。剩余：实时信号、JVM 冒烟、内存基线（详见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 
 ---
 
