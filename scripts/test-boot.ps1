@@ -112,7 +112,7 @@ if ($Mode -eq "boot") {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
         # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
         # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`nsigmasktest`ntfdtest`nsftest`nsigtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`ntfdtest`nsftest`nsigtest`n"
         foreach ($one in ($cmd -split "`n")) {
             if ($one.Length -eq 0) { continue }
             $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
@@ -413,6 +413,10 @@ if ($Mode -eq "boot") {
         "fdtree: fd listing ok",              # M13-04：fd 目录列出成功
         "mtabtest: mounts ok",                # M13-05：/proc/mounts 含根与 /proc
         "mtabtest: filesystems ok",           # M13-05：/proc/filesystems 含 tmpfs/ext4
+        "pktracetest: enable rc=1",           # M13：写 "1" 开启 packet_trace
+        "pktracetest: sendto rc=",            # M13：UDP 发包触发 tx 跟踪
+        "pktracetest: tx=1 udp=1",            # M13：环形日志含 tx UDP 五元组
+        "pktracetest: packet_trace ok",       # M13：全链路通过
         "sigmasktest: kill rc=0 handled_before_unblock=0", # M13-08：阻塞期不投递
         "sigmasktest: sigprocmask ok",        # M13-08：解除阻塞后投递成功
         "tfdtest: timerfd_create fd=400",     # M13-11：timerfd fd 基址 400

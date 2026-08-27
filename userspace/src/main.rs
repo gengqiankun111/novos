@@ -195,6 +195,21 @@ fn scan_bytes(hay: &[u8], needle: &[u8]) -> bool {
     false
 }
 
+/// 字节子串定位（echo 重定向解析用）。
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.len() > hay.len() {
+        return None;
+    }
+    let mut i = 0usize;
+    while i + needle.len() <= hay.len() {
+        if &hay[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 // ---- M13-06/07：信号测试（sigtest）----
 // 信号帧 ABI 与 kernel/src/signal.rs 严格对齐（SigFrame 布局）。
 const SIGSEGV: u64 = 11;
@@ -306,6 +321,8 @@ static mut JB_RBP: u64 = 0;
 static mut JB_RET: u64 = 0;
 
 /// 保存当前 rsp/rbp/返回地址（handler 经 rt_sigreturn 恢复后跳到保存点继续）。
+/// 注意：恢复点之后只允许"读内存 + 干净的函数调用"，不依赖 callee-saved
+/// 寄存器（跨信号窗口的 callee-saved 无法可靠恢复——见 sigtest 重构）。
 #[inline(never)]
 fn jmp_set() {
     // SAFETY: 单核测试环境；仅读 rsp/rbp/[rsp]，不改栈。
@@ -358,6 +375,48 @@ extern "C" fn segv_handler_plain(signo: i32, info: *mut SigInfo, _uctx: *mut UCo
     }
     syscall3(SYS_RT_SIGRETURN, 0, 0, 0);
     loop {}
+}
+
+/// sigtest 的备用栈基址（经静态传参：恢复点无参调用，避免寄存器依赖）。
+static mut SIGTEST_ALT_BASE: u64 = 0;
+
+/// sigtest 恢复点入口：无参、只读静态——跨信号窗口后 callee-saved/调用方
+/// 寄存器均不可靠，进入本函数即建立干净栈帧并重新初始化全部状态。
+fn sigtest_resume() {
+    if !unsafe { SIG_ACTIVE } {
+        // 首次：触发 #PF
+        // SAFETY: 单核测试环境。
+        unsafe { SIG_ACTIVE = true; }
+        print("sigtest: triggering page fault (write addr 0)...\n");
+        // SAFETY: 故意写非法地址 0，触发用户态 #PF → SIGSEGV 投递。
+        unsafe { core::ptr::write_volatile(0usize as *mut u64, 1) };
+    }
+    // 第二次进入（handler 经 rt_sigreturn 恢复后重新调用本函数）：验证。
+    // SAFETY: 单核测试环境。
+    sigtest_verify(unsafe { SIGTEST_ALT_BASE });
+}
+
+/// sigtest 的恢复点验证（独立函数：跨信号窗口后 callee-saved 寄存器不可靠，
+/// 全部状态经静态量与参数传递，进入本函数即建立干净栈帧）。
+fn sigtest_verify(alt_base: u64) {
+    print("sigtest: resumed after SIGSEGV\n");
+    // SAFETY: 单核测试环境。
+    let signos = unsafe { HANDLED_SIGNOS };
+    let addr = unsafe { HANDLED_ADDR };
+    let hrsp = unsafe { HANDLED_RSP };
+    let on_alt = hrsp >= alt_base && hrsp < alt_base + 8192;
+    print("sigtest: handler ran, signos=");
+    print_u64(signos);
+    print(" addr=");
+    print_u64(addr);
+    print(" on_altstack=");
+    print_u64(on_alt as u64);
+    print("\n");
+    if signos == SIGSEGV && addr == 0 && on_alt {
+        print("sigtest: SIGSEGV handled on altstack ok\n");
+    } else {
+        print("sigtest: SIGSEGV MISMATCH\n");
+    }
 }
 
 #[panic_handler]
@@ -2224,6 +2283,92 @@ fn exec(cmd: &[u8]) {
                 syscall3(SYS_CLOSE, epfd, 0, 0);
             }
         }
+        b"pktracetest" => {
+            // M13：packet_trace（DESIGN §21.8）——写 "1" 开开关 → 发 UDP → 读回
+            // 环形日志验证 tx 五元组 → 写 "0" 关闭。
+            const SYSCTL: &[u8] = b"/proc/sys/net/shanshui-guanxin/packet_trace\0";
+            // 1) 开启（模拟 echo 1 > ...）
+            let fd = syscall3(SYS_OPEN, SYSCTL.as_ptr() as u64, 1 /*O_WRONLY*/, 0);
+            let mut wrc: u64 = 0;
+            if (fd as i64) < 0 {
+                print("pktracetest: open sysctl failed\n");
+            } else {
+                wrc = syscall3(SYS_WRITE, fd, b"1".as_ptr() as u64, 1);
+                syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+            print("pktracetest: enable rc=");
+            print_u64(wrc);
+            print("\n");
+            // 2) 发一个 UDP 包 → 触发 tx 跟踪
+            let sfd = syscall3(SYS_SOCKET, 2, 2, 0);
+            let mut da = [0u8; 16];
+            da[0..2].copy_from_slice(&2u16.to_le_bytes());
+            da[2..4].copy_from_slice(&12345u16.to_be_bytes());
+            da[4..8].copy_from_slice(&[10, 0, 2, 2]);
+            let msg = b"pktrace-probe";
+            let src = syscall6(
+                SYS_SENDTO,
+                sfd,
+                msg.as_ptr() as u64,
+                msg.len() as u64,
+                0,
+                da.as_ptr() as u64,
+                16,
+            );
+            syscall3(SYS_CLOSE, sfd, 0, 0);
+            print("pktracetest: sendto rc=");
+            print_u64(src);
+            print("\n");
+            // 3) 读回环形日志
+            let rfd = syscall3(SYS_OPEN, SYSCTL.as_ptr() as u64, 0, 0);
+            let mut buf = [0u8; 2048];
+            let mut total = 0usize;
+            if (rfd as i64) >= 0 {
+                loop {
+                    let n = syscall3(
+                        SYS_READ,
+                        rfd,
+                        (buf.as_mut_ptr() as u64) + total as u64,
+                        (buf.len() - total) as u64,
+                    );
+                    if n == 0 || n as usize >= buf.len() - total {
+                        break;
+                    }
+                    total += n as usize;
+                    if total >= buf.len() {
+                        break;
+                    }
+                }
+                syscall3(SYS_CLOSE, rfd, 0, 0);
+            }
+            print("pktracetest: trace bytes=");
+            print_u64(total as u64);
+            print("\n");
+            if total > 0 {
+                print(unsafe { core::str::from_utf8_unchecked(&buf[..total]) });
+            }
+            // 4) 断言：tx 方向 + UDP(17) 五元组
+            let content = &buf[..total];
+            let has_tx = scan_bytes(content, b" tx ");
+            let has_udp = scan_bytes(content, b"17 ");
+            let ok = (src as i64) >= 0 && wrc == 1 && total > 0 && has_tx && has_udp;
+            print("pktracetest: tx=");
+            print_u64(has_tx as u64);
+            print(" udp=");
+            print_u64(has_udp as u64);
+            print("\n");
+            if ok {
+                print("pktracetest: packet_trace ok\n");
+            } else {
+                print("pktracetest: packet_trace FAIL\n");
+            }
+            // 5) 关闭
+            let ofd = syscall3(SYS_OPEN, SYSCTL.as_ptr() as u64, 1 /*O_WRONLY*/, 0);
+            if (ofd as i64) >= 0 {
+                syscall3(SYS_WRITE, ofd, b"0".as_ptr() as u64, 1);
+                syscall3(SYS_CLOSE, ofd, 0, 0);
+            }
+        }
         b"mtabtest" => {
             // M13-05：/proc/mounts + /proc/filesystems。
             // 读 /proc/mounts（根 + /proc + /mnt 挂载）
@@ -2354,35 +2499,12 @@ fn exec(cmd: &[u8]) {
             print("sigtest: sigaction rc=");
             print_u64(rc);
             print("\n");
-            // 保存恢复点（handler 经 rt_sigreturn 后从 jmp_set 调用点继续）
-            jmp_set();
-            if !unsafe { SIG_ACTIVE } {
-                // 首次：触发 #PF
-                // SAFETY: 单核测试环境。
-                unsafe { SIG_ACTIVE = true; }
-                print("sigtest: triggering page fault (write addr 0)...\n");
-                // SAFETY: 故意写非法地址 0，触发用户态 #PF → SIGSEGV 投递。
-                unsafe { core::ptr::write_volatile(0usize as *mut u64, 1) };
-            }
-            // 恢复后走到这里：验证 handler 结果
-            print("sigtest: resumed after SIGSEGV\n");
+            // 保存恢复点（handler 经 rt_sigreturn 后回到 jmp_set 调用点，重入
+            // sigtest_resume 建立干净栈帧；参数经静态传递避免寄存器依赖）。
             // SAFETY: 单核测试环境。
-            let signos = unsafe { HANDLED_SIGNOS };
-            let addr = unsafe { HANDLED_ADDR };
-            let hrsp = unsafe { HANDLED_RSP };
-            let on_alt = hrsp >= alt_base && hrsp < alt_base + 8192;
-            print("sigtest: handler ran, signos=");
-            print_u64(signos);
-            print(" addr=");
-            print_u64(addr);
-            print(" on_altstack=");
-            print_u64(on_alt as u64);
-            print("\n");
-            if signos == SIGSEGV && addr == 0 && on_alt {
-                print("sigtest: SIGSEGV handled on altstack ok\n");
-            } else {
-                print("sigtest: SIGSEGV MISMATCH\n");
-            }
+            unsafe { SIGTEST_ALT_BASE = alt_base; }
+            jmp_set();
+            sigtest_resume();
         }
         b"exit" => {
             print("bye\n");
@@ -2490,8 +2612,27 @@ fn exec(cmd: &[u8]) {
             }
         }
         _ if cmd.starts_with(b"echo ") => {
-            print(unsafe { core::str::from_utf8_unchecked(&cmd[5..]) });
-            print("\n");
+            let body = &cmd[5..];
+            // M13：echo TEXT > PATH 重定向（DESIGN §21.8：echo 1 > /proc/sys/...）
+            if let Some(pos) = find_bytes(body, b" > ") {
+                let text = body[..pos].trim_ascii();
+                let path = &body[pos + 3..];
+                let mut p = [0u8; 128];
+                let n = core::cmp::min(path.len(), p.len() - 1);
+                p[..n].copy_from_slice(&path[..n]);
+                let fd = syscall3(SYS_OPEN, p.as_ptr() as u64, O_CREAT | 1 | O_TRUNC, 0o644);
+                if (fd as i64) < 0 {
+                    print("echo: open failed\n");
+                } else {
+                    if !text.is_empty() {
+                        syscall3(SYS_WRITE, fd, text.as_ptr() as u64, text.len() as u64);
+                    }
+                    syscall3(SYS_CLOSE, fd, 0, 0);
+                }
+            } else {
+                print(unsafe { core::str::from_utf8_unchecked(body) });
+                print("\n");
+            }
         }
         _ => {
             print("unknown: ");
