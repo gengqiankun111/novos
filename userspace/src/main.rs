@@ -210,6 +210,26 @@ fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
+/// 解析 meminfo 行 "Label:   12345 kB" → 12345（memtest 用）。
+fn parse_meminfo_kb(s: &str, label: &str) -> u64 {
+    if let Some(pos) = s.find(label) {
+        let rest = &s[pos + label.len()..];
+        let mut v: u64 = 0;
+        for c in rest.chars() {
+            if c.is_ascii_digit() {
+                v = v * 10 + (c as u64 - '0' as u64);
+            } else if c.is_ascii_whitespace() {
+                continue;
+            } else {
+                break;
+            }
+        }
+        v
+    } else {
+        0
+    }
+}
+
 // ---- M13-06/07：信号测试（sigtest）----
 // 信号帧 ABI 与 kernel/src/signal.rs 严格对齐（SigFrame 布局）。
 const SIGSEGV: u64 = 11;
@@ -552,7 +572,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | memtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -1574,6 +1594,37 @@ fn exec(cmd: &[u8]) {
                 print("healthtest: reaped=");
                 print_u64(w);
                 print("\n");
+            }
+        }
+        b"memtest" => {
+            // M13-14：内存基线——读 /proc/meminfo，校验 MemUsed + MemFree == MemTotal
+            // （受管区 2MB..64MB 守恒），并验证 Slab/Buddy 台账字段齐全。
+            let fd = syscall3(SYS_OPEN, b"/proc/meminfo\0".as_ptr() as u64, 0, 0);
+            let mut buf = [0u8; 512];
+            let n = syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, 512);
+            syscall3(SYS_CLOSE, fd, 0, 0);
+            let s = unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) };
+            // 解析 MemTotal/MemFree/MemUsed（kB，Linux meminfo 布局）
+            let total = parse_meminfo_kb(s, "MemTotal:");
+            let free = parse_meminfo_kb(s, "MemFree:");
+            let used = parse_meminfo_kb(s, "MemUsed:");
+            let slab = parse_meminfo_kb(s, "Slab:");
+            print("memtest: total=");
+            print_u64(total as u64);
+            print(" free=");
+            print_u64(free as u64);
+            print(" used=");
+            print_u64(used as u64);
+            print(" slab=");
+            print_u64(slab as u64);
+            print("\n");
+            // 守恒：used + free == total；字段齐全
+            let conserve = used + free == total;
+            let fields_ok = total > 0 && free > 0 && used > 0 && slab > 0;
+            if conserve && fields_ok {
+                print("memtest: memory baseline ok\n");
+            } else {
+                print("memtest: memory baseline FAIL\n");
             }
         }
         b"blktest" => {
