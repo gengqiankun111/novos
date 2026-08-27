@@ -41,18 +41,9 @@ header_end:
 
 # ---------------------------------------------------------------------------
 # PVH ELF note（QEMU -kernel 走 PVH 路径；GRUB 走上面的 multiboot2 路径）
-# XEN_ELFNOTE_PHYS32_ENTRY: QEMU 在 32 位保护模式、分页关闭下跳转 _start，
-# ebx = &hvm_start_info（与 multiboot2 的 mbi 位置一致）。
+# 独立文件 boot_note.asm：仅真实内核构建（非 test）引入——host 测试汇编器
+# 不识别 `.note.Xen, "a", @note` 的 GNU 语法（见 lib.rs 的 cfg 注释）。
 # ---------------------------------------------------------------------------
-.section .note.Xen, "a", @note
-    .align 4
-    .long 2f - 1f      # namesz
-    .long 4f - 3f      # descsz
-    .long 6            # type: XEN_ELFNOTE_PHYS32_ENTRY
-1:  .asciz "Xen"
-2:  .align 4
-3:  .quad _start
-4:  .align 4
 
 # ---------------------------------------------------------------------------
 # BSS：内核栈；DATA：页表（1GB 恒等映射，含重定位，须放 .data）
