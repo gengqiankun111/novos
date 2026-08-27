@@ -434,7 +434,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | mtabtest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2021,6 +2021,67 @@ fn exec(cmd: &[u8]) {
                 print("exetest: exe ok\n");
             } else {
                 print("exetest: exe FAIL\n");
+            }
+        }
+        b"fdtree" => {
+            // M13-04：/proc/self/fd 列出打开的文件描述符（至少 0/1/2）。
+            let fd = syscall3(SYS_OPEN, b"/proc/self/fd\0".as_ptr() as u64, 0, 0);
+            if (fd as i64) < 0 {
+                print("fdtree: open failed\n");
+            } else {
+                let mut buf = [0u8; 512];
+                let mut names = [0u8; 64];
+                let mut nm = 0usize;
+                loop {
+                    let n = syscall3(SYS_GETDENTS64, fd, buf.as_mut_ptr() as u64, 512);
+                    if n == 0 {
+                        break;
+                    }
+                    let mut off = 0usize;
+                    while off + 19 <= n as usize {
+                        let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+                        let mut nl = 0usize;
+                        while off + 19 + nl < buf.len() && buf[off + 19 + nl] != 0 {
+                            nl += 1;
+                        }
+                        for k in 0..nl {
+                            if nm < 64 {
+                                names[nm] = buf[off + 19 + k];
+                                nm += 1;
+                            }
+                        }
+                        names[nm] = b',';
+                        nm += 1;
+                        off += reclen;
+                    }
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+                let mut has = [false; 3];
+                let mut i = 0usize;
+                while i < nm {
+                    let mut num = 0u64;
+                    let mut j = i;
+                    while j < nm && names[j] != b',' {
+                        num = num * 10 + (names[j] - b'0') as u64;
+                        j += 1;
+                    }
+                    if num < 3 {
+                        has[num as usize] = true;
+                    }
+                    i = j + 1;
+                }
+                print("fdtree: fd0=");
+                print_u64(has[0] as u64);
+                print(" fd1=");
+                print_u64(has[1] as u64);
+                print(" fd2=");
+                print_u64(has[2] as u64);
+                print("\n");
+                if has[0] && has[1] && has[2] {
+                    print("fdtree: fd listing ok\n");
+                } else {
+                    print("fdtree: fd listing FAIL\n");
+                }
             }
         }
         b"mtabtest" => {
