@@ -35,6 +35,7 @@ pub mod port;
 pub mod rbtree;
 pub mod serial;
 pub mod signal;
+pub mod signalfd;
 pub mod smp;
 pub mod socket;
 pub mod sync;
