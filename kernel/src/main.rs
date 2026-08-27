@@ -1,4 +1,4 @@
-//! Novos-OS 内核入口（M0：最小可启动内核 + 串口；M1：接入物理内存 + 内核堆）。
+//! 山水观心操作系统内核入口（M0：最小可启动内核 + 串口；M1：接入物理内存 + 内核堆）。
 //!
 //! 启动流程见 DESIGN.md §1.3：boot.asm（长模式/页表/GDT）→ `rust_start` →
 //! 串口/VGA → IDT/PIC → 打印 multiboot2 内存映射 → mm::init + 自测 → 空闲 halt 循环。
@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-use novos_kernel::{elf, gdt, interrupts, mm, multiboot2, println, serial, syscall, vga};
+use shanshui_guanxin_kernel::{elf, gdt, interrupts, mm, multiboot2, println, serial, syscall, vga};
 
 /// multiboot2 规范要求 bootloader 传入的 magic。
 const MB2_BOOT_MAGIC: u32 = 0x36D76289;
@@ -28,11 +28,11 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
     vga::init();
 
     if magic == MB2_BOOT_MAGIC {
-        println!("Novos-OS: boot ok (multiboot2)");
+        println!("Shanshui-guanxin: boot ok (multiboot2)");
     } else if magic == MB1_BOOT_MAGIC {
-        println!("Novos-OS: boot ok (multiboot1)");
+        println!("Shanshui-guanxin: boot ok (multiboot1)");
     } else {
-        println!("Novos-OS: boot ok (pvh)");
+        println!("Shanshui-guanxin: boot ok (pvh)");
     }
 
     // IDT 先行：若后续 mm 初始化出异常，可打印寄存器快照而非静默三重故障。
@@ -74,7 +74,7 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
         Err(e) => println!("mm self-test: FAILED: {e}"),
     }
     // M11 切片5 自测：ELF 动态段解析（静态/动态+interp/动态无 interp/坏 magic）。
-    novos_kernel::elf::self_test();
+    shanshui_guanxin_kernel::elf::self_test();
     let stats = mm::mem_stats();
     println!(
         "mm stats: buddy_pages={} slab_pages={} kernel_used={} B free_pages={}",
@@ -87,21 +87,21 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
     // M4 切片3：dcache（FNV-1a + LRU + shrink）
     println!(
         "dcache: fnv1a buckets=256 target={} watermark={}",
-        novos_kernel::dcache::SHRINK_TARGET,
-        novos_kernel::dcache::SHRINK_WATERMARK
+        shanshui_guanxin_kernel::dcache::SHRINK_TARGET,
+        shanshui_guanxin_kernel::dcache::SHRINK_WATERMARK
     );
     // M5 切片1：virtio-net 驱动 + ARP（此后系统调用路径轮询收包）
-    novos_kernel::net::init();
+    shanshui_guanxin_kernel::net::init();
     // M10 切片1：virtio-blk 驱动 + BIO（同步 I/O + 错误重试）
-    novos_kernel::block::init();
+    shanshui_guanxin_kernel::block::init();
     // M10 切片2：ext4-lite 持久化文件系统 + Page Cache（写回/清缓存模拟重启）
-    novos_kernel::ext4::init();
+    shanshui_guanxin_kernel::ext4::init();
     // M4 切片1/2：ELF 加载器 → 进入用户态 init/shell（不返回）。
     println!("m3: loading embedded userspace init (ELF)...");
     elf::load_and_run();
 
     // 以下不可达
-    println!("Novos-OS: init done, entering idle halt loop");
+    println!("Shanshui-guanxin: init done, entering idle halt loop");
     halt_loop();
 }
 
@@ -118,9 +118,9 @@ pub fn halt_loop() -> ! {
 /// panic：打印位置 + 消息到串口/VGA，然后停机（DESIGN.md §8.2）。
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    novos_kernel::panic_println!("PANIC at {}", info.location().unwrap());
-    novos_kernel::panic_println!("message: {:?}", info.message());
-    novos_kernel::panic_println!("Novos-OS: halted");
+    shanshui_guanxin_kernel::panic_println!("PANIC at {}", info.location().unwrap());
+    shanshui_guanxin_kernel::panic_println!("message: {:?}", info.message());
+    shanshui_guanxin_kernel::panic_println!("Shanshui-guanxin: halted");
     halt_loop()
 }
 

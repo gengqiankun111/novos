@@ -1574,7 +1574,7 @@ UP 稳定 (M9)
 
 ```
 qemu-system-x86_64 \
-  -kernel build/novos.bin \
+  -kernel build/shanshui-guanxin.bin \
   -m 64M                    # 仅给 64MB 物理内存，逼出小内核
   -serial stdio \
   -nographic \
@@ -2284,7 +2284,7 @@ wayland = []                      # 用户态 Wayland 合成器（随 rootfs 打
 desktop-apps = []                 # 文件管理器/终端/设置/系统监视器等
 # —— 以下为用户态工具/服务（不影响内核编译） ——
 top = []                          # top 系统监控工具（Rust 静态编译，<100KB）
-gateway = []                      # novos-gateway：HTTP/反向代理（纯用户态，仅用 TCP + rustls）
+gateway = []                      # shanshui-guanxin-gateway：HTTP/反向代理（纯用户态，仅用 TCP + rustls）
 ```
 
 ```rust
@@ -2462,8 +2462,8 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 |---|---|---|
 | 交叉工具链搭建 | musl-cross + crt1/crti/crtn + linker script + 版本锁定（宿主机侧） | M11 |
 | musl 适配 | 跑通 musl；把"musl 需要的 syscall"定成兼容面清单 | M11 |
-| **Novos-SDK 基础镜像** | 预置 ld-musl + 头文件 + linker script；所有第三方应用强制 `--dynamic-linker=/novos/ld-musl...` 指向 `/novos/` 专用路径，避免动态链接到宿主未实现的 syscall | M11 |
-| **novos-check 工具** | 扫描 ELF 的 syscall 依赖 + 内存足迹预估（RSS+虚拟内存），不通过禁止合入 | M11 |
+| **山水观心 SDK 基础镜像** | 预置 ld-musl + 头文件 + linker script；所有第三方应用强制 `--dynamic-linker=/shanshui-guanxin/ld-musl...` 指向 `/shanshui-guanxin/` 专用路径，避免动态链接到宿主未实现的 syscall | M11 |
+| **shanshui-guanxin-check 工具** | 扫描 ELF 的 syscall 依赖 + 内存足迹预估（RSS+虚拟内存），不通过禁止合入 | M11 |
 | ABI 契约文档化 | syscall 清单、结构体布局、errno、调用约定 → SDK 文档（黑白名单） | M11（持续维护） |
 | 测试框架 + CI | 编译 → 打包 → QEMU 真跑 + 断言 + 示例程序 | M11/M14 |
 | 语言各自增量 | Go 1–2 周、Rust 1–3 周、C++ 2–4 周（各自怪癖） | M14 |
@@ -2475,7 +2475,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 - **可测试、可回归**：每个新增 syscall 有对应 host 测试 + QEMU 集成断言；
 - **与 §13.6 动态链接的关系**：容器服务默认静态编译（Go/Rust/C++）；musl 动态链接（ld-musl）为 musl 生态二进制服务，两者并存；
 - **SDK 文档为交付物**：`docs/abi.md` 维护 syscall 清单/结构体/errno/调用约定，作为工具链适配的契约；
-- **红线（M14 应用合入门槛）**：任何外部应用的移植，**必须先通过 `novos-check`** 扫描其 ELF 的 syscall 依赖并给出内存足迹预估（RSS+虚拟内存），否则禁止合入 M14 应用列表；
+- **红线（M14 应用合入门槛）**：任何外部应用的移植，**必须先通过 `shanshui-guanxin-check`** 扫描其 ELF 的 syscall 依赖并给出内存足迹预估（RSS+虚拟内存），否则禁止合入 M14 应用列表；
 - **（可选）山水观心操作系统官方云构建服务**：用户上传源码 → 云端交叉编译出 musl 静态二进制 → OTA 下发；既省设备内存，又避免在设备上暴露编译器。
 
 ---
@@ -2503,7 +2503,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 ### 16.3 工程含义（工作量减一个数量级）
 
-只需：一个轻量 **`novos-pull`**（走 registry HTTPS + OCI 解析 + 摘要校验）+ 轻量容器运行时（§4.6 流程）+ 镜像打包工具（OCI layer 构建，配合 §15 宿主机交叉编译工具链）。OTA 升级/隔离/部署核心价值一个不少。
+只需：一个轻量 **`shanshui-guanxin-pull`**（走 registry HTTPS + OCI 解析 + 摘要校验）+ 轻量容器运行时（§4.6 流程）+ 镜像打包工具（OCI layer 构建，配合 §15 宿主机交叉编译工具链）。OTA 升级/隔离/部署核心价值一个不少。
 
 ---
 
@@ -2553,12 +2553,12 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 | 等级 | 组件 |
 |---|---|
-| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、**novos-gateway**（HTTP 服务/反向代理）、**top**（系统监控）、busybox、musl 交叉工具链 |
+| 🟢 必支持 | Redis（缓存 + 消息）、SQLite（数据）、**shanshui-guanxin-gateway**（HTTP 服务/反向代理）、**top**（系统监控）、busybox、musl 交叉工具链 |
 | 🟢 值得 | Mosquitto（MQTT）、Lua / MicroPython / QuickJS |
 | 🟡 可选 | NanoMQ、ZeroMQ、CPython |
 | ❌ 排除 | ActiveMQ、RabbitMQ、Kafka、MySQL、PostgreSQL、Node、Erlang |
 
-#### novos-gateway（轻量 HTTP 服务 / 反向代理，2026-08 定稿）
+#### shanshui-guanxin-gateway（轻量 HTTP 服务 / 反向代理，2026-08 定稿）
 
 > **必支持核心服务**，用 Rust 编写、静态编译；Web 管理界面（§20）直接由它承载。
 
@@ -2571,7 +2571,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 | 负载均衡 | 可扩展（轮询/hash 接口预留，配合 §23.2 L4LB 分层） |
 
 - **不依赖内核新功能**：仅使用现有 TCP 栈 + TLS 套接字（§3.8 / §18.6），无内核改动；
-- 部署形态：独立静态二进制（musl），`novos run` 或以系统服务方式常驻；
+- 部署形态：独立静态二进制（musl），`shanshui-guanxin run` 或以系统服务方式常驻；
 - 内存预算：常驻 ~2–4MB（随连接数线性增长），**独立核算，不计入 32MB 内核基线**。
 
 #### top（系统监控工具）
@@ -2588,7 +2588,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 - **部署模板强制注入**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`（按设备内存口径缩）；
 - **禁用 RDB 持久化**：`save ""`（禁 `fork()` 快照）；
 - **只开 AOF**：`appendonly yes` + `auto-aof-rewrite-percentage 100`（重写机制必须可用，防 AOF 无限增长）；
-- 模板随镜像打包（Novos-SDK / 官方镜像仓库统一维护），应用方不得以默认配置部署。
+- 模板随镜像打包（山水观心 SDK / 官方镜像仓库统一维护），应用方不得以默认配置部署。
 
 ### 18.4 消息队列路线（每类需求用最轻的那个）
 
@@ -2695,9 +2695,9 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 > `/dev/fb0`；"文档/下载/桌面"等目录为文件管理器左侧的用户态配置（§3.6），与无头通道并存。
 > **GUI 版系统监视器**复用 top 数据源（§10.2 / §18.3），把 `/proc` 指标直接画在屏幕上。
 
-### 20.2 镜像拉取流程（"docker pull" → `novos-pull`）
+### 20.2 镜像拉取流程（"docker pull" → `shanshui-guanxin-pull`）
 
-- **手动**：Web 界面点"拉取镜像" → 设备端 `novos-pull`（§16.3）连 registry（HTTPS + token 认证）→ SHA-256 校验 → 解压 → 本地镜像仓库 → 点"运行" → 界面显示状态；
+- **手动**：Web 界面点"拉取镜像" → 设备端 `shanshui-guanxin-pull`（§16.3）连 registry（HTTPS + token 认证）→ SHA-256 校验 → 解压 → 本地镜像仓库 → 点"运行" → 界面显示状态；
 - **自动**：设备上电 → Agent 上联云平台 → 下发"部署 xx 版本" → 自动 pull/校验/运行 → 回报状态/日志 → 异常一键回滚（OCI 层复用，只传变化部分）；
 - **离线**：设备连不上公网时，可上网电脑 `docker save` 导出 tar → Web 上传或 U 盘拷入（需兼容 Docker/OCI archive 格式）。
 
@@ -2708,7 +2708,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 | Web 管理界面 | 轻量 HTTP 服务 + 静态前端打包进 rootfs（§5 网络栈之上） | M14 |
 | SSH | dropbear（musl 静态，§15 工具链）+ devpts/PTY（§13.4，M12 已有） | M14 |
 | Agent 上联 | 用户态交叉编译程序（§15），走 HTTPS + JSON（§18.6） | M14 |
-| 离线导入 | OCI/Docker archive 解析（复用 §16.3 `novos-pull` 的解压/校验链） | M14 |
+| 离线导入 | OCI/Docker archive 解析（复用 §16.3 `shanshui-guanxin-pull` 的解压/校验链） | M14 |
 
 ---
 
@@ -2722,8 +2722,8 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 - **现象**：用户 `apt-get install` 或用 glibc 工具链编译的程序，启动报 `Segmentation Fault`
   （动态链接器找不到符号 / TLS 布局不兼容）。
-- **强制门槛**：`novos-check`（M11）在容器启动前扫描 ELF 的 `PT_INTERP` 段——
-  **非指向 `/novos/ld-musl` 一律拒绝启动**，报错：
+- **强制门槛**：`shanshui-guanxin-check`（M11）在容器启动前扫描 ELF 的 `PT_INTERP` 段——
+  **非指向 `/shanshui-guanxin/ld-musl` 一律拒绝启动**，报错：
   `"请使用 musl 工具链重新编译（宿主交叉编译，见 docs/nosos-sdk.md）"`。
 
 ### 21.2 Redis/服务 OOM（配置被用户覆盖）
@@ -2751,8 +2751,8 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 ### 21.6 非 Docker CLI 兼容（明确标语）
 
 - 所有入口（Web/CLI）明示：
-  `"山水观心操作系统容器运行时遵循 OCI 镜像规范，管理方式为 novos 命令，非 Docker CLI 兼容（不支持 docker-compose）。"`
-- **`novos run` 语义对齐 OCI runtime-spec**，但命令行参数是 `novos run <image> <cmd>`，
+  `"山水观心操作系统容器运行时遵循 OCI 镜像规范，管理方式为 shanshui-guanxin 命令，非 Docker CLI 兼容（不支持 docker-compose）。"`
+- **`shanshui-guanxin run` 语义对齐 OCI runtime-spec**，但命令行参数是 `shanshui-guanxin run <image> <cmd>`，
   而非 docker run 的 `-d`/`-p` 等（通过 `config.json` 或环境变量配置）。
 
 ### 21.7 实时性需求（RT 调度）
@@ -2762,7 +2762,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 ### 21.8 网络调试（tcpdump 替代）
 
-- 无 BPF；提供极简内核调试开关：`echo 1 > /proc/sys/net/novos/packet_trace`，
+- 无 BPF；提供极简内核调试开关：`echo 1 > /proc/sys/net/shanshui-guanxin/packet_trace`，
   内核在环形日志打印每个数据包**五元组 + 丢弃原因**（性能下降 ~50%，仅供调试）。
 
 ### 21.9 OTA 内核 A/B 分区
@@ -2774,7 +2774,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 ## 22. 官方软件仓库（从精选清单到应用商店）
 
-> 山水观心操作系统从"出色的内核"走向"成功的平台"的必经之路。对照 §21 的被动防御（`novos-check`
+> 山水观心操作系统从"出色的内核"走向"成功的平台"的必经之路。对照 §21 的被动防御（`shanshui-guanxin-check`
 > 拦截），官方仓库是**主动保障**——预编译、预配置、签名、与 musl 完全兼容，把设计哲学
 > （安全、轻量、确定）通过官方软件包传递给用户。演进节奏见 DEVELOP_EXTENSION 主线一。
 >
@@ -2786,8 +2786,8 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 | 方案 | 问题 | 官方仓库的解法 |
 |---|---|---|
-| 官网链接清单 | 依赖地狱：用户手动编译、解决依赖 | 预编译、预配置，`novos install redis` 开箱即用 |
-| `novos-check` 被动拦截 | 只能在启动前拦截不兼容程序 | 仓库内软件经官方测试 + 签名，从源头杜绝 glibc 错版 |
+| 官网链接清单 | 依赖地狱：用户手动编译、解决依赖 | 预编译、预配置，`shanshui-guanxin install redis` 开箱即用 |
+| `shanshui-guanxin-check` 被动拦截 | 只能在启动前拦截不兼容程序 | 仓库内软件经官方测试 + 签名，从源头杜绝 glibc 错版 |
 | 手工部署模板 | 普通用户不会配置 | 仓库包自动应用最佳实践（如 redis `--maxmemory 64mb`） |
 
 ### 22.2 仓库形态："小而精"的精选集合
@@ -2796,7 +2796,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 | 分类 | 内容 |
 |---|---|
-| **core（核心）** | init、shell、`novos` 命令行工具 |
+| **core（核心）** | init、shell、`shanshui-guanxin` 命令行工具 |
 | **runtime（运行时/语言）** | musl 运行时、Go/Rust 语言运行时支持 |
 | **service（数据与服务）** | Redis、SQLite、Mosquitto (MQTT) 等 |
 | **net-tools（网络工具）** | curl、wget、dropbear (SSH) 等 |
@@ -2806,15 +2806,15 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 **阶段一：官方推荐软件清单 + 构建工具链（MVP，1.0 发布初期）**
 - 文档"山水观心操作系统官方推荐软件"页：表格列出软件名称 / 功能 / 官方项目地址 / **官方验证的
   musl 静态二进制下载链接**；
-- 配套 `novos-build`：参照清单一键从源码构建 山水观心操作系统兼容软件包。
+- 配套 `shanshui-guanxin-build`：参照清单一键从源码构建 山水观心操作系统兼容软件包。
 
 **阶段二：社区软件仓库（生态构建期）**
-- 简单仓库（opkg 或容器化方案）：`novos repo-add` 添加官方/第三方源，`novos install` 安装；
+- 简单仓库（opkg 或容器化方案）：`shanshui-guanxin repo-add` 添加官方/第三方源，`shanshui-guanxin install` 安装；
 - 核心包维护流程（以 Redis 为例）：官网取稳定源码 → `musl-gcc` 静态编译成无外部依赖单可执行 →
   打包二进制 + 配置 + 启动脚本 → 私钥签名 → 上传仓库服务器。
 
 **阶段三：云端原生应用商店（终极形态）**
-- 与 §21.4 云端构建深度集成：`novos deploy redis` 自动从云端拉取最新最安全镜像并部署。
+- 与 §21.4 云端构建深度集成：`shanshui-guanxin deploy redis` 自动从云端拉取最新最安全镜像并部署。
 
 ### 22.4 立即可行的行动（不等阶段三）
 
@@ -2838,12 +2838,12 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 
 | 需求 | 场景 | 方案 | 版本 |
 |---|---|---|---|
-| 容器保活策略（Restart Policy） | 掉电自启后容器未自动起来，无人值守需人工 `novos run` | OCI spec `config.json` 扩展 `restartPolicy`：`always`/`on-failure`/`unless-stopped` | v1.1 |
-| Web 管理界面默认开启 | 现场施工人员不懂命令，需按钮化操作 | `novos-webui` 服务（端口 80），容器列表/启停/日志滚动/资源曲线（CPU/内存） | v1.1 |
+| 容器保活策略（Restart Policy） | 掉电自启后容器未自动起来，无人值守需人工 `shanshui-guanxin run` | OCI spec `config.json` 扩展 `restartPolicy`：`always`/`on-failure`/`unless-stopped` | v1.1 |
+| Web 管理界面默认开启 | 现场施工人员不懂命令，需按钮化操作 | `shanshui-guanxin-webui` 服务（端口 80），容器列表/启停/日志滚动/资源曲线（CPU/内存） | v1.1 |
 | 4G/5G 蜂窝上网 | 偏远变电站/现场依赖蜂窝网络 | PPP 协议栈 + USB 串口驱动（模块通信）+ wpa_supplicant 轻量移植（Wi-Fi WPA2/WPA3） | v1.5 |
 | 持久化日志落盘 + 轮转 | 半夜重启日志全丢，无法排障 OOM/crash | 关键内核日志 + 容器日志异步写 `/var/log/journal/`（Ext4），按大小轮转 + 总大小限制 | v1.5 |
-| WireGuard VPN | 公网暴露危险，需站点到站点安全连接 | `novos-vpn` 工具（WireGuard 用户态/内核模块，代码量小、32MB 环境友好） | v1.5 |
-| 存储卷独占锁 | SQLite 被两进程并发写损坏 | `novos run --volume-exclusive`（底层 flock/leases），一进程写时他进程不可打开 | v1.5 |
+| WireGuard VPN | 公网暴露危险，需站点到站点安全连接 | `shanshui-guanxin-vpn` 工具（WireGuard 用户态/内核模块，代码量小、32MB 环境友好） | v1.5 |
+| 存储卷独占锁 | SQLite 被两进程并发写损坏 | `shanshui-guanxin run --volume-exclusive`（底层 flock/leases），一进程写时他进程不可打开 | v1.5 |
 | MicroPython 运行时 | 工业数据清洗（JSON→CSV）需脚本语言，CPython 太重 | MicroPython（<256KB，契合轻量定位），作官方镜像入仓库 | v1.5 |
 | PTP/NTP 精确时间同步 | 分布式日志/Modbus 事件排序依赖统一时间 | SNTP 升级为 chrony/ntpd 轻量版（带时钟漂移补偿），评估 PTP(IEEE 1588) | v1.5 |
 
@@ -2874,20 +2874,20 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 ### 24.1 开箱即用的预构建环境
 
 - **预构建 QEMU 镜像**：提供可直接启动的完整镜像（内核 + initramfs + 基础工具），用户无需编译即可体验。
-- **一键启动脚本**：`./novos-run.sh`，自动调用 QEMU 并加载镜像，屏蔽复杂参数。
+- **一键启动脚本**：`./shanshui-guanxin-run.sh`，自动调用 QEMU 并加载镜像，屏蔽复杂参数。
 - **硬件/虚拟机支持矩阵**：明确列出当前支持的平台（QEMU/KVM、特定 x86_64 工控板），避免用户在不支持的硬件上浪费时间。
 
 ### 24.2 清晰的分层文档
 
 - **5 分钟快速开始指南**：从下载镜像到进入 shell 的完整步骤，附截图和命令示例。
-- **第一个容器指南**：手把手教用户用 `novos run` 启动 busybox 容器并执行命令。
+- **第一个容器指南**：手把手教用户用 `shanshui-guanxin run` 启动 busybox 容器并执行命令。
 - **《从 Linux 迁移避坑指南》**：集中说明 glibc vs musl、Ext4 data=journal、设备端不编译等常见误区，给出明确解决方案（对应 §21）。
 
 ### 24.3 完善的开发者工具链
 
 - **预配置的交叉编译工具链**：提供 Docker 镜像或 SDK 包，支持 `x86_64-musl` 和 `aarch64-musl` 一键交叉编译。
 - **应用模板与示例**：提供 C / Rust 的 "Hello, World" 应用模板，附 `Makefile` 或 `build.rs`。
-- **`novos-build` 命令行工具**：实现从源码到 OCI 镜像的一键构建，构建时自动运行 `novos-check` 验证兼容性（见 §15.3）。
+- **`shanshui-guanxin-build` 命令行工具**：实现从源码到 OCI 镜像的一键构建，构建时自动运行 `shanshui-guanxin-check` 验证兼容性（见 §15.3）。
 
 ### 24.4 调试与问题反馈机制
 
@@ -2906,7 +2906,7 @@ fn fb_init() { ... }              // 图形版：显示设备初始化（§1.3 �
 - 预构建 QEMU 镜像（.qcow2）和启动脚本
 - 快速开始指南（README + 在线文档）
 - 交叉编译 SDK（Dockerfile 或 tar 包）
-- 示例应用仓库（`novos-examples`）
+- 示例应用仓库（`shanshui-guanxin-examples`）
 - GitHub Issue 模板 + 社区沟通渠道信息
 - 官方软件仓库的"推荐清单"页面（阶段一，见 §22.3）
 

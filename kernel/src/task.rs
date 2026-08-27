@@ -427,6 +427,12 @@ pub fn current_name() -> &'static str {
     unsafe { TASKS[CURRENT].name }
 }
 
+/// 当前任务用户页表根（CR3；内核任务为 0）。
+pub fn current_cr3() -> usize {
+    // SAFETY: 单核读。
+    unsafe { TASKS[CURRENT].cr3 }
+}
+
 // ---- fork / exit / waitpid（M2 切片3）----
 
 /// fork 汇编桩（boot.asm）：把返回地址传给 `rust_fork_impl`。
@@ -772,9 +778,9 @@ static mut NEXT_NS: u32 = 1;
 
 // ---- uts namespace（M6-切片2）----
 
-/// uts namespace 表：ns id → hostname（0 号固定根 = "novos"）。
+/// uts namespace 表：ns id → hostname（0 号固定根 = "shanshui-guanxin"）。
 static mut UTS_HOST: [[u8; 32]; 8] = [
-    *b"novos\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+    *b"shanshui-guanxin\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
     [0; 32],
     [0; 32],
     [0; 32],

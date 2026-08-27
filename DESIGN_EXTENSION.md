@@ -17,15 +17,15 @@
 长期目标是建立**契约式交付体系**：不兼容的软件在到达用户之前就被拦截或自动适配。
 
 **触发条件（任一满足即启动）**：
-- `novos-check` 拦截日志中非 musl 二进制占比 > 5%；
+- `shanshui-guanxin-check` 拦截日志中非 musl 二进制占比 > 5%；
 - 用户反馈"安装软件困难"频次超过 3 次/月；
 - 社区请求添加第三方软件源。
 
 ### 1.1 应用商店式的签名与兼容性层
 
-**现状**：`novos-check` 启动前扫描 ELF 的 `PT_INTERP`，拦截非 musl 二进制（DESIGN §21.1）。
+**现状**：`shanshui-guanxin-check` 启动前扫描 ELF 的 `PT_INTERP`，拦截非 musl 二进制（DESIGN §21.1）。
 
-**长期演进**：把 `novos-check` 从"拦截器"升级为"适配器"，并逐步建立**官方软件仓库**（DESIGN §22）
+**长期演进**：把 `shanshui-guanxin-check` 从"拦截器"升级为"适配器"，并逐步建立**官方软件仓库**（DESIGN §22）
 ——这是从"出色内核"到"成功平台"的必经之路。
 
 **为什么需要官方仓库（对比官网链接清单）**：预编译预配置（告别依赖地狱）、官方测试签名
@@ -34,14 +34,14 @@
 **三阶段演进**：
 
 - **阶段一（MVP，1.0 初期）**："官方推荐软件清单"页（软件/功能/官网地址/官方验证 musl 静态
-  二进制下载链接）+ `novos-build`（源码 → 兼容软件包）；
-- **阶段二（生态构建期）**：社区软件仓库（opkg/容器化），`novos repo-add`/`novos install`；
+  二进制下载链接）+ `shanshui-guanxin-build`（源码 → 兼容软件包）；
+- **阶段二（生态构建期）**：社区软件仓库（opkg/容器化），`shanshui-guanxin repo-add`/`shanshui-guanxin install`；
   核心包维护：官网稳定源码 → `musl-gcc` 静态编译单可执行 → 打包 + 私钥签名 → 上传；
-- **阶段三（终极形态）**：云端原生应用商店，`novos deploy redis` 自动拉取最新最安全镜像部署。
+- **阶段三（终极形态）**：云端原生应用商店，`shanshui-guanxin deploy redis` 自动拉取最新最安全镜像部署。
 
 - **轻量兼容层**：评估为 glibc 程序提供一个极简的 glibc→musl syscall 翻译层，或**容器化沙盒**
   ——让不兼容程序在受限环境运行，崩溃不波及宿主机。
-- **签名与认证**：仓库内软件经官方预审核 + 签名，用户只能经 `novos pull`/`novos install`
+- **签名与认证**：仓库内软件经官方预审核 + 签名，用户只能经 `shanshui-guanxin pull`/`shanshui-guanxin install`
   拉取已验证镜像，从源头杜绝"乱装软件导致崩溃"。
 
 **立即可行**：选定 Redis 7.2.4+、给出官方下载链接、编写《为 山水观心操作系统构建 Redis》musl 静态编译指南。
@@ -85,7 +85,7 @@
 
 - **官方云构建服务**：浏览器写代码 → 云端 IDE/CI/CD → 自动交叉编译 + OCI 打包 + OTA 直达设备；
   彻底消除本地搭建交叉编译环境的需求。
-- **"代码即镜像"工具链**：`novos-build` 一条命令完成源码 → OCI 镜像 + 自动 `novos-check` 验证。
+- **"代码即镜像"工具链**：`shanshui-guanxin-build` 一条命令完成源码 → OCI 镜像 + 自动 `shanshui-guanxin-check` 验证。
 
 ### 2.2 多核能力的"软着陆"
 
@@ -105,7 +105,7 @@
 
 - **与 Balena 等生态融合**：BalenaEngine 已证明精简 OCI 引擎比完整 Docker 更有价值；
   山水观心操作系统运行时与 BalenaCloud 等平台集成，提供设备管理/OTA 等企业级能力。
-- **标准化工具链**：推动 `novos` 命令行成为嵌入式 Rust/Go 项目的事实标准构建工具（如 cargo 之于 Rust）。
+- **标准化工具链**：推动 `shanshui-guanxin` 命令行成为嵌入式 Rust/Go 项目的事实标准构建工具（如 cargo 之于 Rust）。
 
 ---
 
@@ -139,7 +139,7 @@
 - **结构化日志**：所有内核日志（丢包、调度事件等）输出 JSON 格式，便于远程日志平台（ELK）聚合分析。
 - **top 系统监控**：轻量监控工具（Rust 静态编译，<100KB，DESIGN §18.3）作为**必支持**工具，
   数据源为 `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat`（DESIGN §10.2）；
-  后续提供 **Web 版 `/top` 接口**（经 novos-gateway 暴露）与 **GUI 版系统监视器**（Desktop 版，DESIGN §13.16）。
+  后续提供 **Web 版 `/top` 接口**（经 shanshui-guanxin-gateway 暴露）与 **GUI 版系统监视器**（Desktop 版，DESIGN §13.16）。
 
 ### 3.3 不可变系统与原子升级
 
@@ -157,17 +157,17 @@
 > 与三条主线不同，本类需求由**真实用户画像**直接驱动（传统嵌入式工程师 / 云原生 DevOps /
 > 工业现场维护），集中在三个维度，按紧迫度分三档，全部**只增不减**。详细见 DESIGN §23。
 
-**基础生存型（v1.1–v1.5）**：容器保活策略（`restartPolicy`）、**novos-gateway（HTTP 服务/反向代理）**、
+**基础生存型（v1.1–v1.5）**：容器保活策略（`restartPolicy`）、**shanshui-guanxin-gateway（HTTP 服务/反向代理）**、
 Web UI 默认开启（v1.1）；
 4G/5G PPP+USB 串口、持久化日志轮转、WireGuard VPN、存储卷独占锁、MicroPython、PTP/NTP 同步（v1.5）。
 
 **进阶生产力型（v2.0+）**：四层负载均衡（IPVS 轮询）、流量镜像（灰度验证）。
 
 **与三主线的关系**：服务可靠性（保活/持久化日志/独占锁）归入主线一"免疫"；远程可运维性
-（Web UI/novos-gateway/VPN）归入主线二"透明"；硬件连接性（4G/5G）与时间同步（PTP/NTP）归入主线三"好用"。
+（Web UI/shanshui-guanxin-gateway/VPN）归入主线二"透明"；硬件连接性（4G/5G）与时间同步（PTP/NTP）归入主线三"好用"。
 三者共同构成从"原型"到"产品"的完整拼图。
 
-### 3.5 novos-gateway（云原生网关，Rust 实现）
+### 3.5 shanshui-guanxin-gateway（云原生网关，Rust 实现）
 
 **现状**：轻量 HTTP 服务作为网关控制面（DESIGN §18.3）；Web 管理界面需要稳定的 HTTP/TLS 承载。
 
@@ -175,9 +175,9 @@ Web UI 默认开启（v1.1）；
 
 - **能力**：HTTP/1.1（必支持）+ HTTP/2（可选）、TLS（rustls）、反向代理（按路由转发到容器服务）、
   负载均衡（轮询/hash 接口预留，与 DESIGN §23.2 L4LB 分层）；
-- **定位**：与"四层负载均衡（L4LB）"形成 **L4（IPVS）+ L7（novos-gateway）** 双层网关；
+- **定位**：与"四层负载均衡（L4LB）"形成 **L4（IPVS）+ L7（shanshui-guanxin-gateway）** 双层网关；
 - **不依赖内核新功能**：仅用现有 TCP 栈 + TLS 套接字，纯用户态静态二进制（DESIGN §18.3）；
-- **验收**：`novos gateway` 一条命令启动，把 `/metrics`、`/top`、Web 管理界面统一挂载到 443/80。
+- **验收**：`shanshui-guanxin gateway` 一条命令启动，把 `/metrics`、`/top`、Web 管理界面统一挂载到 443/80。
 
 ---
 
@@ -207,7 +207,7 @@ Web UI 默认开启（v1.1）；
 
 | 维度 | 短期 v1.0 | 中期 v2.0 | 长期 v3.0+ |
 |---|---|---|---|
-| 致命 Bug | `novos-check` 强制拦截 | 轻量兼容层、自动 FS 转换 | 官方应用商店、Cgroup 策略硬化 |
+| 致命 Bug | `shanshui-guanxin-check` 强制拦截 | 轻量兼容层、自动 FS 转换 | 官方应用商店、Cgroup 策略硬化 |
 | 核心困惑 | 文档引导、`/etc/motd` 提示 | 云端构建服务、SMP 负载均衡 | OCI 原生生态、与 Balena 集成 |
-| 高频需求 | 调试开关、预留 RT 接口、**top** | SCHED_FIFO、结构化日志、**novos-gateway** | eBPF 子集、A/B 分区原子升级、**GPU/图形支持** |
+| 高频需求 | 调试开关、预留 RT 接口、**top** | SCHED_FIFO、结构化日志、**shanshui-guanxin-gateway** | eBPF 子集、A/B 分区原子升级、**GPU/图形支持** |
 | 图形与桌面（主线四） | — | 帧缓冲 + DRM KMS、`/dev/fb0` | Wayland 合成器、系统监视器、完整桌面环境 |

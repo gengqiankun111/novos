@@ -35,7 +35,7 @@ pub const SYS_FORK: u64 = 57;
 pub const SYS_WAITPID: u64 = 61;
 pub const SYS_UNAME: u64 = 63;
 pub const SYS_SETHOSTNAME: u64 = 170;
-/// Novos 扩展：读当前 cgroup 统计 { pids, mem }。
+/// 山水观心操作系统扩展：读当前 cgroup 统计 { pids, mem }。
 pub const SYS_CGROUP_STAT: u64 = 500;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
@@ -49,19 +49,19 @@ pub const SYS_CHDIR: u64 = 80;
 pub const SYS_FUTEX: u64 = 202;
 /// arch_prctl：TLS 段基址（FS base）设置/查询（M11-切片2）。
 pub const SYS_ARCH_PRCTL: u64 = 158;
-/// Novos 扩展：添加 NAT 端口映射规则（网关控制面）。
+/// 山水观心操作系统扩展：添加 NAT 端口映射规则（网关控制面）。
 pub const SYS_NAT_ADD: u64 = 501;
-/// Novos 扩展：读 conntrack 统计 { 条目数, 命中数 }。
+/// 山水观心操作系统扩展：读 conntrack 统计 { 条目数, 命中数 }。
 pub const SYS_CT_STAT: u64 = 502;
-/// Novos 扩展：添加防火墙规则（proto, dport, action）。
+/// 山水观心操作系统扩展：添加防火墙规则（proto, dport, action）。
 pub const SYS_FW_ADD: u64 = 503;
-/// Novos 扩展：删除防火墙规则（proto, dport）。
+/// 山水观心操作系统扩展：删除防火墙规则（proto, dport）。
 pub const SYS_FW_DEL: u64 = 504;
-/// Novos 扩展：读防火墙统计 { 规则数, 丢弃包数 }。
+/// 山水观心操作系统扩展：读防火墙统计 { 规则数, 丢弃包数 }。
 pub const SYS_FW_STAT: u64 = 505;
-/// Novos 扩展：BIO 扇区读写（lba, buf, len, is_write）。
+/// 山水观心操作系统扩展：BIO 扇区读写（lba, buf, len, is_write）。
 pub const SYS_BLK_RW: u64 = 506;
-/// Novos 扩展：ext4-lite 文件系统操作（op, name, buf, len, offset）。
+/// 山水观心操作系统扩展：ext4-lite 文件系统操作（op, name, buf, len, offset）。
 pub const SYS_BLKFS: u64 = 507;
 
 /// boot.asm 导出的 syscall 入口。
@@ -612,7 +612,7 @@ fn sys_uname(buf: u64) -> u64 {
         let n = core::cmp::min(s.len(), 64);
         dst[off..off + n].copy_from_slice(&s[..n]);
     };
-    put(&mut u, 0, b"Novos");
+    put(&mut u, 0, b"Shanshui-guanxin");
     put(&mut u, 65, crate::task::gethostname());
     put(&mut u, 130, b"0.3.0");
     put(&mut u, 195, b"M6-uts");

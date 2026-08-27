@@ -9,7 +9,7 @@
 | 段 | 大小 | 说明 |
 |----|------|------|
 | .text | 21.3 KB | 代码（含 boot.asm、syscall 入口、异常 stub） |
-| .rodata | 19.7 KB | 常量 + 嵌入的用户态 init ELF（novos-init ~12 KB） |
+| .rodata | 19.7 KB | 常量 + 嵌入的用户态 init ELF（shanshui-guanxin-init ~12 KB） |
 | .data | 13.9 KB | 页表（pml4/pdpt/pd）+ TSS + 初始化数据 |
 | .bss | 659 KB | 内核栈 64KB + syscall 栈 16KB + PAGE_FRAMES 台账 + 任务/红黑树池 |
 | 加载段合计 | ~55 KB | .text+.rodata+.data（镜像实际加载部分） |

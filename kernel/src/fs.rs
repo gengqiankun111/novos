@@ -300,7 +300,7 @@ pub fn health_inode() -> Arc<Inode> {
 pub fn cpuinfo_inode() -> Arc<Inode> {
     let ino = Inode::file();
     let body = alloc::format!(
-        "processor\t: 0\nvendor_id\t: Novos\nmodel name\t: Novos-OS virtual CPU\ncpu MHz\t\t: 100\ncores\t\t: 1\nphysical id\t: 0\ncpu cores\t: 1\nonline\t\t: 1\n"
+        "processor\t: 0\nvendor_id\t: Shanshui-guanxin\nmodel name\t: Shanshui-guanxin virtual CPU\ncpu MHz\t\t: 100\ncores\t\t: 1\nphysical id\t: 0\ncpu cores\t: 1\nonline\t\t: 1\n"
     );
     *ino.data.lock() = body.into_bytes();
     ino
@@ -322,6 +322,38 @@ pub static SELF_DIR: spin::Lazy<Arc<Inode>> = spin::Lazy::new(|| Inode::dir());
 pub fn maps_inode() -> Arc<Inode> {
     let ino = Inode::file();
     *ino.data.lock() = crate::vmm::maps_content().into_bytes();
+    ino
+}
+
+/// /proc/self/status（M13-02）：当前进程状态（VmRSS/VmPeak/Threads/Uid/Gid）。
+/// 注：第一版单用户（Uid/Gid=0）；Threads=1（无 tgid 跟踪，进程级视图）；
+/// VmPeak 暂以当前 RSS 计（无历史峰值跟踪）。
+pub fn status_inode() -> Arc<Inode> {
+    let ino = Inode::file();
+    let pid = crate::task::current_pid();
+    let name = crate::task::current_name();
+    let cr3 = crate::task::current_cr3();
+    let rss_kb = (crate::page_table::count_user_pages(cr3) * crate::vmm::PAGE_SIZE) / 1024;
+    let vsize_kb = crate::vmm::vsize_bytes() / 1024;
+    let body = alloc::format!(
+        "Name:\t{}\nState:\tR (running)\nTgid:\t{}\nPid:\t{}\nPPid:\t0\nTracerPid:\t0\n\
+         Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nFDSize:\t256\nGroups:\t0\n\
+         VmPeak:\t{:>6} kB\nVmSize:\t{:>6} kB\nVmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t{:>6} kB\nVmRSS:\t{:>6} kB\n\
+         RssAnon:\t{:>6} kB\nRssFile:\t0 kB\nRssShmem:\t0 kB\nVmData:\t0 kB\nVmStk:\t0 kB\nVmExe:\t0 kB\nVmLib:\t0 kB\nVmPTE:\t0 kB\nVmSwap:\t0 kB\n\
+         Threads:\t1\nSigQ:\t0/0\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000000000\n\
+         CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\n\
+         NoNewPrivs:\t0\nSeccomp:\t0\nCpus_allowed:\t1\nCpus_allowed_list:\t0\nMems_allowed:\t1\nMems_allowed_list:\t0\n\
+         voluntary_ctxt_switches:\t0\nnonvoluntary_ctxt_switches:\t0\n",
+        name,
+        pid,
+        pid,
+        rss_kb,
+        vsize_kb,
+        rss_kb,
+        rss_kb,
+        rss_kb
+    );
+    *ino.data.lock() = body.into_bytes();
     ino
 }
 
@@ -423,6 +455,12 @@ fn resolve(path: &str, create_last: bool) -> Result<Arc<Inode>, ()> {
         // M13-01：/proc/self/maps → 当前进程地址空间映射
         if proc_self && *comp == "maps" {
             cur = maps_inode();
+            proc_self = false;
+            continue;
+        }
+        // M13-02：/proc/self/status → 当前进程状态
+        if proc_self && *comp == "status" {
+            cur = status_inode();
             proc_self = false;
             continue;
         }
@@ -861,9 +899,12 @@ fn visible_children(ino: &Inode) -> Vec<Dentry> {
         kids.push(Dentry { name: String::from("cpuinfo"), inode: Inode::file() });
         return kids;
     }
-    // M13-01：/proc/self 下仅 maps
+    // M13-01/02：/proc/self 下 maps + status
     if ino as *const Inode as usize == Arc::as_ptr(&SELF_DIR) as usize {
-        return alloc::vec![Dentry { name: String::from("maps"), inode: Inode::file() }];
+        return alloc::vec![
+            Dentry { name: String::from("maps"), inode: Inode::file() },
+            Dentry { name: String::from("status"), inode: Inode::file() },
+        ];
     }
     if let Some(merged) = overlay_merged_children(ino) {
         return merged;

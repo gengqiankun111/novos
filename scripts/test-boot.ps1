@@ -1,9 +1,9 @@
-﻿# M3 集成测试：双模式
+# M3 集成测试：双模式
 #   -Mode boot  : -serial file 捕获完整启动日志，断言内核引导 + ELF 加载 + shell banner
 #   -Mode shell : socket 串口注入 help/version，断言命令往返（sys_read/sys_write）
 # 用法: powershell -ExecutionPolicy Bypass -File scripts/test-boot.ps1 -Mode boot
 param(
-    [string]$Kernel = "target/novos-kernel.bin",
+    [string]$Kernel = "target/shanshui-guanxin-kernel.bin",
     [ValidateSet("boot", "shell")][string]$Mode = "boot",
     [string]$LogFile = "target/test-boot.log",
     [int]$SerialPort = 4551,
@@ -47,7 +47,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output = Get-Content -Raw -Path $LogFile
     $needles = @(
-        "Novos-OS: boot ok",
+        "Shanshui-guanxin: boot ok",
         "m3: loading embedded userspace init",
         "m3/elf: PT_LOAD vaddr=0x8000000000",
         "elf/dyn: static ET_EXEC ok",          # M11-切片5：静态判定
@@ -58,7 +58,7 @@ if ($Mode -eq "boot") {
         "m3/elf: static (no PT_INTERP)",       # M11-切片5：init 为静态 ELF
         "m3/elf: no PT_DYNAMIC (static)",      # M11-切片5：无动态段
         "m3/elf: user stack",                  # M11-切片5：辅助向量栈帧
-        "Novos-OS M3 userspace shell (init)",
+        "Shanshui-guanxin M3 userspace shell (init)",
         "virtio-net: io=",                    # M5-切片1：virtio-net 驱动初始化
         "net: arp who-has 10.0.2.2",          # tx：ARP 请求发出
         "arp: gateway 10.0.2.2",              # rx：学得网关 MAC
@@ -111,7 +111,7 @@ if ($Mode -eq "boot") {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
         # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
         # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nnovos`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`n"
         foreach ($one in ($cmd -split "`n")) {
             if ($one.Length -eq 0) { continue }
             $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
@@ -285,8 +285,8 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | exit",
-        "Novos-OS userspace init v0.3.0 (M3)",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exit",
+        "Shanshui-guanxin userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
         "fdtest: close rc=0",
@@ -300,10 +300,10 @@ if ($Mode -eq "boot") {
         "stat: mode=33188 size=17",  # M4-切片4：tmpfs 文件 stat（0o100644 + 17B）
         "a.txt",                     # ls /mnt：tmpfs 挂载后写入的文件
         "sub/",                      # ls /mnt：tmpfs 内 mkdir
-        "udptest: sent rc=20",       # M5-切片3：guest UDP 出站 1（20B "hello udp from novos"）
-        "udptest: sent2 rc=15",      # M5-切片3：guest UDP 出站 2（15B "pong from novos"）
-        "udptest: recv 20B: hello udp from novos", # M5-切片3：hostfwd 12345 回环入站
-        "udptest: recv 15B: pong from novos", # M5-切片3：hostfwd 12344 回环入站
+        "udptest: sent rc=31",       # M5-切片3：guest UDP 出站 1（31B "hello udp from shanshui-guanxin"）
+        "udptest: sent2 rc=26",      # M5-切片3：guest UDP 出站 2（26B "pong from shanshui-guanxin"）
+        "udptest: recv 31B: hello udp from shanshui-guanxin", # M5-切片3：hostfwd 12345 回环入站
+        "udptest: recv 26B: pong from shanshui-guanxin", # M5-切片3：hostfwd 12344 回环入站
         "tcptest: listening on 20000", # M5-切片4：TCP 监听
         "tcptest: accepted fd=",       # M5-切片4：accept 取到连接
         "tcptest: recv 19B: hello tcp from host", # M5-切片4：收到宿主数据
@@ -318,9 +318,9 @@ if ($Mode -eq "boot") {
         "forktest: waitpid A reaped=", # M6-切片1：waitpid 回收子 A
         "forktest: child B getpid=1 (new pid ns)", # M6-切片1：CLONE_NEWPID 子进程 pid=1
         "forktest: waitpid B reaped=", # M6-切片1：waitpid 回收子 B
-        "utstest: parent hostname=novos",    # M6-切片2：根 uts ns hostname
+        "utstest: parent hostname=shanshui-guanxin",    # M6-切片2：根 uts ns hostname
         "utstest: child hostname=childns",   # M6-切片2：CLONE_NEWUTS 子进程改 hostname
-        "utstest: parent hostname after=novos", # M6-切片2：父 hostname 不受子影响
+        "utstest: parent hostname after=shanshui-guanxin", # M6-切片2：父 hostname 不受子影响
         "cgtest: root pids=1 mem=0",        # M6-切片3：根 cgroup 基线
         "cgtest: child pids=2 mem=65536",   # M6-切片3：fork 后 pids+1、mem+64KB
         "cgtest: after reap pids=1 mem=0",  # M6-切片3：回收后回到基线（无泄漏）
@@ -336,15 +336,15 @@ if ($Mode -eq "boot") {
         "whtest: merged listing clean",       # M7-切片2：合并视图无 del.txt、无 .wh.* 标记
         "whtest: recreate: reborn",           # M7-切片2：重建同路径文件覆盖 whiteout
         "whtest: log tmpfs read: log-line-1", # M7-切片2：容器日志 tmpfs 挂载读写
-        "novos run: rootfs mounted",          # M8-切片1：容器 rootfs overlay 挂载
-        "novos run: container init pid=1 host=c0", # M8-切片1：容器 init 在 pid/uts ns 隔离
-        "novos run: chdir rc=0 cwd=/containers/c0/rootfs", # M8-切片1：chdir 进容器 rootfs
-        "novos run: rootfs read: app-data",   # M8-切片1：经 rootfs 合并视图读镜像层
-        "novos run: container log: c0-booted", # M8-切片1：容器写进 upper 层
-        "novos run: cg pids=2 mem=65536",     # M8-切片1：容器进程 cgroup 记账
-        "novos run: after reap pids=1 mem=0", # M8-切片1：回收后 cgroup 回到基线
-        "novos run: image intact: app-data",  # M8-切片1：镜像层未被容器写污染
-        "novos run: container exited",        # M8-切片1：容器生命周期回收完成
+        "shanshui-guanxin run: rootfs mounted",          # M8-切片1：容器 rootfs overlay 挂载
+        "shanshui-guanxin run: container init pid=1 host=c0", # M8-切片1：容器 init 在 pid/uts ns 隔离
+        "shanshui-guanxin run: chdir rc=0 cwd=/containers/c0/rootfs", # M8-切片1：chdir 进容器 rootfs
+        "shanshui-guanxin run: rootfs read: app-data",   # M8-切片1：经 rootfs 合并视图读镜像层
+        "shanshui-guanxin run: container log: c0-booted", # M8-切片1：容器写进 upper 层
+        "shanshui-guanxin run: cg pids=2 mem=65536",     # M8-切片1：容器进程 cgroup 记账
+        "shanshui-guanxin run: after reap pids=1 mem=0", # M8-切片1：回收后 cgroup 回到基线
+        "shanshui-guanxin run: image intact: app-data",  # M8-切片1：镜像层未被容器写污染
+        "shanshui-guanxin run: container exited",        # M8-切片1：容器生命周期回收完成
         "natdemo: rule add rc=0",             # M8-切片2：NAT 端口映射规则添加成功
         "natdemo: accepted via DNAT fd=",     # M8-切片2：经 DNAT 投递到容器端口
         "natdemo: recv 9B: hello nat",        # M8-切片2：容器收到宿主数据
@@ -364,7 +364,7 @@ if ($Mode -eq "boot") {
         "healthtest: container counted ok",   # M9-切片1：容器存活期间 containers=1
         "healthtest: reaped=",                # M9-切片1：容器回收
         "blktest: write rc=0",                # M10-切片1：BIO 写扇区成功
-        "blktest: read rc=0 data=blk-hello-novos", # M10-切片1：读回一致
+        "blktest: read rc=0 data=blk-hello-shanshui-guanxin", # M10-切片1：读回一致
         "blktest: sector roundtrip ok",       # M10-切片1：扇区往返验证
         "blktest: fresh sector zero ok",      # M10-切片1：未写扇区全零（真实介质）
         "ext4test: create rc=0",              # M10-切片2：ext4-lite 创建文件
@@ -401,7 +401,11 @@ if ($Mode -eq "boot") {
         "reqtest: etimedout ok",              # M11-切片4：超时语义正确
         "reqtest: reaped C=",                 # M11-切片4：子任务回收
         "maptest: first=0000008000000000-",   # M13-01：首段为 init .text
-        "maptest: maps ok"                    # M13-01：段数/init/栈/可执行权限齐全
+        "maptest: maps ok",                   # M13-01：段数/init/栈/可执行权限齐全
+        "statustest: bytes=",                 # M13-02：/proc/self/status 读取成功
+        "name=1 uid=1",                       # M13-02：Name/Uid 字段
+        "vmrss=1 threads=1",                  # M13-02：VmRSS/Threads 字段
+        "statustest: status ok"               # M13-02：status 校验通过
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
@@ -417,7 +421,7 @@ if ($Mode -eq "shell" -and $script:hostNat -ne "hello nat") {
     Write-Host "FAIL: host NAT DNAT echo mismatch (got '$($script:hostNat)')"
     $ok = $false
 }
-if ($Mode -eq "shell" -and ($script:hostHttp -notmatch "HTTP/1.0 200 OK" -or $script:hostHttp -notmatch "Novos-OS HTTP OK")) {
+if ($Mode -eq "shell" -and ($script:hostHttp -notmatch "HTTP/1.0 200 OK" -or $script:hostHttp -notmatch "Shanshui-guanxin HTTP OK")) {
     Write-Host "FAIL: host HTTP response mismatch (got '$($script:hostHttp)')"
     $ok = $false
 }
