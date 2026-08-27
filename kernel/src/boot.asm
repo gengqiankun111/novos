@@ -411,7 +411,9 @@ irq_common:
     iretq
 
 # ---------------------------------------------------------------------------
-# 公共异常入口：保存 15 个通用寄存器 → 调用 rust_exception_handler（不返回）
+# 公共异常入口：保存 15 个通用寄存器 → rust_exception_handler
+# （返回目标任务 frame 指针——用户态可恢复异常如 #PF→SIGSEGV 经 iretq 回用户；
+#   不可恢复异常内部停机不返回）→ 恢复新栈 → iretq。
 # ---------------------------------------------------------------------------
 exception_common:
     pushq %rax
@@ -430,7 +432,22 @@ exception_common:
     pushq %r14
     pushq %r15
     movq %rsp, %rdi
-    call rust_exception_handler
-1:
-    hlt
-    jmp 1b
+    call rust_exception_handler    # rax = 目标 frame 指针（panic 路径不返回）
+    movq %rax, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp               # 跳过 vec + err
+    iretq
