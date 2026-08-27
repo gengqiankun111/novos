@@ -695,7 +695,10 @@ pub fn udp_ready(fd: usize) -> bool {
 }
 
 fn epoll_item_ready(fd: usize) -> bool {
-    if fd >= crate::timer::TIMER_FD_BASE {
+    if fd >= crate::signalfd::SIGNALFD_FD_BASE {
+        // M13-12：signalfd 队列非空可读
+        crate::signalfd::signalfd_ready(fd)
+    } else if fd >= crate::timer::TIMER_FD_BASE {
         // M13-11：timerfd 到期可读
         crate::timer::timer_ready(fd)
     } else if fd >= TCP_FD_BASE {

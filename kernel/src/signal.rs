@@ -204,6 +204,10 @@ pub fn sys_kill(pid: u64, sig: u64) -> i64 {
     if pid != cur && pid != 0 {
         return -3; // ESRCH（仅支持自投递）
     }
+    // M13-12：signalfd mask 覆盖则直接消费（入队，不走 pending/默认动作）
+    if crate::signalfd::notify(sig) {
+        return 0;
+    }
     cur_state().pending |= 1u64 << (sig - 1);
     0
 }
