@@ -298,6 +298,8 @@ impl RbTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     fn in_order(t: &RbTree, x: usize, out: &mut Vec<u64>) {
         if x == SENTINEL {
