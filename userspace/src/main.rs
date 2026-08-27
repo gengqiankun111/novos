@@ -64,6 +64,15 @@ static mut CLONE_TID: u32 = 0;
 static mut CLONE_TLS: [u8; 32] = [0; 32];
 static mut CLONE_GO: u32 = 0;
 
+// M11-切片4：futex REQUEUE + 超时测试资源
+static mut RQ_CV: u32 = 0; // 条件变量 futex（双等待者阻塞点）
+static mut RQ_MUTEX: u32 = 0; // requeue 目标 futex
+static mut RQ_GO_A: u32 = 0; // A 放行
+static mut RQ_GO_B: u32 = 0; // B 放行
+static mut RQ_RDY_B: u32 = 0; // B 已阻塞到 cv 的握手标志
+static mut RQ_TM: u32 = 0; // 超时测试
+static mut RQ_WOKE: u32 = 0; // 被唤醒计数
+
 /// 通用 syscall（3 参数，Linux x86_64 约定：rax=nr, rdi/rsi/rdx=arg1-3）。
 fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
@@ -272,7 +281,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | novos | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | exit\n");
         }
         b"version" => {
             print("Novos-OS userspace init v0.3.0 (M3)\n");
@@ -1399,7 +1408,7 @@ fn exec(cmd: &[u8]) {
             if r == 0 {
                 // 子：等 flag 变为 1（futex WAIT 阻塞，父改值后 WAKE 唤醒）
                 print("futtest: child waiting\n");
-                let rc = syscall3(SYS_FUTEX, addr, 0, 0); // WAIT(addr, 0)
+                let rc = syscall5(SYS_FUTEX, addr, 0, 0, 0, 0); // WAIT(addr, 0)
                 print("futtest: child futex rc=");
                 print_u64(rc);
                 print(" flag=");
@@ -1416,7 +1425,7 @@ fn exec(cmd: &[u8]) {
                     spin += 1;
                 }
                 flag = 1;
-                let wr = syscall3(SYS_FUTEX, addr, 1, 1); // WAKE(addr, 1)
+                let wr = syscall5(SYS_FUTEX, addr, 1, 1, 0, 0); // WAKE(addr, 1)
                 print("futtest: parent wake rc=");
                 print_u64(wr);
                 print("\n");
@@ -1541,7 +1550,7 @@ fn exec(cmd: &[u8]) {
             let r = syscall6(SYS_CLONE, flags, stack_top, 0, tid_addr, tls_addr, 0);
             if r == 0 {
                 // 子：先 futex WAIT(go) 阻塞（让出 CPU），父唤醒后继续
-                syscall3(SYS_FUTEX, go_addr, 0, 0); // WAIT(go, 0)
+                syscall5(SYS_FUTEX, go_addr, 0, 0, 0, 0); // WAIT(go, 0)
                 // FS base 应已被 CLONE_SETTLS 设为 tls_addr（不经 ARCH_SET_FS）
                 let mut got: u64 = 0;
                 syscall3(SYS_ARCH_PRCTL, 0x1003, &mut got as *mut u64 as u64, 0);
@@ -1575,7 +1584,7 @@ fn exec(cmd: &[u8]) {
                 unsafe {
                     core::ptr::write_volatile(core::ptr::addr_of_mut!(CLONE_GO) as *mut u32, 1);
                 }
-                syscall3(SYS_FUTEX, go_addr, 1, 1); // WAKE(go, 1)
+                syscall5(SYS_FUTEX, go_addr, 1, 1, 0, 0); // WAKE(go, 1)
                 // 等子退出（waitpid 轮询）；退出时内核清零 tid（CLONE_CHILD_CLEARTID）
                 let mut w = 0u64;
                 let mut n = 0u32;
@@ -1599,6 +1608,136 @@ fn exec(cmd: &[u8]) {
                 print("clonetest: reaped=");
                 print_u64(w);
                 print("\n");
+            }
+        }
+        b"reqtest" => {
+            // M11-切片4：futex REQUEUE + 超时（ETIMEDOUT）。
+            // 调度约束：shell(task 0) 仅在就绪树为空时运行，故子先 WAIT(go)
+            // 阻塞让出 CPU，父逐个放行并推进。
+            // SAFETY: 单核测试环境，复位共享状态。
+            unsafe {
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(RQ_CV) as *mut u32, 0);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(RQ_MUTEX) as *mut u32, 0);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(RQ_GO_A) as *mut u32, 0);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(RQ_GO_B) as *mut u32, 0);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(RQ_RDY_B) as *mut u32, 0);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(RQ_TM) as *mut u32, 0);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(RQ_WOKE) as *mut u32, 0);
+            }
+            let cv = unsafe { core::ptr::addr_of_mut!(RQ_CV) as u64 };
+            let mutex = unsafe { core::ptr::addr_of_mut!(RQ_MUTEX) as u64 };
+            let goa = unsafe { core::ptr::addr_of_mut!(RQ_GO_A) as u64 };
+            let gob = unsafe { core::ptr::addr_of_mut!(RQ_GO_B) as u64 };
+            let rdyb = unsafe { core::ptr::addr_of_mut!(RQ_RDY_B) as u64 };
+            let tm = unsafe { core::ptr::addr_of_mut!(RQ_TM) as u64 };
+            let woke = unsafe { core::ptr::addr_of_mut!(RQ_WOKE) as u64 };
+            // ---- REQUEUE 部分：A、B 双等待者阻塞在 cv ----
+            let ra = syscall3(SYS_FORK, 0, 0, 0);
+            if ra == 0 {
+                // 子 A：先阻塞等父放行，再 WAIT(cv)
+                syscall5(SYS_FUTEX, goa, 0, 0, 0, 0);
+                syscall5(SYS_FUTEX, cv, 0, 0, 0, 0); // WAIT(cv, 0)
+                // SAFETY: 单核，volatile 自增唤醒计数。
+                unsafe {
+                    core::ptr::write_volatile(
+                        woke as *mut u32,
+                        core::ptr::read_volatile(woke as *const u32) + 1,
+                    );
+                }
+                print("reqtest: child A woke\n");
+                syscall3(SYS_EXIT, 0, 0, 0);
+            } else {
+                syscall5(SYS_FUTEX, goa, 1, 1, 0, 0); // WAKE(goA) 放行 A
+                let rb = syscall3(SYS_FORK, 0, 0, 0);
+                if rb == 0 {
+                    // 子 B：阻塞到 cv 前置位 rdyB（父据此确认 B 已就位）
+                    syscall5(SYS_FUTEX, gob, 0, 0, 0, 0);
+                    // SAFETY: 单核。
+                    unsafe { core::ptr::write_volatile(rdyb as *mut u32, 1) };
+                    syscall5(SYS_FUTEX, cv, 0, 0, 0, 0);
+                    // SAFETY: 单核，volatile 自增唤醒计数。
+                    unsafe {
+                        core::ptr::write_volatile(
+                            woke as *mut u32,
+                            core::ptr::read_volatile(woke as *const u32) + 1,
+                        );
+                    }
+                    print("reqtest: child B woke\n");
+                    syscall3(SYS_EXIT, 0, 0, 0);
+                } else {
+                    syscall5(SYS_FUTEX, gob, 1, 1, 0, 0); // WAKE(goB) 放行 B
+                    // 等 B 阻塞到 cv（父仅在树空时运行 → 此刻 B 必已阻塞）；
+                    // black_box 防 release 优化删掉纯循环，确保跨越多拍等 B 就位
+                    let mut n1 = 0u32;
+                    while unsafe { core::ptr::read_volatile(rdyb as *const u32) } == 0
+                        && n1 < 30_000_000
+                    {
+                        n1 = n1.wrapping_add(1);
+                        core::hint::black_box(n1);
+                    }
+                    // CMP_REQUEUE(cv, wake=1, mutex, cmp=0)：唤醒 A，把 B 搬上 mutex
+                    let rq = syscall5(SYS_FUTEX, cv, 4, 1, mutex, 0);
+                    print("reqtest: cmp_requeue rc=");
+                    print_u64(rq);
+                    print("\n");
+                    // WAKE(mutex)：唤醒被 requeue 的 B
+                    let mw = syscall5(SYS_FUTEX, mutex, 1, 1, 0, 0);
+                    print("reqtest: mutex wake rc=");
+                    print_u64(mw);
+                    print("\n");
+                    // 回收 A、B
+                    let mut w = 0u64;
+                    let mut n = 0u32;
+                    while w == 0 && n < 200000 {
+                        w = syscall3(SYS_WAITPID, ra, 0, 0);
+                        n += 1;
+                        let mut s = 0u32;
+                        while s < 5000 {
+                            s += 1;
+                        }
+                    }
+                    let mut wb = 0u64;
+                    let mut n2 = 0u32;
+                    while wb == 0 && n2 < 200000 {
+                        wb = syscall3(SYS_WAITPID, rb, 0, 0);
+                        n2 += 1;
+                        let mut s = 0u32;
+                        while s < 5000 {
+                            s += 1;
+                        }
+                    }
+                    // SAFETY: 单核读。
+                    let cnt = unsafe { core::ptr::read_volatile(woke as *const u32) };
+                    print("reqtest: total woke=");
+                    print_u64(cnt as u64);
+                    print("\n");
+                    // ---- 超时部分：C 阻塞 2 tick 后返回 ETIMEDOUT ----
+                    let rc = syscall3(SYS_FORK, 0, 0, 0);
+                    if rc == 0 {
+                        let tr = syscall5(SYS_FUTEX, tm, 0, 0, 2, 0); // WAIT(tm,0,timeout=2)
+                        print("reqtest: timeout rc=");
+                        print_u64(tr);
+                        print("\n");
+                        if tr == 110 {
+                            print("reqtest: etimedout ok\n");
+                        }
+                        syscall3(SYS_EXIT, 0, 0, 0);
+                    } else {
+                        let mut wc = 0u64;
+                        let mut n3 = 0u32;
+                        while wc == 0 && n3 < 200000 {
+                            wc = syscall3(SYS_WAITPID, rc, 0, 0);
+                            n3 += 1;
+                            let mut s = 0u32;
+                            while s < 5000 {
+                                s += 1;
+                            }
+                        }
+                        print("reqtest: reaped C=");
+                        print_u64(wc);
+                        print("\n");
+                    }
+                }
             }
         }
         b"exit" => {
