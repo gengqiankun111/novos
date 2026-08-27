@@ -55,6 +55,7 @@ if ($Mode -eq "boot") {
         "elf/dyn: dynamic no-interp ok",       # M11-切片5：无 interp 的 DSO 判定
         "elf/dyn: bad-magic rejected ok",      # M11-切片5：坏镜像拒绝
         "elf/dyn: self-test PASS",             # M11-切片5：解析自测通过
+        "fs/proc: status self-test PASS",      # M13-02：/proc/self/status 自测通过
         "m3/elf: static (no PT_INTERP)",       # M11-切片5：init 为静态 ELF
         "m3/elf: no PT_DYNAMIC (static)",      # M11-切片5：无动态段
         "m3/elf: user stack",                  # M11-切片5：辅助向量栈帧

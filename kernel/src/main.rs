@@ -75,6 +75,8 @@ pub unsafe extern "C" fn rust_start(magic: u32, info_addr: u32) -> ! {
     }
     // M11 切片5 自测：ELF 动态段解析（静态/动态+interp/动态无 interp/坏 magic）。
     shanshui_guanxin_kernel::elf::self_test();
+    // M13-02 自测：/proc/self/status 字段齐全 + 顺序 + 数值可解析。
+    shanshui_guanxin_kernel::fs::status_self_test();
     let stats = mm::mem_stats();
     println!(
         "mm stats: buddy_pages={} slab_pages={} kernel_used={} B free_pages={}",
