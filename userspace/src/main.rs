@@ -47,6 +47,9 @@ const SYS_RT_SIGPROCMASK: u64 = 14; // M13-08：阻塞/解除阻塞信号
 const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
 const SYS_KILL: u64 = 62;           // M13-08：投递信号
 const SYS_FCNTL: u64 = 72;          // M14：记录锁（F_SETLK/F_GETLK/F_UNLCK）
+const SYS_CAPGET: u64 = 125;        // M12：读取 capability 集
+const SYS_CAPSET: u64 = 126;        // M12：设置 capability 集（仅降权）
+const CAP_VERSION_3: u32 = 0x2008_0522; // Linux _LINUX_CAPABILITY_VERSION_3
 // fcntl 命令与锁类型（M14）
 const F_GETLK: u64 = 5;
 const F_SETLK: u64 = 6;
@@ -285,6 +288,21 @@ struct Flock {
     l_len: i64,
     l_pid: i32,
     _pad: [u8; 4],
+}
+
+/// __user_cap_header_struct（M12，8 字节，与内核对齐）。
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
+
+/// __user_cap_data_struct（M12，12 字节，与内核对齐）。
+#[repr(C)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
 }
 
 /// 备用信号栈缓冲（M13-07：handler 在其上运行，验证不溢出主栈）。
@@ -1727,6 +1745,46 @@ fn exec(cmd: &[u8]) {
                     }
                 }
                 syscall3(SYS_CLOSE, fd, 0, 0);
+            }
+        }
+        b"capsetest" => {
+            // M12：capability 集——初始全量（init 派生）→ 读回 → 降权 → 读回 →
+            // 越权升权拒绝（EPERM，本内核无提权路径）。
+            let mut h = CapHeader { version: CAP_VERSION_3, pid: 0 };
+            let mut d = CapData { effective: 0, permitted: 0, inheritable: 0 };
+            let c1 = syscall3(SYS_CAPGET, &h as *const CapHeader as u64, &mut d as *mut CapData as u64, 0);
+            let initial = c1 == 0 && d.effective == 0xFFFF_FFFF && d.permitted == 0xFFFF_FFFF;
+            print("capsetest: initial full=");
+            print_u64(initial as u64);
+            print(" eff=");
+            print_u64(d.effective as u64);
+            print("\n");
+            // 降权：eff=1 perm=1 inh=0（合法：1 是 0xFFFF_FFFF 的子集）
+            let drop = CapData { effective: 1, permitted: 1, inheritable: 0 };
+            let c2 = syscall3(SYS_CAPSET, &h as *const CapHeader as u64, &drop as *const CapData as u64, 0);
+            print("capsetest: drop rc=");
+            print_u64(c2);
+            print("\n");
+            let c3 = syscall3(SYS_CAPGET, &h as *const CapHeader as u64, &mut d as *mut CapData as u64, 0);
+            let dropped = c3 == 0 && d.effective == 1 && d.permitted == 1 && d.inheritable == 0;
+            print("capsetest: readback eff=");
+            print_u64(d.effective as u64);
+            print(" perm=");
+            print_u64(d.permitted as u64);
+            print(" inh=");
+            print_u64(d.inheritable as u64);
+            print("\n");
+            // 越权升权：恢复全量 → EPERM (-1)
+            let raise = CapData { effective: 0xFFFF_FFFF, permitted: 0xFFFF_FFFF, inheritable: 0xFFFF_FFFF };
+            let c4 = syscall3(SYS_CAPSET, &h as *const CapHeader as u64, &raise as *const CapData as u64, 0);
+            let denied = (c4 as i64) == -1;
+            print("capsetest: raise denied=");
+            print_u64(denied as u64);
+            print("\n");
+            if c2 == 0 && dropped && denied {
+                print("capsetest: caps ok\n");
+            } else {
+                print("capsetest: caps FAIL\n");
             }
         }
         b"memtest" => {

@@ -75,6 +75,8 @@ pub struct Task {
     pub flags: u32,
     /// CLONE_CHILD_CLEARTID 目标地址：退出时清零并 futex 唤醒（pthread_join）。
     pub child_tidptr: u64,
+    /// Linux capability 集（M12：effective/permitted/inheritable）。
+    pub caps: [u32; 3],
 }
 
 impl Task {
@@ -99,8 +101,21 @@ impl Task {
             fs_base: 0,
             flags: 0,
             child_tidptr: 0,
+            caps: [0; 3],
         }
     }
+}
+
+/// 当前任务 capability 集（M12：effective/permitted/inheritable）。
+pub fn current_caps() -> [u32; 3] {
+    // SAFETY: 单核读。
+    unsafe { TASKS[CURRENT].caps }
+}
+
+/// 设置当前任务 capability 集（capset 用）。
+pub fn set_caps(c: [u32; 3]) {
+    // SAFETY: 单核写。
+    unsafe { TASKS[CURRENT].caps = c; }
 }
 
 /// 根 cwd = "/"。
@@ -307,6 +322,7 @@ pub fn spawn(name: &'static str, entry: fn(), prio: u8) -> Result<u32, &'static 
             fs_base: 0,
             flags: 0,
             child_tidptr: 0,
+            caps: [0; 3],
         };
         // 新任务入 CFS 就绪树（关中断防与 tick 调度竞争）
         // SAFETY: 单核；cli 保护树操作。
@@ -583,6 +599,7 @@ pub unsafe extern "C" fn rust_fork_impl(ret_addr: u64, saved: *const u64, target
         fs_base: TASKS[cur].fs_base,
         flags: 0,
         child_tidptr: 0,
+        caps: TASKS[cur].caps,
     };
     // 子任务入 CFS 就绪树（与父同 vruntime 起点，公平竞争）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);
@@ -722,6 +739,8 @@ pub fn register_user_task(cr3: usize) {
         TASKS[0].pid = 1; // 根 ns 的 init（pid 1）
         TASKS[0].pid_ns = 0;
         TASKS[0].cwd = cwd_root();
+        // M12：init（pid 1）以全量 Linux capability 集启动，fork 子进程继承。
+        TASKS[0].caps = [0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF];
     }
 }
 
@@ -983,6 +1002,7 @@ pub unsafe fn user_fork(
         fs_base: if flags & 0x0008_0000 != 0 { tls } else { TASKS[cur].fs_base },
         flags,
         child_tidptr,
+        caps: TASKS[cur].caps,
     };
     // 子任务入 CFS 就绪树（同 vruntime 起点）
     crate::smp::cpu_rq(0).rbt.insert(cid, TASKS[cur].vruntime);

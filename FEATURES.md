@@ -55,7 +55,7 @@
 | futex | WAIT/WAKE/REQUEUE，**逻辑键**（Inode/虚拟区）+ **COW 等待队列迁移** | ◻ | M11/M4 | DESIGN §13.7/勘误§2 |
 | TLS | arch_prctl(ARCH_SET_FS) + 上下文切换恢复 | ◻ | M11 | DESIGN §13.8 |
 | 设备框架 | devtmpfs + devpts + `/dev/null/zero/urandom`（✅ 子集：null 写丢弃读 EOF、zero 读全零、urandom xorshift 伪随机）+ PTY | ◻ | M12 | DESIGN §13.4 |
-| Capabilities | Linux capability 集（permitted/effective/...） | ◻ | M12 | DESIGN §13.5 |
+| Capabilities | Linux capability 集（✅ permitted/effective/inheritable 三集合，capget/capset，init 全量派生、fork 继承、仅降权 EPERM） | ◻ | M12 | DESIGN §13.5 |
 | Seccomp BPF | 最小解释器 + **高风险调用参数值匹配**（mount/ptrace/openat/execve/reboot/clone） | ◻ | M12 | DESIGN §13.5/勘误§12 |
 | 完整 /proc | /proc/self/{maps,status,exe,fd} + cpuinfo/mounts/filesystems + **meminfo**（✅ M13-14 内存基线：buddy/slab 台账 + used+free==total 守恒）（**maps ✅ M13-01、status ✅ M13-02、exe ✅ M13-03、fd ✅ M13-04、mounts/filesystems ✅ M13-05**） | ◻ | M13 | DESIGN §13.12 |
 | 完整信号 | sigaction(SA_SIGINFO/SA_ONSTACK) + **SIGSEGV 投递**（用户态 #PF → handler/终止，✅ M13-06/10）+ **sigaltstack 备用栈**（✅ M13-07）+ **sigprocmask 阻塞语义 + kill 投递**（✅ M13-08）+ **sigreturn 增强**（handler 期间阻塞本信号 SA_NODEFER 豁免 + rt_sigreturn 恢复 mask，✅ M13-09）+ **JVM 运行时面冒烟**（timerfd+epoll 事件循环 + 信号，✅ M13-13）、实时信号 | ◻ | M13 | DESIGN §13.10 |

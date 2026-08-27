@@ -113,7 +113,7 @@ if ($Mode -eq "boot") {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
         # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
         # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
-        $cmd = "help`nversion`nfdtest`ndevtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nmemtest`nfcntltest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`nsigreent`ntfdtest`nsftest`njvmsmoke`nsigtest`n"
+        $cmd = "help`nversion`nfdtest`ndevtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nmemtest`nfcntltest`ncapsetest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`nsigreent`ntfdtest`nsftest`njvmsmoke`nsigtest`n"
         foreach ($one in ($cmd -split "`n")) {
             if ($one.Length -eq 0) { continue }
             $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
@@ -376,6 +376,11 @@ if ($Mode -eq "boot") {
         "fcntltest: getlk type=1",            # M14：F_GETLK 查得父写锁
         "fcntltest: child relock ok=1",       # M14：父解锁后子加锁成功
         "fcntltest: record lock ok",          # M14：全链路通过
+        "capsetest: initial full=1",          # M12：init 派生全量 capability
+        "capsetest: drop rc=0",               # M12：降权成功
+        "capsetest: readback eff=1 perm=1 inh=0", # M12：capget 读回降权结果
+        "capsetest: raise denied=1",          # M12：越权升权拒绝 EPERM
+        "capsetest: caps ok",                 # M12：全链路通过
         "blktest: write rc=0",                # M10-切片1：BIO 写扇区成功
         "blktest: read rc=0 data=blk-hello-shanshui-guanxin", # M10-切片1：读回一致
         "blktest: sector roundtrip ok",       # M10-切片1：扇区往返验证

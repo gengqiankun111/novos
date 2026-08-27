@@ -56,6 +56,8 @@ pub const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
 pub const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 pub const SYS_KILL: u64 = 62;           // M13-08：投递信号
 pub const SYS_FCNTL: u64 = 72; // M14：记录锁（F_SETLK/F_GETLK/F_UNLCK，SQLite 依赖）
+pub const SYS_CAPGET: u64 = 125; // M12：读取 capability 集
+pub const SYS_CAPSET: u64 = 126; // M12：设置 capability 集（仅降权）
 pub const SYS_TIMERFD_CREATE: u64 = 283; // M13-11：创建 timerfd
 pub const SYS_TIMERFD_SETTIME: u64 = 286; // M13-11：设/重调度 timerfd
 pub const SYS_TIMERFD_GETTIME: u64 = 287; // M13-11：查询 timerfd
@@ -204,6 +206,8 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_CHDIR => sys_chdir(a1),
         SYS_READLINK => sys_readlink(a1, a2, a3),
         SYS_FCNTL => sys_fcntl(a1, a2, a3),
+        SYS_CAPGET => crate::caps::sys_capget(a1, a2) as u64,
+        SYS_CAPSET => crate::caps::sys_capset(a1, a2) as u64,
         SYS_FUTEX => sys_futex(a1, a2, a3, a4, a5),
         SYS_ARCH_PRCTL => sys_arch_prctl(a1, a2),
         SYS_RT_SIGACTION => crate::signal::sys_rt_sigaction(a1, a2, a3, a4) as u64,

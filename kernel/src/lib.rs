@@ -20,6 +20,7 @@ core::arch::global_asm!(include_str!("boot_note.asm"), options(att_syntax));
 
 pub mod dcache;
 pub mod block;
+pub mod caps;
 pub mod elf;
 pub mod ext4;
 pub mod flock;
