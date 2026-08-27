@@ -434,7 +434,7 @@ fn exec(cmd: &[u8]) {
     match cmd {
         [] => {}
         b"help" => {
-            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | sigtest | exit\n");
+            print("commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | mtabtest | sigtest | exit\n");
         }
         b"version" => {
             print("Shanshui-guanxin userspace init v0.3.0 (M3)\n");
@@ -2021,6 +2021,71 @@ fn exec(cmd: &[u8]) {
                 print("exetest: exe ok\n");
             } else {
                 print("exetest: exe FAIL\n");
+            }
+        }
+        b"mtabtest" => {
+            // M13-05：/proc/mounts + /proc/filesystems。
+            // 读 /proc/mounts（根 + /proc + /mnt 挂载）
+            let fd = syscall3(SYS_OPEN, b"/proc/mounts\0".as_ptr() as u64, 0, 0);
+            if fd >= 10000 {
+                print("mtabtest: open mounts failed\n");
+            } else {
+                let mut total = 0usize;
+                // SAFETY: 单核测试环境。
+                let buf: &mut [u8; 4096] = unsafe { &mut *core::ptr::addr_of_mut!(MAP_BUF) };
+                loop {
+                    let n = syscall3(SYS_READ, fd, (buf.as_mut_ptr() as u64) + total as u64, (4096 - total) as u64);
+                    if n <= 0 {
+                        break;
+                    }
+                    total += n as usize;
+                }
+                syscall3(SYS_CLOSE, fd, 0, 0);
+                let has_root = scan_bytes(&buf[..total], b"/dev/root / tmpfs");
+                let has_proc = scan_bytes(&buf[..total], b"proc /proc proc");
+                print("mtabtest: mounts bytes=");
+                print_u64(total as u64);
+                print(" root=");
+                print_u64(has_root as u64);
+                print(" proc=");
+                print_u64(has_proc as u64);
+                print("\n");
+                if has_root && has_proc {
+                    print("mtabtest: mounts ok\n");
+                } else {
+                    print("mtabtest: mounts FAIL\n");
+                }
+            }
+            // 读 /proc/filesystems
+            let fd2 = syscall3(SYS_OPEN, b"/proc/filesystems\0".as_ptr() as u64, 0, 0);
+            if fd2 >= 10000 {
+                print("mtabtest: open filesystems failed\n");
+            } else {
+                let mut total2 = 0usize;
+                // SAFETY: 单核测试环境。
+                let buf2: &mut [u8; 4096] = unsafe { &mut *core::ptr::addr_of_mut!(MAP_BUF) };
+                loop {
+                    let n = syscall3(SYS_READ, fd2, (buf2.as_mut_ptr() as u64) + total2 as u64, (4096 - total2) as u64);
+                    if n <= 0 {
+                        break;
+                    }
+                    total2 += n as usize;
+                }
+                syscall3(SYS_CLOSE, fd2, 0, 0);
+                let has_tmpfs = scan_bytes(&buf2[..total2], b"tmpfs");
+                let has_ext4 = scan_bytes(&buf2[..total2], b"ext4");
+                print("mtabtest: filesystems bytes=");
+                print_u64(total2 as u64);
+                print(" tmpfs=");
+                print_u64(has_tmpfs as u64);
+                print(" ext4=");
+                print_u64(has_ext4 as u64);
+                print("\n");
+                if has_tmpfs && has_ext4 {
+                    print("mtabtest: filesystems ok\n");
+                } else {
+                    print("mtabtest: filesystems FAIL\n");
+                }
             }
         }
         b"sigtest" => {
