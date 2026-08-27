@@ -1,8 +1,9 @@
-# Novos‑OS 开发步骤（路线图）v2.0
+# 山水观心操作系统开发步骤（路线图）v2.0
 
 > 本路线图基于 DESIGN.md v0.1 及 2026-08-26 深度评审（12 项勘误已内联）制定。
 > **版本发布策略与关键设计决策索引见 [VERSIONING.md](VERSIONING.md)**。
-> **核心目标**：从零构建一个 **≤32MB（minimal）/ ≤40MB（full）** 的微型容器宿主内核。
+> **核心目标**：从零构建一个 **≤32MB（minimal）/ ≤40MB（full）** 的微型容器宿主内核（山水观心 Core）。
+> **图形版 Desktop（≥128MB，含 GPU/GUI）为独立产品线**，见 M16（feature-gated，默认不编译）。
 >
 > **开发原则**：
 > 1. **先跑通，再优化** —— 每个里程碑必须可运行，不追求完美。
@@ -202,6 +203,7 @@
 - [ ] 看门狗 + 掉电保护（日志原子写 / FS 一致性）。
 - [ ] **环形日志落盘**：内核日志异步写 `/var/log/kernel.log`，内存缓冲 → 批量写 Ext4（§10.1→§19.2 衔接）。
 - [ ] **健康指标暴露**：`/proc/health` 输出 JSON：内存 used/free、fd 数、容器数、CPU 负载。
+- [ ] **top 系统监控工具**：Rust 静态编译（<100KB），读 `/proc/stat`、`/proc/loadavg`、`/proc/<pid>/stat`（DESIGN §10.2/§18.3）。
 - [ ] 可观测性：环形日志 + 落盘 + 健康指标（内存/fd/CPU）。
 
 **验收标准**：
@@ -239,7 +241,7 @@
 - [ ] TLS：`arch_prctl(ARCH_SET_FS)` + FS base MSR。
 - [ ] **宿主机交叉编译工具链**：musl-cross + `crt1.o` + linker script。
 - [ ] **`novos-check` 工具**：扫描 ELF 的 syscall 依赖 + 内存足迹预估（M14 应用合入门槛）；**启动前扫描 `PT_INTERP`，非 `/novos/ld-musl` 拒绝启动并提示**（glibc 拦截，DESIGN §21.1）。
-- [ ] **官方推荐软件清单（阶段一）**：文档页表格列出软件/功能/官方地址/官方验证 musl 静态二进制链接（core/runtime/service/net-tools 四类，DESIGN §22）；配套 `novos-build` 一键构建；**立即产出《为 Novos-OS 构建 Redis》musl 静态编译指南**（Redis 7.2.4+）。
+- [ ] **官方推荐软件清单（阶段一）**：文档页表格列出软件/功能/官方地址/官方验证 musl 静态二进制链接（core/runtime/service/net-tools 四类，DESIGN §22）；配套 `novos-build` 一键构建；**立即产出《为 山水观心操作系统构建 Redis》musl 静态编译指南**（Redis 7.2.4+）。
 
 **验收标准**：
 - 运行动态链接的 hello world（`gcc -o hello hello.c` 不加 `-static`）。
@@ -287,6 +289,7 @@
 - [ ] **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（SQLite 依赖）。
 - [ ] 移植 **SQLite**（musl 静态，CRUD + WAL） + **Redis**（**部署模板强制**：`--maxmemory 64mb`、禁 RDB、只开 AOF）。
 - [ ] （值得）内置 Web 管理界面 + SSH（dropbear）+ Agent 主动上联。
+- [ ] **novos-gateway**：HTTP/1.1 + TLS（rustls）+ 反向代理 + WebSocket 升级，承载 Web 管理界面（DESIGN §18.3，`--features gateway`，纯用户态，不依赖内核新功能）。
 
 **验收标准**：
 - `novos run redis` 容器启动，外部 `redis-cli SET/GET` 通过端口映射可访问。
@@ -320,13 +323,31 @@
   - 建立社区更新发布流程（如每两周发布一次 `CHANGELOG.md` 更新）。
 
 **验收标准**：
-- 一位从未接触过 Novos-OS 的开发者，按照 `docs/quickstart.md` 的指引，能在 15 分钟内下载镜像并启动 shell。
+- 一位从未接触过 山水观心操作系统的开发者，按照 `docs/quickstart.md` 的指引，能在 15 分钟内下载镜像并启动 shell。
 - 该开发者按照 `docs/first-container.md`，能在 5 分钟内成功运行 `novos run busybox echo hello` 并看到输出。
 - 该开发者能使用 SDK 在宿主机上交叉编译示例程序，并部署到 QEMU 中运行。
 - 该开发者在遇到问题时，能通过 Issue 模板在 10 分钟内提交一份包含完整日志的报告。
 - 社区沟通渠道至少有一名核心开发者在 24 小时内响应。
 
 **内存影响**：无（均为用户态工具和文档，不计入内核预算）。
+
+---
+
+### M16：图形版 Desktop（独立产品线，`--features full,gui`）
+
+> 与 Core（M0–M15）**独立核算**：图形版内存目标 **≥128MB**（DESIGN §2.4），不适用 32MB/40MB 断言。
+> 阶段规划见 DESIGN_EXTENSION §4.1（主线四），内核侧最小显示子集见 DESIGN §13.16。
+
+| 阶段 | 任务 | 设计依据 | 依赖 | 验收 |
+|---|---|---|---|---|
+| M16-1 | `/dev/fb*` 帧缓冲设备 + `/dev/tty0` 虚拟终端（`feature = "framebuffer"`） | DESIGN §13.16 | M12 设备框架 | QEMU `-vga virtio` 下 `/dev/fb0` mmap 写像素可见 |
+| M16-2 | DRM KMS 最小子集：`mode_set` / `page_flip` / VBlank（`feature = "drm"`，virtio-gpu/bochs-drm） | DESIGN §6.2⑤、§13.16 | M16-1 | 模式切换 + 页翻转无撕裂；VBlank 中断计数正确 |
+| M16-3 | 用户态 Wayland 合成器（weston 精简版或自定义） + 最小窗口管理 | DESIGN §13.16 | M16-2 | 两个窗口叠加渲染到帧缓冲 |
+| M16-4 | 图形库（minifb/egui/fltk 选型）+ 系统监视器（GUI 版 top） | DESIGN §13.16、§10.2 | M16-3 + M9 top | 实时显示 CPU/内存曲线 |
+| M16-5 | 桌面应用：文件管理器（左侧"文档/下载/桌面"）+ 终端 + 设置面板 | DESIGN §3.6、§19.3、§20.1 | M16-4 | 文件管理器浏览/复制/删除；盘符视图（C:/D:）可用 |
+
+**内存断言**：`--features full,gui` 构建后 `kernel_used ≤ 128MB`（DESIGN §5.3、§10.3），
+与 minimal/full 断言互不混用。
 
 ---
 
@@ -358,8 +379,9 @@
 | M6 | pid ns 层级；cgroup 记账 | clone 隔离 + OOM kill | cgroup 对象计数 |
 | M7 | overlay lookup；copy-up 流程 | 写后下层不变 + whiteout | overlay cache |
 | M8 | 容器全流程；NAT 规则 | `novos run busybox` + 外网 | **3 容器≤32MB** |
-| M9 | 全回归 | 7 天长跑 + 1000 连接 | **≤32MB 最终** |
-| M10–M14 | 各模块单元测试 | 对应场景（ext4/docker/apt/jvm） | **≤40MB** |
+| M9 | 全回归 + top 输出核对 | 7 天长跑 + 1000 连接 | **≤32MB 最终** |
+| M10–M14 | 各模块单元测试 | 对应场景（ext4/docker/apt/jvm）；novos-gateway 反向代理 | **≤40MB** |
+| M16（Desktop） | GPU trait 单测 | QEMU `-vga virtio` 帧缓冲/页翻转/合成器截图断言 | **≤128MB（独立）** |
 
 ---
 

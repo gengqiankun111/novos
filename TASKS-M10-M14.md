@@ -1,4 +1,4 @@
-# Novos‑OS full 模式开发任务清单（M10–M14）
+# 山水观心操作系统 full 模式开发任务清单（M10–M14）
 
 > 本文档把 `DEVELOPMENT.md` 的 M10–M14 拆解到可执行任务级别，给出优先级排序、依赖关系、工作量估算与验收标准。
 > 与 `DESIGN.md` §13 的扩展点一一对应，任务编号中的引用（§13.x）指向设计文档。
@@ -79,10 +79,10 @@ M14-06 containerd / M14-07 image pull → M14-08 apt / M14-10 JVM / M14-11 Pytho
 | M11-09 | 移植 musl 动态链接用户态二进制（libc.so、ld.so、busybox 动态版） | **P1** | M11-03 | 3 | 动态 busybox 的 `ls/cat/echo` 全部可用 |
 | M11-10 | pthread 集成测试：mutex/cond/thread 生命周期 | **P1** | M11-05, M11-08 | 3 | `pthread` 压测 1000 次创建/销毁无死锁、无内存增长 |
 | M11-11 | 内存基线测量与回填（≤38MB） | **P1** | 全部 | 1 | 动态链接进程常驻统计正确，CI 断言通过 |
-| M11-12 | 交叉工具链 + ABI 契约（§15.2）：musl-cross + crt1/crti/crtn + linker script + 版本锁定（宿主机侧）；`docs/abi.md`（syscall **白/黑/灰名单**/结构体/errno/调用约定） | **P1** | M11-03 | 10 | 工具链出静态二进制可在 Novos 加载；abi.md 覆盖 musl syscall 足迹并含黑白名单 |
-| M11-13 | **Novos-SDK 基础镜像**：ld-musl + 头文件 + linker script；第三方应用强制 `--dynamic-linker` 指向 Novos 路径（§15.2） | **P1** | M11-12 | 4 | 动态链接应用经 SDK 构建后不在宿主 syscall 上爆炸 |
+| M11-12 | 交叉工具链 + ABI 契约（§15.2）：musl-cross + crt1/crti/crtn + linker script + 版本锁定（宿主机侧）；`docs/abi.md`（syscall **白/黑/灰名单**/结构体/errno/调用约定） | **P1** | M11-03 | 10 | 工具链出静态二进制可在 山水观心操作系统加载；abi.md 覆盖 musl syscall 足迹并含黑白名单 |
+| M11-13 | **Novos-SDK 基础镜像**：ld-musl + 头文件 + linker script；第三方应用强制 `--dynamic-linker` 指向 `/novos/` 路径（§15.2） | **P1** | M11-12 | 4 | 动态链接应用经 SDK 构建后不在宿主 syscall 上爆炸 |
 | M11-14 | **novos-check 工具**：ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）（§15.3） | **P1** | M11-12 | 5 | 对 Redis/busybox 扫描输出 syscall 清单与内存预估；白名单外 syscall 报警 |
-| M11-15 | 宿主机交叉编译冒烟：Go（`CGO_ENABLED=0`）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`），产物 OTA 下发 | **P1** | M11-12 | 7 | 三语言静态二进制在 Novos 上运行输出；CI 断言通过 |
+| M11-15 | 宿主机交叉编译冒烟：Go（`CGO_ENABLED=0`）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`），产物 OTA 下发 | **P1** | M11-12 | 7 | 三语言静态二进制在 山水观心操作系统上运行输出；CI 断言通过 |
 
 ---
 

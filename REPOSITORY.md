@@ -1,6 +1,6 @@
-# Novos-OS 软件仓库规范（Novos Repository System, NRS）
+# 山水观心操作系统软件仓库规范（山水观心操作系统 Repository System, NRS）
 
-> 本文档定义 Novos-OS 官方软件仓库的**完整技术规范**：本地文件规范、后端服务器协议、CLI 操作流程。
+> 本文档定义 山水观心操作系统官方软件仓库的**完整技术规范**：本地文件规范、后端服务器协议、CLI 操作流程。
 > 设计哲学与三阶段演进见 [DESIGN.md §22](DESIGN.md)，长期定位见 [DESIGN_EXTENSION.md](DESIGN_EXTENSION.md)。
 >
 > 核心思路：**"极简、防呆、离线优先"** —— 复用 `sources.list + apt`（Debian）、`tap`（Homebrew）、
@@ -144,5 +144,5 @@ mosquitto  latest  @community
 | Ed25519 签名验证 | Debian `Release.gpg`、Arch `pacman-key` |
 
 > 结论：`softwares.list + 后端服务器` 是经 30 年验证的成熟模式；补上"元数据索引 + 签名验证"
-> 后，Novos 软件仓库从"一个文件列表"升级为"完整、安全、离线、可审计的应用交付平台"，
+> 后，山水观心操作系统软件仓库从"一个文件列表"升级为"完整、安全、离线、可审计的应用交付平台"，
 > 代码量（含后端）不超过 500 行——这是整个项目性价比最高的基础设施之一。
