@@ -408,8 +408,10 @@ if ($Mode -eq "boot") {
         "vmrss=1 threads=1",                  # M13-02：VmRSS/Threads 字段
         "statustest: status ok",              # M13-02：status 校验通过
         "sigtest: sigaction rc=0",            # M13-06：SIGSEGV handler 注册成功
-        "sigtest: handler ran, signos=11 addr=0", # M13-06：handler 收到 SIGSEGV + si_addr=0
-        "sigtest: SIGSEGV handled ok"         # M13-06：rt_sigreturn 后安全恢复
+        "sigtest: sigaltstack rc=0",          # M13-07：备用信号栈设置成功
+        "sigtest: handler ran, signos=11 addr=0", # M13-06/07：handler 收到 SIGSEGV + si_addr=0
+        "addr=0 on_altstack=1",               # M13-07：handler 在备用栈上运行
+        "sigtest: SIGSEGV handled on altstack ok" # M13-07：rt_sigreturn 后安全恢复
         # 注：网络（arp/icmp）断言仅放 boot 模式——shell 模式 nowait socket
         # 会在客户端连接前丢弃启动早期日志。
     )
