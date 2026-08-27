@@ -1,0 +1,21 @@
+[package]
+name = "shanshui-guanxin-init"
+version = "0.1.0"
+edition = "2021"
+
+# 独立 crate：不归属上级 workspace（[workspace] 空表声明自成 workspace）
+[workspace]
+
+[[bin]]
+name = "shanshui-guanxin-init"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "s"
+# 关闭 LTO：core 以 kernel code model 编译，与 large model 的 bitcode 模块标志冲突
+lto = false
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]

@@ -1,0 +1,3 @@
+# 内核链接参数已移入 Makefile（RUSTFLAGS env，见 build 目标）：
+# 根 config 若保留 [target.x86_64-unknown-none] rustflags，会与 userspace
+# 同目标配置合并、导致 -Tkernel/linker.ld 泄漏进 userspace 构建。

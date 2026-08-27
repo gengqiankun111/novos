@@ -1,0 +1,12 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=-no-pie",
+    "-C", "link-arg=-static",
+    # 加载地址 0x80_0000_0000（512GB）超出默认 kernel code model 的 ±2GB，
+    # 用 large 模型（绝对寻址用 64 位 movabs）避免 R_X86_64_32S 超范围。
+    "-C", "code-model=large",
+]

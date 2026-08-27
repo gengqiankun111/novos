@@ -1,0 +1,9 @@
+[package]
+name = "shanshui-guanxin-kernel"
+version = "0.1.0"
+edition = "2021"
+
+# 自包含内核：全部依赖均为纯 Rust、无 build script、无宿主编译。
+# UART/PIC 等驱动手写（见 serial.rs / interrupts.rs）。
+[dependencies]
+spin = "0.9"

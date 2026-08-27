@@ -1,4 +1,4 @@
-# Novos‑OS full 模式开发任务清单（M10–M14）
+# 山水观心操作系统 full 模式开发任务清单（M10–M14）
 
 > 本文档把 `DEVELOPMENT.md` 的 M10–M14 拆解到可执行任务级别，给出优先级排序、依赖关系、工作量估算与验收标准。
 > 与 `DESIGN.md` §13 的扩展点一一对应，任务编号中的引用（§13.x）指向设计文档。
@@ -79,10 +79,10 @@ M14-06 containerd / M14-07 image pull → M14-08 apt / M14-10 JVM / M14-11 Pytho
 | M11-09 | 移植 musl 动态链接用户态二进制（libc.so、ld.so、busybox 动态版） | **P1** | M11-03 | 3 | 动态 busybox 的 `ls/cat/echo` 全部可用 |
 | M11-10 | pthread 集成测试：mutex/cond/thread 生命周期 | **P1** | M11-05, M11-08 | 3 | `pthread` 压测 1000 次创建/销毁无死锁、无内存增长 |
 | M11-11 | 内存基线测量与回填（≤38MB） | **P1** | 全部 | 1 | 动态链接进程常驻统计正确，CI 断言通过 |
-| M11-12 | 交叉工具链 + ABI 契约（§15.2）：musl-cross + crt1/crti/crtn + linker script + 版本锁定（宿主机侧）；`docs/abi.md`（syscall **白/黑/灰名单**/结构体/errno/调用约定） | **P1** | M11-03 | 10 | 工具链出静态二进制可在 Novos 加载；abi.md 覆盖 musl syscall 足迹并含黑白名单 |
-| M11-13 | **Novos-SDK 基础镜像**：ld-musl + 头文件 + linker script；第三方应用强制 `--dynamic-linker` 指向 Novos 路径（§15.2） | **P1** | M11-12 | 4 | 动态链接应用经 SDK 构建后不在宿主 syscall 上爆炸 |
-| M11-14 | **novos-check 工具**：ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）（§15.3） | **P1** | M11-12 | 5 | 对 Redis/busybox 扫描输出 syscall 清单与内存预估；白名单外 syscall 报警 |
-| M11-15 | 宿主机交叉编译冒烟：Go（`CGO_ENABLED=0`）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`），产物 OTA 下发 | **P1** | M11-12 | 7 | 三语言静态二进制在 Novos 上运行输出；CI 断言通过 |
+| M11-12 | 交叉工具链 + ABI 契约（§15.2）：musl-cross + crt1/crti/crtn + linker script + 版本锁定（宿主机侧）；`docs/abi.md`（syscall **白/黑/灰名单**/结构体/errno/调用约定） | **P1** | M11-03 | 10 | 工具链出静态二进制可在 山水观心操作系统加载；abi.md 覆盖 musl syscall 足迹并含黑白名单 |
+| M11-13 | **山水观心 SDK 基础镜像**：ld-musl + 头文件 + linker script；第三方应用强制 `--dynamic-linker` 指向 `/shanshui-guanxin/` 路径（§15.2） | **P1** | M11-12 | 4 | 动态链接应用经 SDK 构建后不在宿主 syscall 上爆炸 |
+| M11-14 | **shanshui-guanxin-check 工具**：ELF syscall 依赖扫描 + 内存足迹预估（RSS+虚拟内存）（§15.3） | **P1** | M11-12 | 5 | 对 Redis/busybox 扫描输出 syscall 清单与内存预估；白名单外 syscall 报警 |
+| M11-15 | 宿主机交叉编译冒烟：Go（`CGO_ENABLED=0`）、Rust（`x86_64-unknown-linux-musl`）、C++（`-static -static-libstdc++ -static-libgcc`），产物 OTA 下发 | **P1** | M11-12 | 7 | 三语言静态二进制在 山水观心操作系统上运行输出；CI 断言通过 |
 
 ---
 
@@ -144,14 +144,14 @@ M14-06 containerd / M14-07 image pull → M14-08 apt / M14-10 JVM / M14-11 Pytho
 | M14-03 | DNAT 完整端口映射：`-p 8080:80` 语义（外部访问容器服务） | **P1** | M14-02 | 3 | 宿主 8080 端口 → 容器 80，conntrack 反向还原正确 |
 | M14-04 | OCI runtime spec 解析：`config.json`（rootfs/mounts/capabilities/seccomp/env） | **P0** | M9 | 5 | 解析 busybox OCI bundle 并生成正确的容器创建参数 |
 | M14-05 | 容器创建流程接入扩展：seccomp filter + capabilities + devpts 挂载 | **P1** | M14-04, M12-07/10 | 3 | 容器内进程的 cap 集与 seccomp profile 与 config.json 一致 |
-| M14-06 | 轻量容器运行时：生命周期 + overlayfs 组装 + 状态存储（DESIGN §4.6，**不做 daemon 兼容**） | **P1** | M14-05 | 10 | `novos run/stop` 全流程无泄漏；状态可持久化 |
-| M14-07 | `novos-pull`：registry HTTPS + OCI 解析 + SHA-256 摘要校验 + 层解压 | **P1** | M14-06 | 6 | 从 registry 拉 busybox/redis 镜像，摘要校验通过 |
+| M14-06 | 轻量容器运行时：生命周期 + overlayfs 组装 + 状态存储（DESIGN §4.6，**不做 daemon 兼容**） | **P1** | M14-05 | 10 | `shanshui-guanxin run/stop` 全流程无泄漏；状态可持久化 |
+| M14-07 | `shanshui-guanxin-pull`：registry HTTPS + OCI 解析 + SHA-256 摘要校验 + 层解压 | **P1** | M14-06 | 6 | 从 registry 拉 busybox/redis 镜像，摘要校验通过 |
 | M14-08 | **最小记录锁**：`fcntl(F_SETLK/F_GETLK/F_UNLCK)` 字节区间锁（按文件组织锁表 `{owner,start,len,type}`） | **P0** | M10-05 | 3 | SQLite 并发读写不损坏库文件；`F_GETLK` 查询正确；锁随 fd 关闭/进程退出释放 |
 | M14-09 | 移植 **SQLite**（musl 静态 `libsqlite3.a`，`SQLITE_THREADSAFE=0`）：CRUD + WAL | **P1** | M14-08, M11-03 | 6 | 容器内建表/增删改查通过；`PRAGMA journal_mode=WAL` 重启后数据持久化 |
 | M14-10 | 移植 **Redis**（musl 编译）：`SET/GET`、AOF/RDB、外部 TCP 访问（**部署模板强制**：`--maxmemory 64mb --maxmemory-policy allkeys-lru`、禁 RDB `save ""`、只开 AOF+重写，§18.3） | **P1** | M14-06, M13-11 | 8 | 容器外 `redis-cli SET/GET` 经端口映射可访问；AOF 重启恢复；满内存时按 allkeys-lru 淘汰而非拒绝 |
 | M14-11 | **OTA 升级 + 回滚**：层增量拉取 + 镜像版本切换（出错切回旧层） | **P0** | M14-07 | 8 | 更新镜像层 → 增量拉取 → 重启生效；回滚旧层可恢复；坏镜像不破坏运行态 |
-| M14-12 | HTTPS/TLS 用户态库（mbedTLS 或 Rust TLS），`novos-pull` / P3 包管理走 HTTPS | **P2** | M14-07 | 5 | 从 registry 走 HTTPS 拉镜像成功 |
-| M14-13 | 端到端验收：`novos run redis` + 容器内 SQLite + OTA 演示 + `novos run busybox` | **P0** | M14-09/10/11/06 | 4 | 四项演示命令全部通过；无内核 panic |
+| M14-12 | HTTPS/TLS 用户态库（mbedTLS 或 Rust TLS），`shanshui-guanxin-pull` / P3 包管理走 HTTPS | **P2** | M14-07 | 5 | 从 registry 走 HTTPS 拉镜像成功 |
+| M14-13 | 端到端验收：`shanshui-guanxin run redis` + 容器内 SQLite + OTA 演示 + `shanshui-guanxin run busybox` | **P0** | M14-09/10/11/06 | 4 | 四项演示命令全部通过；无内核 panic |
 | M14-14 | 内存基线最终测量（≤40MB）与文档回填 | **P1** | M14-13 | 1 | full 模式 CI 断言通过，`docs/bench/` 回填 |
 | M14-15 | （P3 可选）apt + dpkg 移植（动态链接 musl 版） | **P3** | M14-06, M11-03 | 6 | `apt update` 成功；小包安装后可执行 |
 | M14-16 | （P3 可选）OpenJDK / CPython 移植（需先评估 musl 构建可行性） | **P3** | M13-13 | 12 | `java -version` / `python3 --version` 输出 |
@@ -241,7 +241,7 @@ P0 之后按里程碑内部顺序跟进 P1；P2 任务（ioctl 扩展、/proc �
 | 里程碑 | 核心验收 | 内存基线 |
 |---|---|---|
 | M10 | ext4 读写 + 重启持久化；MAP_SHARED 共享物理页 | ≤36MB |
-| M11 | 动态链接 hello world；pthread 100 线程无泄漏；宿主机交叉编译 Go/Rust/C++ 冒烟；novos-check 通过 | ≤38MB |
+| M11 | 动态链接 hello world；pthread 100 线程无泄漏；宿主机交叉编译 Go/Rust/C++ 冒烟；shanshui-guanxin-check 通过 | ≤38MB |
 | M12 | `docker exec` PTY 交互；seccomp 拦截 `reboot` | ≤39MB |
 | M13 | 动态 busybox（musl）启动 + SIGSEGV 捕获 + `/proc/self/maps` 正确 | ≤39MB |
-| M14 | `novos run redis` + SQLite 持久化 + OTA 升级回滚 + `novos run busybox` | ≤40MB |
+| M14 | `shanshui-guanxin run redis` + SQLite 持久化 + OTA 升级回滚 + `shanshui-guanxin run busybox` | ≤40MB |
