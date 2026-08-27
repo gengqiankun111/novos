@@ -1193,4 +1193,83 @@ mod status_tests {
             assert!(line.contains(':'), "行缺少冒号: {line}");
         }
     }
+
+    #[test]
+    fn empty_name_and_zero_pid() {
+        let s = status_body("", 0, 0, 0);
+        assert!(s.starts_with("Name:\t\n"), "空任务名");
+        assert!(s.contains("Tgid:\t0\n"));
+        assert!(s.contains("Pid:\t0\n"));
+    }
+
+    #[test]
+    fn max_pid_boundary() {
+        let s = status_body("init", u32::MAX, 0, 0);
+        assert!(s.contains("Tgid:\t4294967295\n"));
+        assert!(s.contains("Pid:\t4294967295\n"));
+    }
+
+    #[test]
+    fn zero_metrics_right_aligned_width6() {
+        let s = status_body("init", 1, 0, 0);
+        assert!(s.contains("VmPeak:\t     0 kB\n"), "VmPeak 右对齐 6 位");
+        assert!(s.contains("VmSize:\t     0 kB\n"));
+        assert!(s.contains("VmRSS:\t     0 kB\n"));
+    }
+
+    #[test]
+    fn large_metrics_no_truncation() {
+        // 4 GiB RSS = 4_194_304 kB，超过宽度 6 也不截断
+        let s = status_body("init", 1, 4_194_304, 8_388_608);
+        assert!(s.contains("VmRSS:\t4194304 kB\n"));
+        assert!(s.contains("VmSize:\t8388608 kB\n"));
+    }
+
+    #[test]
+    fn ends_with_newline_and_no_blank_lines() {
+        let s = status_body("init", 1, 196, 8192);
+        assert!(s.ends_with('\n'), "应以换行结尾");
+        for line in s.lines() {
+            assert!(!line.is_empty(), "不应有空行: {line}");
+        }
+    }
+
+    #[test]
+    fn fields_are_tab_separated() {
+        let s = status_body("init", 42, 0, 0);
+        assert!(s.contains("Name:\tinit\n"));
+        assert!(s.contains("Uid:\t0\t0\t0\t0\n"));
+        assert!(s.contains("Gid:\t0\t0\t0\t0\n"));
+    }
+
+    #[test]
+    fn state_and_static_lines() {
+        let s = status_body("init", 1, 0, 0);
+        assert!(s.contains("State:\tR (running)\n"));
+        assert!(s.contains("Cpus_allowed:\t1\n"));
+        assert!(s.contains("Seccomp:\t0\n"));
+        assert!(s.contains("NoNewPrivs:\t0\n"));
+    }
+
+    #[test]
+    fn pid_tgid_match_and_ppid_zero() {
+        let s = status_body("init", 7, 0, 0);
+        assert!(s.contains("Tgid:\t7\n"));
+        assert!(s.contains("Pid:\t7\n"));
+        assert!(s.contains("PPid:\t0\n"));
+    }
+
+    #[test]
+    fn metric_lines_end_in_kb() {
+        let s = status_body("init", 1, 196, 8192);
+        for l in s.lines().filter(|l| l.starts_with("Vm")) {
+            assert!(l.ends_with(" kB"), "Vm* 行应以 kB 结尾: {l}");
+        }
+    }
+
+    #[test]
+    fn no_carriage_returns() {
+        let s = status_body("init", 1, 0, 0);
+        assert!(!s.contains('\r'), "Linux 风格不应含 CR");
+    }
 }
