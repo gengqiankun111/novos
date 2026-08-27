@@ -112,7 +112,7 @@ if ($Mode -eq "boot") {
         while ($s.DataAvailable) { [void]$sb.Append([char]$s.ReadByte()) }
         # 逐条注入命令并加间隔：guest UART FIFO 只有 16B，一次性注入大批次会
         # 在输出间隙溢出丢字节（shell 等换行卡死）。逐条发送保证不丢命令。
-        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`ntfdtest`nsftest`nsigtest`n"
+        $cmd = "help`nversion`nfdtest`nmkdir /data`nls`nfstest`ncat /etc/motd`nrm /etc/motd`ndtest`nls /dtest`nmkdir /mnt`nmount /mnt`nfstest /mnt/a.txt`nstat /mnt/a.txt`nmkdir /mnt/sub`nls /mnt`nudptest`ntcptest`nhttptest`nforktest`nutstest`ncgtest`novltest`nwhtest`npwd`nshanshui-guanxin`nnatdemo`nfwtest`nproctest`nhealthtest`nblktest`next4test`nfuttest`ntlstest`nclonetest`nreqtest`nmaptest`nstatustest`nexetest`nfdtree`nmtabtest`npktracetest`nsigmasktest`nsigreent`ntfdtest`nsftest`nsigtest`n"
         foreach ($one in ($cmd -split "`n")) {
             if ($one.Length -eq 0) { continue }
             $b = [Text.Encoding]::ASCII.GetBytes($one + "`n")
@@ -286,7 +286,7 @@ if ($Mode -eq "boot") {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
     $output | Set-Content -NoNewline -Path $LogFile
     $needles = @(
-        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | sigmasktest | tfdtest | sftest | sigtest | exit",
+        "commands: help | ls [dir] | cat <f> | echo <text> | mkdir <d> | rm <f> | rmdir <d> | mount <d> | stat <f> | cd <d> | pwd | version | fdtest | fstest [path] | dtest | udptest | tcptest | httptest | forktest | utstest | cgtest | ovltest | whtest | shanshui-guanxin | natdemo | fwtest | proctest | healthtest | blktest | ext4test | futtest | tlstest | clonetest | reqtest | maptest | statustest | exetest | fdtree | mtabtest | pktracetest | sigmasktest | sigreent | tfdtest | sftest | sigtest | exit",
         "Shanshui-guanxin userspace init v0.3.0 (M3)",
         "fdtest: opened /dev/uart fd=3",
         "fdtest: hello via open fd",
@@ -419,6 +419,8 @@ if ($Mode -eq "boot") {
         "pktracetest: packet_trace ok",       # M13：全链路通过
         "sigmasktest: kill rc=0 handled_before_unblock=0", # M13-08：阻塞期不投递
         "sigmasktest: sigprocmask ok",        # M13-08：解除阻塞后投递成功
+        "sigreent: in_handler_mask=512 post_mask=0", # M13-09：handler 期间阻塞 + 返回恢复
+        "sigreent: mask semantics ok",        # M13-09：防重入 + 恢复语义通过
         "tfdtest: timerfd_create fd=400",     # M13-11：timerfd fd 基址 400
         "tfdtest: settime rc=0",              # M13-11：设 20ms 一次性
         "tfdtest: epoll_wait got=1",          # M13-11：epoll 监听到期
