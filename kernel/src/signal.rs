@@ -29,6 +29,13 @@ pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
 /// `SA_*` flags。
 pub const SA_SIGINFO: u64 = 0x4;
+/// `SA_ONSTACK`：handler 在备用信号栈上运行（配合 sigaltstack，M13-07）。
+pub const SA_ONSTACK: u64 = 0x0800_0000;
+/// `stack_t.ss_flags`。
+pub const SS_ONSTACK: u64 = 1;
+pub const SS_DISABLE: u64 = 2;
+/// 备用栈最小字节数（MINSIGSTKSZ 语义）。
+pub const MINSIGSTKSZ: u64 = 2048;
 /// siginfo 的 si_code（SIGSEGV）。
 pub const SEGV_MAPERR: u64 = 1;
 
@@ -41,11 +48,66 @@ pub struct SigState {
     pub pending: u64,
     /// 最近一次投递的信号帧地址（rt_sigreturn 读取已修改的 mcontext）。
     pub frame_addr: u64,
+    /// 备用信号栈（sigaltstack，M13-07）。
+    pub alt_sp: u64,
+    pub alt_size: u64,
+    pub alt_flags: u64,
 }
 const fn sig_state() -> SigState {
-    SigState { handler: SIG_DFL, flags: 0, mask: 0, pending: 0, frame_addr: 0 }
+    SigState {
+        handler: SIG_DFL,
+        flags: 0,
+        mask: 0,
+        pending: 0,
+        frame_addr: 0,
+        alt_sp: 0,
+        alt_size: 0,
+        alt_flags: SS_DISABLE,
+    }
 }
 static mut SIG: [SigState; task::MAX_TASKS] = [sig_state(); task::MAX_TASKS];
+
+/// 用户态 `struct stack_t`（sigaltstack 参数，Linux x86_64 布局，24 字节）。
+#[repr(C)]
+pub struct StackT {
+    pub ss_sp: u64,
+    pub ss_flags: u32,
+    pub _pad: u32,
+    pub ss_size: u64,
+}
+
+/// `sigaltstack(ss, old_ss)`：设置/查询备用信号栈（M13-07）。
+pub fn sys_sigaltstack(ss: u64, old_ss: u64) -> i64 {
+    let st = cur_state();
+    if old_ss != 0 {
+        let old = StackT {
+            ss_sp: st.alt_sp,
+            ss_flags: st.alt_flags as u32,
+            _pad: 0,
+            ss_size: st.alt_size,
+        };
+        // SAFETY: old_ss 为已映射用户地址。
+        unsafe { core::ptr::write_volatile(old_ss as *mut StackT, old) };
+    }
+    if ss != 0 {
+        // SAFETY: ss 为已映射用户地址。
+        let new = unsafe { core::ptr::read_volatile(ss as *const StackT) };
+        if new.ss_flags & SS_DISABLE as u32 != 0 {
+            // 禁用备用栈
+            st.alt_sp = 0;
+            st.alt_size = 0;
+            st.alt_flags = SS_DISABLE;
+        } else {
+            if new.ss_sp == 0 || new.ss_size < MINSIGSTKSZ {
+                return -22; // EINVAL
+            }
+            st.alt_sp = new.ss_sp;
+            st.alt_size = new.ss_size;
+            st.alt_flags = 0;
+        }
+    }
+    0
+}
 
 /// 用户态 `struct sigaction`（与 userspace sigtest 对齐）。
 #[repr(C)]
@@ -126,7 +188,12 @@ pub fn deliver(f: &mut ExceptionFrame, signo: u64, si_code: u64, si_addr: u64) -
     }
     // 有用户 handler：构建信号帧并改写 f
     st.pending &= !bit;
-    let frame_addr = (f.rsp - core::mem::size_of::<SigFrame>() as u64) & !15u64;
+    // M13-07：SA_ONSTACK 且备用栈有效 → 帧放备用栈顶端（栈向下生长），否则主栈
+    let use_alt = st.flags & SA_ONSTACK != 0
+        && st.alt_flags & SS_DISABLE == 0
+        && st.alt_size >= MINSIGSTKSZ;
+    let base = if use_alt { st.alt_sp + st.alt_size } else { f.rsp };
+    let frame_addr = (base - core::mem::size_of::<SigFrame>() as u64) & !15u64;
     st.frame_addr = frame_addr as u64;
     // SAFETY: 用户栈页已映射（恒等映射可写）。
     unsafe {
