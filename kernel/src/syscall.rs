@@ -51,6 +51,7 @@ pub const SYS_FUTEX: u64 = 202;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_RT_SIGACTION: u64 = 13;   // M13-06：注册信号 handler
 pub const SYS_RT_SIGRETURN: u64 = 15;   // M13-06：从信号帧恢复
+pub const SYS_SIGALTSTACK: u64 = 131;   // M13-07：备用信号栈
 /// 山水观心操作系统扩展：添加 NAT 端口映射规则（网关控制面）。
 pub const SYS_NAT_ADD: u64 = 501;
 /// 山水观心操作系统扩展：读 conntrack 统计 { 条目数, 命中数 }。
@@ -196,6 +197,7 @@ fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u6
         SYS_FUTEX => sys_futex(a1, a2, a3, a4, a5),
         SYS_ARCH_PRCTL => sys_arch_prctl(a1, a2),
         SYS_RT_SIGACTION => crate::signal::sys_rt_sigaction(a1, a2, a3, a4) as u64,
+        SYS_SIGALTSTACK => crate::signal::sys_sigaltstack(a1, a2) as u64,
         SYS_NAT_ADD => sys_nat_add(a1, a2, a3),
         SYS_CT_STAT => sys_ct_stat(a1),
         SYS_FW_ADD => sys_fw_add(a1, a2, a3),
