@@ -425,6 +425,9 @@
 
 ## 测试与验收总表
 
+> 单元测试（host `cargo test --lib`）与启动/集成自测的**覆盖范围与用例矩阵**见
+> [docs/TEST-COVERAGE.md](docs/TEST-COVERAGE.md)（status_body 18 用例 + rbtree 8 用例）。
+
 | 里程碑 | 单元测试（host） | 集成测试（QEMU） | 内存断言 |
 |---|---|---|---|
 | M0 | 无 | 串口输出 `boot ok` + panic 快照 | 仅记录 .text |
